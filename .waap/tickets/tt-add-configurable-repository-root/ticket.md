@@ -1,7 +1,7 @@
 +++
 title = "Add Configurable Repository Root"
 creation_date = 2026-06-25T10:55:35Z
-status = "pending"
+status = "completed"
 +++
 
 # Spec Reference
