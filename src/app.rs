@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -17,10 +16,11 @@ use crate::ticket::{
 
 pub(crate) fn run() -> ExitCode {
     let cli = Cli::parse();
+    let repo_root = &cli.repo_root;
 
     match cli.command {
         Command::Check => {
-            let errors = check_waap(Path::new("."));
+            let errors = check_waap(repo_root);
             print_check_result(&cli.output_format, &errors);
             if errors.is_empty() {
                 ExitCode::SUCCESS
@@ -29,7 +29,7 @@ pub(crate) fn run() -> ExitCode {
             }
         }
         Command::Agent { command } => match command {
-            AgentCommand::New { role } => match create_agent(Path::new("."), &role) {
+            AgentCommand::New { role } => match create_agent(repo_root, &role) {
                 Ok(report) => {
                     print_created_agent_report(&cli.output_format, &report);
                     ExitCode::SUCCESS
@@ -40,7 +40,7 @@ pub(crate) fn run() -> ExitCode {
                 }
             },
             AgentCommand::Run { agent_id, system } => {
-                match run_agent(Path::new("."), &cli.output_format, &agent_id, &system) {
+                match run_agent(repo_root, &cli.output_format, &agent_id, &system) {
                     Ok(status) => status,
                     Err(error) => {
                         eprintln!("failed to run agent: {error}");
@@ -48,7 +48,7 @@ pub(crate) fn run() -> ExitCode {
                     }
                 }
             }
-            AgentCommand::Get { agent_id } => match load_agent_content(Path::new("."), &agent_id) {
+            AgentCommand::Get { agent_id } => match load_agent_content(repo_root, &agent_id) {
                 Ok((report, content)) => {
                     print_agent_content_report(&cli.output_format, &report, &content);
                     ExitCode::SUCCESS
@@ -59,7 +59,7 @@ pub(crate) fn run() -> ExitCode {
                 }
             },
             AgentCommand::Stop { agent_id } => {
-                match stop_agents_with_systems(Path::new("."), agent_id.as_deref()) {
+                match stop_agents_with_systems(repo_root, agent_id.as_deref()) {
                     Ok(reports) => {
                         print_agent_stop_report(&cli.output_format, &reports);
                         ExitCode::SUCCESS
@@ -75,7 +75,7 @@ pub(crate) fn run() -> ExitCode {
                 set_status,
                 set_session_id,
             } => match update_agent(
-                Path::new("."),
+                repo_root,
                 &agent_id,
                 set_status.as_ref(),
                 set_session_id.as_deref(),
@@ -89,7 +89,7 @@ pub(crate) fn run() -> ExitCode {
                     ExitCode::from(1)
                 }
             },
-            AgentCommand::List { status } => match list_agents(Path::new("."), status.as_ref()) {
+            AgentCommand::List { status } => match list_agents(repo_root, status.as_ref()) {
                 Ok(reports) => {
                     print_agent_list(&cli.output_format, &reports);
                     ExitCode::SUCCESS
@@ -101,7 +101,7 @@ pub(crate) fn run() -> ExitCode {
             },
         },
         Command::Ticket { command } => match command {
-            TicketCommand::New { title } => match create_ticket(Path::new("."), &title) {
+            TicketCommand::New { title } => match create_ticket(repo_root, &title) {
                 Ok(report) => {
                     print_ticket_report(&cli.output_format, &report);
                     ExitCode::SUCCESS
@@ -111,7 +111,7 @@ pub(crate) fn run() -> ExitCode {
                     ExitCode::from(1)
                 }
             },
-            TicketCommand::Get { ticket_id } => match get_ticket(Path::new("."), &ticket_id) {
+            TicketCommand::Get { ticket_id } => match get_ticket(repo_root, &ticket_id) {
                 Ok(report) => {
                     print_ticket_get_report(&cli.output_format, &report);
                     ExitCode::SUCCESS
@@ -124,7 +124,7 @@ pub(crate) fn run() -> ExitCode {
             TicketCommand::Update {
                 ticket_id,
                 set_status,
-            } => match update_ticket_status(Path::new("."), &ticket_id, &set_status) {
+            } => match update_ticket_status(repo_root, &ticket_id, &set_status) {
                 Ok(report) => {
                     print_updated_ticket_report(&cli.output_format, &report);
                     ExitCode::SUCCESS
@@ -134,7 +134,7 @@ pub(crate) fn run() -> ExitCode {
                     ExitCode::from(1)
                 }
             },
-            TicketCommand::List { status } => match list_tickets(Path::new("."), status.as_ref()) {
+            TicketCommand::List { status } => match list_tickets(repo_root, status.as_ref()) {
                 Ok(reports) => {
                     print_ticket_list(&cli.output_format, &reports);
                     ExitCode::SUCCESS

@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::agent::{AgentRole, AgentStatus, AgentSystem};
@@ -9,6 +11,9 @@ use crate::ticket::TicketStatus;
 pub(crate) struct Cli {
     #[arg(long, value_enum, default_value = "human-readable")]
     pub(crate) output_format: OutputFormat,
+
+    #[arg(long, default_value = ".")]
+    pub(crate) repo_root: PathBuf,
 
     #[command(subcommand)]
     pub(crate) command: Command,
@@ -108,12 +113,26 @@ pub(crate) enum TicketCommand {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use clap::Parser;
 
     use super::{AgentCommand, Cli, Command, TicketCommand};
     use crate::agent::{AgentRole, AgentStatus, AgentSystem};
     use crate::cli::OutputFormat;
     use crate::ticket::TicketStatus;
+
+    #[test]
+    fn parses_repo_root_argument() {
+        let cli = Cli::try_parse_from(["waap", "--repo-root", "/some/path", "check"]).unwrap();
+        assert_eq!(cli.repo_root, PathBuf::from("/some/path"));
+    }
+
+    #[test]
+    fn repo_root_defaults_to_current_directory() {
+        let cli = Cli::try_parse_from(["waap", "check"]).unwrap();
+        assert_eq!(cli.repo_root, PathBuf::from("."));
+    }
 
     #[test]
     fn parses_ticket_get_arguments() {
