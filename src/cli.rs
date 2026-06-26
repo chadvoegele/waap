@@ -91,6 +91,9 @@ pub(crate) enum TicketCommand {
     New {
         #[arg(long)]
         title: String,
+
+        #[arg(long)]
+        depends_on: Vec<String>,
     },
     /// Get an existing ticket.
     Get {

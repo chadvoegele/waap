@@ -101,16 +101,18 @@ pub(crate) fn run() -> ExitCode {
             },
         },
         Command::Ticket { command } => match command {
-            TicketCommand::New { title } => match create_ticket(repo_root, &title) {
-                Ok(report) => {
-                    print_ticket_report(&cli.output_format, &report);
-                    ExitCode::SUCCESS
+            TicketCommand::New { title, depends_on } => {
+                match create_ticket(repo_root, &title, &depends_on) {
+                    Ok(report) => {
+                        print_ticket_report(&cli.output_format, &report);
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => {
+                        eprintln!("failed to create ticket: {error}");
+                        ExitCode::from(1)
+                    }
                 }
-                Err(error) => {
-                    eprintln!("failed to create ticket: {error}");
-                    ExitCode::from(1)
-                }
-            },
+            }
             TicketCommand::Get { ticket_id } => match get_ticket(repo_root, &ticket_id) {
                 Ok(report) => {
                     print_ticket_get_report(&cli.output_format, &report);
