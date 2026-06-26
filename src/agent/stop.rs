@@ -198,8 +198,7 @@ mod tests {
     fn agent_stop_reports_missing_agent() {
         let dir = tempdir().unwrap();
 
-        let error =
-            stop_agents(dir.path(), Some("aa-3881fda0"), noop_abort).unwrap_err();
+        let error = stop_agents(dir.path(), Some("aa-3881fda0"), noop_abort).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
         assert!(error
@@ -271,11 +270,9 @@ mod tests {
         let dir = tempdir().unwrap();
         write_agent_with_session(dir.path(), "aa-3881fda0", "running", Some("ses_123"));
 
-        let error = stop_agents(
-            dir.path(),
-            Some("aa-3881fda0"),
-            |_system, _session_id| Err(io::Error::other("abort failed")),
-        )
+        let error = stop_agents(dir.path(), Some("aa-3881fda0"), |_system, _session_id| {
+            Err(io::Error::other("abort failed"))
+        })
         .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::Other);

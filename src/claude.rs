@@ -18,7 +18,9 @@ pub(crate) struct ClaudeRunCommand {
 
 pub(crate) fn claude_run_config_from_env(repo_root: &Path) -> io::Result<ClaudeRunConfig> {
     Ok(ClaudeRunConfig {
-        model: env::var("CLAUDE_MODEL").ok().filter(|model| !model.is_empty()),
+        model: env::var("CLAUDE_MODEL")
+            .ok()
+            .filter(|model| !model.is_empty()),
         repo_root: repo_root.canonicalize()?,
     })
 }
@@ -88,7 +90,11 @@ mod tests {
     fn claude_run_command_matches_spec() {
         let config = test_claude_config(Some("opus"));
 
-        let command = build_claude_run_command(&config, "aa-3881fda0", "11111111-2222-4333-8444-555555555555");
+        let command = build_claude_run_command(
+            &config,
+            "aa-3881fda0",
+            "11111111-2222-4333-8444-555555555555",
+        );
 
         assert_eq!(
             command,
