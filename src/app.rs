@@ -151,16 +151,29 @@ pub(crate) fn run() -> ExitCode {
                     }
                 }
             }
-            TicketCommand::List { status } => match list_tickets(repo_root, status.as_ref()) {
-                Ok(reports) => {
-                    print_ticket_list(&cli.output_format, &reports);
-                    ExitCode::SUCCESS
+            TicketCommand::List {
+                status,
+                blocked,
+                unblocked,
+            } => {
+                let blocked_filter = if blocked {
+                    Some(true)
+                } else if unblocked {
+                    Some(false)
+                } else {
+                    None
+                };
+                match list_tickets(repo_root, status.as_ref(), blocked_filter) {
+                    Ok(entries) => {
+                        print_ticket_list(&cli.output_format, &entries);
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => {
+                        eprintln!("failed to list tickets: {error}");
+                        ExitCode::from(1)
+                    }
                 }
-                Err(error) => {
-                    eprintln!("failed to list tickets: {error}");
-                    ExitCode::from(1)
-                }
-            },
+            }
         },
     }
 }

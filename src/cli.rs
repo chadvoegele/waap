@@ -115,6 +115,10 @@ pub(crate) enum TicketCommand {
     List {
         #[arg(long, value_enum)]
         status: Option<TicketStatus>,
+        #[arg(long, conflicts_with = "unblocked")]
+        blocked: bool,
+        #[arg(long, conflicts_with = "blocked")]
+        unblocked: bool,
     },
 }
 
@@ -291,7 +295,9 @@ mod tests {
             cli.command,
             Command::Ticket {
                 command: TicketCommand::List {
-                    status: Some(TicketStatus::InProgress)
+                    status: Some(TicketStatus::InProgress),
+                    blocked: false,
+                    unblocked: false,
                 }
             }
         ));
@@ -303,6 +309,46 @@ mod tests {
             Cli::try_parse_from(["waap", "ticket", "list", "--status", "ready"]).unwrap_err();
 
         assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn parses_ticket_list_blocked_argument() {
+        let cli = Cli::try_parse_from(["waap", "ticket", "list", "--blocked"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Ticket {
+                command: TicketCommand::List {
+                    status: None,
+                    blocked: true,
+                    unblocked: false,
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_ticket_list_unblocked_argument() {
+        let cli = Cli::try_parse_from(["waap", "ticket", "list", "--unblocked"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Ticket {
+                command: TicketCommand::List {
+                    status: None,
+                    blocked: false,
+                    unblocked: true,
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn ticket_list_rejects_both_blocked_and_unblocked() {
+        let error = Cli::try_parse_from(["waap", "ticket", "list", "--blocked", "--unblocked"])
+            .unwrap_err();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
