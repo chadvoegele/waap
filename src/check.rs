@@ -8,9 +8,7 @@ use crate::agent::check_agent_frontmatter;
 use crate::agent::is_agent_id;
 use crate::cli::OutputFormat;
 use crate::frontmatter::parse_frontmatter;
-use crate::ticket::check_ticket_frontmatter;
-use crate::ticket::is_ticket_id;
-use crate::ticket::TicketMetadata;
+use crate::ticket::{is_ticket_id, TicketMetadata};
 
 pub(crate) fn check_waap(repo_root: &Path) -> Vec<String> {
     let mut errors = Vec::new();
@@ -119,14 +117,14 @@ pub(crate) fn check_tickets(tickets_dir: &Path, errors: &mut Vec<String>) {
         let ticket_file = path.join("ticket.md");
         if !ticket_file.is_file() {
             errors.push(format!("{label}/ticket.md is required"));
-        } else {
-            check_ticket_frontmatter(&ticket_file, errors);
-            if let Some(frontmatter) = parse_frontmatter(&ticket_file, &mut Vec::new()) {
-                if let Ok(metadata) = TicketMetadata::from_frontmatter(&frontmatter, &ticket_file) {
+        } else if let Some(frontmatter) = parse_frontmatter(&ticket_file, errors) {
+            match TicketMetadata::from_frontmatter(&frontmatter, &ticket_file) {
+                Ok(metadata) => {
                     if let Some(deps) = metadata.depends_on {
                         deps_map.insert(name.clone(), deps);
                     }
                 }
+                Err(mut frontmatter_errors) => errors.append(&mut frontmatter_errors),
             }
         }
     }

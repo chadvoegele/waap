@@ -7,9 +7,8 @@ use serde_json::json;
 use toml::Value;
 
 use crate::frontmatter::{
-    datetime_string, invalid_frontmatter_error, parse_frontmatter, parse_frontmatter_from_contents,
-    require_datetime, require_optional_string_array, require_string, require_string_choice,
-    serialize_record,
+    datetime_string, invalid_frontmatter_error, parse_frontmatter_from_contents, require_datetime,
+    require_optional_string_array, require_string, require_string_choice, serialize_record,
 };
 use crate::ids::{random_hex_chars, toml_string};
 use crate::record::{markdown_body_after_frontmatter, WaapRecordKind};
@@ -91,10 +90,8 @@ impl TicketMetadata {
         lines.push_str(&format!("creation_date = {}\n", self.creation_date));
         lines.push_str(&format!("status = {}\n", toml_string(&self.status)));
         if let Some(deps) = &self.depends_on {
-            if !deps.is_empty() {
-                let items: Vec<String> = deps.iter().map(|d| toml_string(d)).collect();
-                lines.push_str(&format!("depends_on = [{}]\n", items.join(", ")));
-            }
+            let items: Vec<String> = deps.iter().map(|d| toml_string(d)).collect();
+            lines.push_str(&format!("depends_on = [{}]\n", items.join(", ")));
         }
         lines
     }
@@ -165,15 +162,6 @@ pub(crate) fn write_ticket_record(
     }
     let contents = serialize_record(&metadata.to_frontmatter_lines(), body);
     fs::write(path, contents)
-}
-
-pub(crate) fn check_ticket_frontmatter(path: &Path, errors: &mut Vec<String>) {
-    let Some(frontmatter) = parse_frontmatter(path, errors) else {
-        return;
-    };
-    if let Err(mut frontmatter_errors) = TicketMetadata::from_frontmatter(&frontmatter, path) {
-        errors.append(&mut frontmatter_errors);
-    }
 }
 
 #[derive(Debug, PartialEq, Eq)]

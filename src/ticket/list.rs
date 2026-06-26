@@ -20,7 +20,7 @@ fn compute_blocked(report: &TicketReport, status_map: &HashMap<String, String>) 
         None => false,
         Some(deps) => deps
             .iter()
-            .any(|dep_id| status_map.get(dep_id).map_or(true, |s| s != "completed")),
+            .any(|dep_id| status_map.get(dep_id).is_none_or(|s| s != "completed")),
     }
 }
 
