@@ -1,0 +1,313 @@
+use std::io;
+use std::path::Path;
+
+use serde_json::json;
+
+use crate::agent::get::load_agent_report;
+use crate::agent::{
+    agent_report_json, print_agent_report_human, read_agent_record, write_agent_record,
+    AgentReport, AgentStatus,
+};
+use crate::cli::OutputFormat;
+use crate::opencode::{abort_opencode_session, opencode_run_config_from_env};
+use crate::record::{list_record_ids, WaapRecordKind};
+
+pub(crate) const OPENCODE_STOP_NOTE: &str = "Stopped running agents with session_id are aborted through OpenCode; running agents without session_id are marked aborted in metadata only.";
+
+pub(crate) fn print_agent_stop_report(output_format: &OutputFormat, reports: &[AgentReport]) {
+    match output_format {
+        OutputFormat::Json => println!("{}", agent_stop_json(reports)),
+        OutputFormat::HumanReadable => {
+            for report in reports {
+                print_agent_report_human("Stopped agent", report);
+            }
+            println!("Note: {OPENCODE_STOP_NOTE}");
+        }
+    }
+}
+
+pub(crate) fn agent_stop_json(reports: &[AgentReport]) -> serde_json::Value {
+    json!({
+        "stopped_agents": reports.iter().map(agent_report_json).collect::<Vec<_>>(),
+        "opencode_session_note": OPENCODE_STOP_NOTE,
+    })
+}
+
+pub(crate) fn stop_agents_with_opencode(
+    repo_root: &Path,
+    agent_id: Option<&str>,
+) -> io::Result<Vec<AgentReport>> {
+    let mut config = None;
+    stop_agents(repo_root, agent_id, |session_id| {
+        if config.is_none() {
+            config = Some(opencode_run_config_from_env(repo_root)?);
+        }
+        abort_opencode_session(config.as_ref().expect("config initialized"), session_id)
+    })
+}
+
+pub(crate) fn stop_agents(
+    repo_root: &Path,
+    agent_id: Option<&str>,
+    mut abort_session: impl FnMut(&str) -> io::Result<()>,
+) -> io::Result<Vec<AgentReport>> {
+    match agent_id {
+        Some(agent_id) => stop_agent_if_running(repo_root, agent_id, &mut abort_session)
+            .map(|report| report.into_iter().collect::<Vec<AgentReport>>()),
+        None => {
+            let mut reports = Vec::new();
+            for agent_id in list_record_ids(repo_root, WaapRecordKind::Agent)? {
+                if let Some(report) =
+                    stop_agent_if_running(repo_root, &agent_id, &mut abort_session)?
+                {
+                    reports.push(report);
+                }
+            }
+            Ok(reports)
+        }
+    }
+}
+
+fn stop_agent_if_running(
+    repo_root: &Path,
+    agent_id: &str,
+    abort_session: &mut impl FnMut(&str) -> io::Result<()>,
+) -> io::Result<Option<AgentReport>> {
+    let report = load_agent_report(repo_root, agent_id)?;
+    if report.status != AgentStatus::Running.as_str() {
+        return Ok(None);
+    }
+
+    if let Some(session_id) = &report.session_id {
+        abort_session(session_id)?;
+    }
+
+    let (mut metadata, body) = read_agent_record(repo_root, agent_id)?;
+    metadata.status = AgentStatus::Aborted.as_str().to_string();
+    write_agent_record(repo_root, agent_id, &metadata, &body)?;
+
+    load_agent_report(repo_root, agent_id).map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    use super::{agent_stop_json, stop_agents, OPENCODE_STOP_NOTE};
+    use crate::agent::get::load_agent_report;
+    use crate::agent::AgentReport;
+
+    #[test]
+    fn agent_stop_stops_one_running_agent() {
+        let dir = tempdir().unwrap();
+        write_agent_with_session(dir.path(), "aa-3881fda0", "running", Some("ses_123"));
+        write_agent(dir.path(), "aa-00000001", "running");
+
+        let reports = stop_agents(dir.path(), Some("aa-3881fda0"), noop_abort).unwrap();
+
+        assert_eq!(agent_ids(&reports), vec!["aa-3881fda0"]);
+        assert_eq!(reports[0].status, "aborted");
+        assert_eq!(reports[0].session_id.as_deref(), Some("ses_123"));
+        assert_eq!(
+            load_agent_report(dir.path(), "aa-3881fda0").unwrap().status,
+            "aborted"
+        );
+        assert_eq!(
+            load_agent_report(dir.path(), "aa-00000001").unwrap().status,
+            "running"
+        );
+    }
+
+    #[test]
+    fn agent_stop_all_stops_all_running_agents() {
+        let dir = tempdir().unwrap();
+        write_agent(dir.path(), "aa-00000003", "running");
+        write_agent(dir.path(), "aa-00000001", "running");
+
+        let reports = stop_agents(dir.path(), None, noop_abort).unwrap();
+
+        assert_eq!(agent_ids(&reports), vec!["aa-00000001", "aa-00000003"]);
+        assert_eq!(
+            load_agent_report(dir.path(), "aa-00000001").unwrap().status,
+            "aborted"
+        );
+        assert_eq!(
+            load_agent_report(dir.path(), "aa-00000003").unwrap().status,
+            "aborted"
+        );
+    }
+
+    #[test]
+    fn agent_stop_filters_only_running_agents() {
+        let dir = tempdir().unwrap();
+        write_agent(dir.path(), "aa-00000001", "ready");
+        write_agent(dir.path(), "aa-00000002", "running");
+        write_agent(dir.path(), "aa-00000003", "completed");
+        write_agent(dir.path(), "aa-00000004", "aborted");
+
+        let reports = stop_agents(dir.path(), None, noop_abort).unwrap();
+
+        assert_eq!(agent_ids(&reports), vec!["aa-00000002"]);
+        assert_eq!(
+            load_agent_report(dir.path(), "aa-00000001").unwrap().status,
+            "ready"
+        );
+        assert_eq!(
+            load_agent_report(dir.path(), "aa-00000002").unwrap().status,
+            "aborted"
+        );
+        assert_eq!(
+            load_agent_report(dir.path(), "aa-00000003").unwrap().status,
+            "completed"
+        );
+        assert_eq!(
+            load_agent_report(dir.path(), "aa-00000004").unwrap().status,
+            "aborted"
+        );
+    }
+
+    #[test]
+    fn agent_stop_existing_non_running_agent_is_noop() {
+        let dir = tempdir().unwrap();
+        write_agent(dir.path(), "aa-3881fda0", "completed");
+
+        let reports = stop_agents(dir.path(), Some("aa-3881fda0"), noop_abort).unwrap();
+
+        assert!(reports.is_empty());
+        assert_eq!(
+            load_agent_report(dir.path(), "aa-3881fda0").unwrap().status,
+            "completed"
+        );
+    }
+
+    #[test]
+    fn agent_stop_reports_invalid_agent_id() {
+        let dir = tempdir().unwrap();
+
+        let error = stop_agents(dir.path(), Some("not-an-agent"), noop_abort).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("not a valid agent id"));
+    }
+
+    #[test]
+    fn agent_stop_reports_missing_agent() {
+        let dir = tempdir().unwrap();
+
+        let error = stop_agents(dir.path(), Some("aa-3881fda0"), noop_abort).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(error
+            .to_string()
+            .contains(".waap/agents/aa-3881fda0/agent.md"));
+    }
+
+    #[test]
+    fn agent_stop_aborts_opencode_sessions_for_running_agents() {
+        let dir = tempdir().unwrap();
+        write_agent_with_session(dir.path(), "aa-00000001", "running", Some("ses_123"));
+        write_agent_with_session(dir.path(), "aa-00000002", "ready", Some("ses_ready"));
+        let mut aborted = Vec::new();
+
+        let reports = stop_agents(dir.path(), None, |session_id| {
+            aborted.push(session_id.to_string());
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(agent_ids(&reports), vec!["aa-00000001"]);
+        assert_eq!(aborted, vec!["ses_123"]);
+    }
+
+    #[test]
+    fn agent_stop_does_not_mark_aborted_when_opencode_abort_fails() {
+        let dir = tempdir().unwrap();
+        write_agent_with_session(dir.path(), "aa-3881fda0", "running", Some("ses_123"));
+
+        let error = stop_agents(dir.path(), Some("aa-3881fda0"), |_| {
+            Err(io::Error::other("abort failed"))
+        })
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(
+            load_agent_report(dir.path(), "aa-3881fda0").unwrap().status,
+            "running"
+        );
+    }
+
+    #[test]
+    fn agent_stop_json_has_expected_shape() {
+        let reports = vec![AgentReport {
+            agent_id: "aa-3881fda0".to_string(),
+            path: PathBuf::from(".waap/agents/aa-3881fda0/agent.md"),
+            creation_date: "2026-06-18T15:00:34Z".to_string(),
+            role: "developer".to_string(),
+            status: "aborted".to_string(),
+            session_id: Some("ses_123".to_string()),
+            file_size: 456,
+        }];
+
+        assert_eq!(
+            agent_stop_json(&reports),
+            json!({
+                "stopped_agents": [
+                    {
+                        "agent_id": "aa-3881fda0",
+                        "path": ".waap/agents/aa-3881fda0/agent.md",
+                        "metadata": {
+                            "creation_date": "2026-06-18T15:00:34Z",
+                            "role": "developer",
+                            "status": "aborted",
+                            "session_id": "ses_123",
+                        },
+                        "file_size": 456,
+                    }
+                ],
+                "opencode_session_note": OPENCODE_STOP_NOTE,
+            })
+        );
+    }
+
+    fn agent_ids(reports: &[AgentReport]) -> Vec<&str> {
+        reports
+            .iter()
+            .map(|report| report.agent_id.as_str())
+            .collect()
+    }
+
+    fn write_agent(repo_root: &Path, agent_id: &str, status: &str) {
+        write_agent_with_session(repo_root, agent_id, status, None);
+    }
+
+    fn write_agent_with_session(
+        repo_root: &Path,
+        agent_id: &str,
+        status: &str,
+        session_id: Option<&str>,
+    ) {
+        let session_id = session_id
+            .map(|session_id| format!("session_id = \"{session_id}\"\n"))
+            .unwrap_or_default();
+        write_file(
+            &repo_root.join(format!(".waap/agents/{agent_id}/agent.md")),
+            &format!(
+                "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"{status}\"\n{session_id}+++\n\n# Purpose\n"
+            ),
+        );
+    }
+
+    fn write_file(path: &Path, contents: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
+    fn noop_abort(_: &str) -> io::Result<()> {
+        Ok(())
+    }
+}
