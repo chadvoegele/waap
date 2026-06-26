@@ -1,7 +1,7 @@
 +++
 title = "waap ticket list --blocked and --unblocked filters"
 creation_date = 2026-06-26T21:52:55Z
-status = "pending"
+status = "completed"
 depends_on = ["tt-add-dependson-to-ticket-schema"]
 +++
 

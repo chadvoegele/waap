@@ -1,7 +1,7 @@
 +++
 title = "Validate ticket dependencies in waap check"
 creation_date = 2026-06-26T21:52:30Z
-status = "pending"
+status = "completed"
 depends_on = ["tt-add-dependson-to-ticket-schema"]
 +++
 

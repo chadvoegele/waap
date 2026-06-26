@@ -1,7 +1,7 @@
 +++
 title = "Add depends_on to ticket schema"
 creation_date = 2026-06-26T21:52:23Z
-status = "pending"
+status = "completed"
 +++
 
 # Spec Reference

@@ -1,7 +1,7 @@
 +++
 title = "waap ticket new --depends-on flag"
 creation_date = 2026-06-26T21:52:38Z
-status = "pending"
+status = "completed"
 depends_on = ["tt-add-dependson-to-ticket-schema"]
 +++
 
