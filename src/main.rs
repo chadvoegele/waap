@@ -1,6 +1,7 @@
 mod agent;
 mod app;
 mod check;
+mod claude;
 mod cli;
 mod frontmatter;
 mod ids;

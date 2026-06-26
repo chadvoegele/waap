@@ -6,13 +6,12 @@ use serde_json::json;
 use crate::agent::get::load_agent_report;
 use crate::agent::{
     agent_report_json, print_agent_report_human, read_agent_record, write_agent_record,
-    AgentReport, AgentStatus,
+    AgentReport, AgentStatus, AgentSystem,
 };
+use crate::claude::kill_claude_session;
 use crate::cli::OutputFormat;
 use crate::opencode::{abort_opencode_session, opencode_run_config_from_env};
 use crate::record::{list_record_ids, WaapRecordKind};
-
-pub(crate) const OPENCODE_STOP_NOTE: &str = "Stopped running agents with session_id are aborted through OpenCode; running agents without session_id are marked aborted in metadata only.";
 
 pub(crate) fn print_agent_stop_report(output_format: &OutputFormat, reports: &[AgentReport]) {
     match output_format {
@@ -21,7 +20,6 @@ pub(crate) fn print_agent_stop_report(output_format: &OutputFormat, reports: &[A
             for report in reports {
                 print_agent_report_human("Stopped agent", report);
             }
-            println!("Note: {OPENCODE_STOP_NOTE}");
         }
     }
 }
@@ -29,37 +27,37 @@ pub(crate) fn print_agent_stop_report(output_format: &OutputFormat, reports: &[A
 pub(crate) fn agent_stop_json(reports: &[AgentReport]) -> serde_json::Value {
     json!({
         "stopped_agents": reports.iter().map(agent_report_json).collect::<Vec<_>>(),
-        "opencode_session_note": OPENCODE_STOP_NOTE,
     })
 }
 
-pub(crate) fn stop_agents_with_opencode(
+pub(crate) fn stop_agents_with_systems(
     repo_root: &Path,
     agent_id: Option<&str>,
 ) -> io::Result<Vec<AgentReport>> {
     let mut config = None;
-    stop_agents(repo_root, agent_id, |session_id| {
-        if config.is_none() {
-            config = Some(opencode_run_config_from_env(repo_root)?);
+    stop_agents(repo_root, agent_id, |system, session_id| match system {
+        AgentSystem::Opencode => {
+            if config.is_none() {
+                config = Some(opencode_run_config_from_env(repo_root)?);
+            }
+            abort_opencode_session(config.as_ref().expect("config initialized"), session_id)
         }
-        abort_opencode_session(config.as_ref().expect("config initialized"), session_id)
+        AgentSystem::Claude => kill_claude_session(session_id),
     })
 }
 
 pub(crate) fn stop_agents(
     repo_root: &Path,
     agent_id: Option<&str>,
-    mut abort_session: impl FnMut(&str) -> io::Result<()>,
+    mut abort: impl FnMut(&AgentSystem, &str) -> io::Result<()>,
 ) -> io::Result<Vec<AgentReport>> {
     match agent_id {
-        Some(agent_id) => stop_agent_if_running(repo_root, agent_id, &mut abort_session)
+        Some(agent_id) => stop_agent_if_running(repo_root, agent_id, &mut abort)
             .map(|report| report.into_iter().collect::<Vec<AgentReport>>()),
         None => {
             let mut reports = Vec::new();
             for agent_id in list_record_ids(repo_root, WaapRecordKind::Agent)? {
-                if let Some(report) =
-                    stop_agent_if_running(repo_root, &agent_id, &mut abort_session)?
-                {
+                if let Some(report) = stop_agent_if_running(repo_root, &agent_id, &mut abort)? {
                     reports.push(report);
                 }
             }
@@ -71,18 +69,19 @@ pub(crate) fn stop_agents(
 fn stop_agent_if_running(
     repo_root: &Path,
     agent_id: &str,
-    abort_session: &mut impl FnMut(&str) -> io::Result<()>,
+    abort: &mut impl FnMut(&AgentSystem, &str) -> io::Result<()>,
 ) -> io::Result<Option<AgentReport>> {
     let report = load_agent_report(repo_root, agent_id)?;
     if report.status != AgentStatus::Running.as_str() {
         return Ok(None);
     }
 
+    let (mut metadata, body) = read_agent_record(repo_root, agent_id)?;
     if let Some(session_id) = &report.session_id {
-        abort_session(session_id)?;
+        let system = metadata.system.as_ref().unwrap_or(&AgentSystem::Opencode);
+        abort(system, session_id)?;
     }
 
-    let (mut metadata, body) = read_agent_record(repo_root, agent_id)?;
     metadata.status = AgentStatus::Aborted.as_str().to_string();
     write_agent_record(repo_root, agent_id, &metadata, &body)?;
 
@@ -98,9 +97,9 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{agent_stop_json, stop_agents, OPENCODE_STOP_NOTE};
+    use super::{agent_stop_json, stop_agents};
     use crate::agent::get::load_agent_report;
-    use crate::agent::AgentReport;
+    use crate::agent::{AgentReport, AgentSystem};
 
     #[test]
     fn agent_stop_stops_one_running_agent() {
@@ -199,7 +198,8 @@ mod tests {
     fn agent_stop_reports_missing_agent() {
         let dir = tempdir().unwrap();
 
-        let error = stop_agents(dir.path(), Some("aa-3881fda0"), noop_abort).unwrap_err();
+        let error =
+            stop_agents(dir.path(), Some("aa-3881fda0"), noop_abort).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
         assert!(error
@@ -214,7 +214,7 @@ mod tests {
         write_agent_with_session(dir.path(), "aa-00000002", "ready", Some("ses_ready"));
         let mut aborted = Vec::new();
 
-        let reports = stop_agents(dir.path(), None, |session_id| {
+        let reports = stop_agents(dir.path(), None, |_system, session_id| {
             aborted.push(session_id.to_string());
             Ok(())
         })
@@ -225,13 +225,57 @@ mod tests {
     }
 
     #[test]
+    fn agent_stop_kills_claude_process_instead_of_opencode_abort() {
+        let dir = tempdir().unwrap();
+        write_claude_agent_with_session(dir.path(), "aa-00000001", "running", "ses_claude");
+        let mut aborted = Vec::new();
+        let mut killed = Vec::new();
+
+        let reports = stop_agents(dir.path(), None, |system, session_id| {
+            match system {
+                AgentSystem::Opencode => aborted.push(session_id.to_string()),
+                AgentSystem::Claude => killed.push(session_id.to_string()),
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(agent_ids(&reports), vec!["aa-00000001"]);
+        assert!(aborted.is_empty());
+        assert_eq!(killed, vec!["ses_claude"]);
+        assert_eq!(
+            load_agent_report(dir.path(), "aa-00000001").unwrap().status,
+            "aborted"
+        );
+    }
+
+    #[test]
+    fn agent_stop_does_not_mark_aborted_when_claude_kill_fails() {
+        let dir = tempdir().unwrap();
+        write_claude_agent_with_session(dir.path(), "aa-00000001", "running", "ses_claude");
+
+        let error = stop_agents(dir.path(), Some("aa-00000001"), |_system, _session_id| {
+            Err(io::Error::other("kill failed"))
+        })
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(
+            load_agent_report(dir.path(), "aa-00000001").unwrap().status,
+            "running"
+        );
+    }
+
+    #[test]
     fn agent_stop_does_not_mark_aborted_when_opencode_abort_fails() {
         let dir = tempdir().unwrap();
         write_agent_with_session(dir.path(), "aa-3881fda0", "running", Some("ses_123"));
 
-        let error = stop_agents(dir.path(), Some("aa-3881fda0"), |_| {
-            Err(io::Error::other("abort failed"))
-        })
+        let error = stop_agents(
+            dir.path(),
+            Some("aa-3881fda0"),
+            |_system, _session_id| Err(io::Error::other("abort failed")),
+        )
         .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::Other);
@@ -269,7 +313,6 @@ mod tests {
                         "file_size": 456,
                     }
                 ],
-                "opencode_session_note": OPENCODE_STOP_NOTE,
             })
         );
     }
@@ -302,12 +345,26 @@ mod tests {
         );
     }
 
+    fn write_claude_agent_with_session(
+        repo_root: &Path,
+        agent_id: &str,
+        status: &str,
+        session_id: &str,
+    ) {
+        write_file(
+            &repo_root.join(format!(".waap/agents/{agent_id}/agent.md")),
+            &format!(
+                "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"{status}\"\nsession_id = \"{session_id}\"\nsystem = \"claude\"\n+++\n\n# Purpose\n"
+            ),
+        );
+    }
+
     fn write_file(path: &Path, contents: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, contents).unwrap();
     }
 
-    fn noop_abort(_: &str) -> io::Result<()> {
+    fn noop_abort(_: &AgentSystem, _: &str) -> io::Result<()> {
         Ok(())
     }
 }

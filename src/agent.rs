@@ -8,7 +8,8 @@ use toml::Value;
 
 use crate::frontmatter::{
     datetime_string, invalid_frontmatter_error, parse_frontmatter, parse_frontmatter_from_contents,
-    require_datetime, require_optional_string, require_string_choice, serialize_record,
+    require_datetime, require_optional_string, require_optional_string_choice,
+    require_string_choice, serialize_record,
 };
 use crate::ids::{random_hex_chars, toml_string};
 use crate::record::{markdown_body_after_frontmatter, WaapRecordKind};
@@ -24,7 +25,7 @@ pub(crate) use get::{load_agent_content, load_agent_report, print_agent_content_
 pub(crate) use list::{list_agents, print_agent_list};
 pub(crate) use new::{create_agent, print_created_agent_report};
 pub(crate) use run::run_agent;
-pub(crate) use stop::{print_agent_stop_report, stop_agents_with_opencode};
+pub(crate) use stop::{print_agent_stop_report, stop_agents_with_systems};
 pub(crate) use update::{print_updated_agent_report, update_agent};
 
 pub(crate) struct AgentMetadata {
@@ -32,6 +33,7 @@ pub(crate) struct AgentMetadata {
     pub(crate) role: String,
     pub(crate) status: String,
     pub(crate) session_id: Option<String>,
+    pub(crate) system: Option<AgentSystem>,
 }
 
 impl AgentMetadata {
@@ -47,6 +49,7 @@ impl AgentMetadata {
             &mut errors,
         );
         require_optional_string(value, "session_id", path, &mut errors);
+        require_optional_string_choice(value, "system", &AgentSystem::labels(), path, &mut errors);
         if !errors.is_empty() {
             return Err(errors);
         }
@@ -66,6 +69,10 @@ impl AgentMetadata {
                 .get("session_id")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            system: value
+                .get("system")
+                .and_then(Value::as_str)
+                .and_then(AgentSystem::parse),
         })
     }
 
@@ -76,6 +83,9 @@ impl AgentMetadata {
         lines.push_str(&format!("status = {}\n", toml_string(&self.status)));
         if let Some(session_id) = &self.session_id {
             lines.push_str(&format!("session_id = {}\n", toml_string(session_id)));
+        }
+        if let Some(system) = &self.system {
+            lines.push_str(&format!("system = {}\n", toml_string(system.as_str())));
         }
         lines
     }
@@ -187,6 +197,36 @@ impl AgentStatus {
             AgentStatus::Completed => "completed",
             AgentStatus::Aborted => "aborted",
         }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub(crate) enum AgentSystem {
+    #[default]
+    Opencode,
+    Claude,
+}
+
+impl AgentSystem {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            AgentSystem::Opencode => "opencode",
+            AgentSystem::Claude => "claude",
+        }
+    }
+
+    pub(crate) fn parse(label: &str) -> Option<AgentSystem> {
+        AgentSystem::value_variants()
+            .iter()
+            .find(|system| system.as_str() == label)
+            .cloned()
+    }
+
+    pub(crate) fn labels() -> Vec<&'static str> {
+        AgentSystem::value_variants()
+            .iter()
+            .map(AgentSystem::as_str)
+            .collect()
     }
 }
 

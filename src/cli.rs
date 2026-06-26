@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::agent::{AgentRole, AgentStatus};
+use crate::agent::{AgentRole, AgentStatus, AgentSystem};
 use crate::ticket::TicketStatus;
 
 #[derive(Debug, Parser)]
@@ -43,10 +43,14 @@ pub(crate) enum AgentCommand {
         #[arg(long, value_enum)]
         role: AgentRole,
     },
-    /// Run an existing agent with opencode.
+    /// Run an existing agent with the selected agent system.
     Run {
         #[arg(long)]
         agent_id: String,
+
+        /// Agent system used to run the agent.
+        #[arg(long, value_enum, default_value = "opencode")]
+        system: AgentSystem,
     },
     /// Get an existing agent's metadata and markdown content.
     Get {
@@ -107,7 +111,7 @@ mod tests {
     use clap::Parser;
 
     use super::{AgentCommand, Cli, Command, TicketCommand};
-    use crate::agent::{AgentRole, AgentStatus};
+    use crate::agent::{AgentRole, AgentStatus, AgentSystem};
     use crate::cli::OutputFormat;
     use crate::ticket::TicketStatus;
 
@@ -269,9 +273,52 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Agent {
-                command: AgentCommand::Run { agent_id }
+                command: AgentCommand::Run {
+                    agent_id,
+                    system: AgentSystem::Opencode,
+                }
             } if agent_id == "aa-3881fda0"
         ));
+    }
+
+    #[test]
+    fn parses_agent_run_system_argument() {
+        let cli = Cli::try_parse_from([
+            "waap",
+            "agent",
+            "run",
+            "--agent-id",
+            "aa-3881fda0",
+            "--system",
+            "claude",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Agent {
+                command: AgentCommand::Run {
+                    agent_id,
+                    system: AgentSystem::Claude,
+                }
+            } if agent_id == "aa-3881fda0"
+        ));
+    }
+
+    #[test]
+    fn agent_run_rejects_invalid_system_argument() {
+        let error = Cli::try_parse_from([
+            "waap",
+            "agent",
+            "run",
+            "--agent-id",
+            "aa-3881fda0",
+            "--system",
+            "codex",
+        ])
+        .unwrap_err();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
     }
 
     #[test]

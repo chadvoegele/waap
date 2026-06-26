@@ -59,6 +59,7 @@ creation_date = 2026-06-18T15:00:34Z
 role = "developer"  # developer, planner
 status = "ready"  # ready, running, completed, aborted
 session_id = "ses_9032dd..."  # add after agent is started
+system = "opencode"  # opencode, claude; add after agent is started
 +++
 
 # Purpose
@@ -197,6 +198,8 @@ Missing state is considered valid. Only validate directories and files that alre
     - Parameters
         - Required
             - `--agent-id`
+        - Optional
+            - `--system`  # agent system used to run the agent: opencode, claude. Defaults to opencode.
     - Streams
         - stdout: reports agent path, metadata
 - stop
@@ -234,7 +237,11 @@ Missing state is considered valid. Only validate directories and files that alre
 
 ## Running Agents
 
-To run waap agents, we'll use opencode with a goal command. For agent with $agent_id, we'll set a goal to complete the instructions in `/.waap/agents/$agent_id/agent.md`.
+Agents can be run with different agent systems, selected with `waap agent run --system`. Each system is given the same goal: complete the instructions in `/.waap/agents/$agent_id/agent.md`. The chosen system and the resulting session id are recorded in the agent metadata.
+
+### opencode (default)
+
+opencode runs against a remote server. Create a session, then submit a goal command attached to that session.
 
 ```
 opencode run --attach "$OPENCODE_SERVER_URL" \
@@ -248,7 +255,22 @@ opencode run --attach "$OPENCODE_SERVER_URL" \
   "Complete when instructions in /.waap/agents/${agent_id}/agent.md are satisfied"
 ```
 
-Extract the opencode session id from the response and update the agent metadata with `waap agent update --agent-id $agent_id --set-session-id $session_id`
+Extract the opencode session id from the response and record it in the agent metadata.
+
+### claude
+
+claude runs as a local headless process (`claude -p`) in the repository root. There is no remote server: waap mints the session id itself (a UUID) and passes it via `--session-id`, so the same id can be recorded in the agent metadata. The goal is passed directly as the prompt. `--permission-mode auto` lets the agent act without interactive prompts. The model is optional and read from `$CLAUDE_MODEL`; claude handles its own authentication.
+
+```
+claude -p \
+  --session-id "$session_id" \
+  --output-format json \
+  --permission-mode auto \
+  --model "$CLAUDE_MODEL" \
+  "Complete when instructions in /.waap/agents/${agent_id}/agent.md are satisfied"
+```
+
+claude has no remote session to abort, but the session id is part of the local process's command line (`--session-id <uuid>`), so `waap agent stop` aborts a claude agent by signalling the matching local process (e.g. `pkill -TERM -f <session_id>`) before marking it `aborted`.
 
 
 ## Waap Skill

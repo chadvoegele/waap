@@ -6,7 +6,7 @@ use clap::Parser;
 use crate::agent::{
     create_agent, list_agents, load_agent_content, print_agent_content_report, print_agent_list,
     print_agent_stop_report, print_created_agent_report, print_updated_agent_report, run_agent,
-    stop_agents_with_opencode, update_agent,
+    stop_agents_with_systems, update_agent,
 };
 use crate::check::{check_waap, print_check_result};
 use crate::cli::{AgentCommand, Cli, Command, TicketCommand};
@@ -39,8 +39,8 @@ pub(crate) fn run() -> ExitCode {
                     ExitCode::from(1)
                 }
             },
-            AgentCommand::Run { agent_id } => {
-                match run_agent(Path::new("."), &cli.output_format, &agent_id) {
+            AgentCommand::Run { agent_id, system } => {
+                match run_agent(Path::new("."), &cli.output_format, &agent_id, &system) {
                     Ok(status) => status,
                     Err(error) => {
                         eprintln!("failed to run agent: {error}");
@@ -59,7 +59,7 @@ pub(crate) fn run() -> ExitCode {
                 }
             },
             AgentCommand::Stop { agent_id } => {
-                match stop_agents_with_opencode(Path::new("."), agent_id.as_deref()) {
+                match stop_agents_with_systems(Path::new("."), agent_id.as_deref()) {
                     Ok(reports) => {
                         print_agent_stop_report(&cli.output_format, &reports);
                         ExitCode::SUCCESS

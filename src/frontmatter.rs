@@ -107,6 +107,28 @@ pub(crate) fn require_optional_string(
     }
 }
 
+pub(crate) fn require_optional_string_choice(
+    frontmatter: &Value,
+    key: &str,
+    choices: &[&str],
+    path: &Path,
+    errors: &mut Vec<String>,
+) {
+    match frontmatter.get(key).map(Value::as_str) {
+        None => {}
+        Some(Some(value)) if choices.contains(&value) => {}
+        Some(Some(value)) => errors.push(format!(
+            "{} frontmatter field {key} has invalid value {value:?}; expected one of {}",
+            path.display(),
+            choices.join(", ")
+        )),
+        Some(None) => errors.push(format!(
+            "{} frontmatter field {key} must be a string",
+            path.display()
+        )),
+    }
+}
+
 pub(crate) fn require_string_choice(
     frontmatter: &Value,
     key: &str,

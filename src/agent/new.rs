@@ -40,6 +40,7 @@ pub(crate) fn create_agent_with_markdown(
         role: role.as_str().to_string(),
         status: "ready".to_string(),
         session_id: None,
+        system: None,
     };
     write_agent_record(repo_root, &agent_id, &metadata, &format!("\n{markdown}"))?;
     let path = agent_path(repo_root, &agent_id);
