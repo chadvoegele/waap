@@ -143,6 +143,7 @@ status = \"ready\"
                 title: "One".to_string(),
                 creation_date: "2026-06-22T12:00:00Z".to_string(),
                 status: "pending".to_string(),
+                depends_on: None,
                 file_size: 123,
             },
             TicketReport {
@@ -151,6 +152,7 @@ status = \"ready\"
                 title: "Two".to_string(),
                 creation_date: "2026-06-22T12:00:00Z".to_string(),
                 status: "completed".to_string(),
+                depends_on: None,
                 file_size: 456,
             },
         ];

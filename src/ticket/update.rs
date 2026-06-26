@@ -31,6 +31,7 @@ pub(crate) fn update_ticket_status(
         title: metadata.title,
         creation_date: metadata.creation_date,
         status: metadata.status,
+        depends_on: metadata.depends_on,
         file_size: fs::metadata(&path)?.len(),
     })
 }
@@ -107,6 +108,7 @@ mod tests {
             title: "New Ticket".to_string(),
             creation_date: "2026-06-22T12:00:00Z".to_string(),
             status: "pending".to_string(),
+            depends_on: None,
             file_size: 123,
         };
 
@@ -119,6 +121,7 @@ mod tests {
                     "title": "New Ticket",
                     "creation_date": "2026-06-22T12:00:00Z",
                     "status": "pending",
+                    "depends_on": null,
                 },
                 "file_size": 123,
             })

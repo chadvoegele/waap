@@ -8,7 +8,8 @@ use toml::Value;
 
 use crate::frontmatter::{
     datetime_string, invalid_frontmatter_error, parse_frontmatter, parse_frontmatter_from_contents,
-    require_datetime, require_string, require_string_choice, serialize_record,
+    require_datetime, require_optional_string_array, require_string, require_string_choice,
+    serialize_record,
 };
 use crate::ids::{random_hex_chars, toml_string};
 use crate::record::{markdown_body_after_frontmatter, WaapRecordKind};
@@ -27,6 +28,7 @@ pub(crate) struct TicketMetadata {
     pub(crate) title: String,
     pub(crate) creation_date: String,
     pub(crate) status: String,
+    pub(crate) depends_on: Option<Vec<String>>,
 }
 
 impl TicketMetadata {
@@ -41,9 +43,20 @@ impl TicketMetadata {
             path,
             &mut errors,
         );
+        require_optional_string_array(value, "depends_on", path, &mut errors);
         if !errors.is_empty() {
             return Err(errors);
         }
+        let depends_on = value
+            .get("depends_on")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|v| !v.is_empty());
         Ok(Self {
             title: value
                 .get("title")
@@ -56,6 +69,7 @@ impl TicketMetadata {
                 .and_then(Value::as_str)
                 .expect("validated status")
                 .to_string(),
+            depends_on,
         })
     }
 
@@ -64,6 +78,12 @@ impl TicketMetadata {
         lines.push_str(&format!("title = {}\n", toml_string(&self.title)));
         lines.push_str(&format!("creation_date = {}\n", self.creation_date));
         lines.push_str(&format!("status = {}\n", toml_string(&self.status)));
+        if let Some(deps) = &self.depends_on {
+            if !deps.is_empty() {
+                let items: Vec<String> = deps.iter().map(|d| toml_string(d)).collect();
+                lines.push_str(&format!("depends_on = [{}]\n", items.join(", ")));
+            }
+        }
         lines
     }
 }
@@ -151,6 +171,7 @@ pub(crate) struct TicketReport {
     pub(crate) title: String,
     pub(crate) creation_date: String,
     pub(crate) status: String,
+    pub(crate) depends_on: Option<Vec<String>>,
     pub(crate) file_size: u64,
 }
 
@@ -268,10 +289,19 @@ pub(crate) fn print_ticket_report_human(header: &str, report: &TicketReport) {
     println!("Title: {}", report.title);
     println!("Creation date: {}", report.creation_date);
     println!("Status: {}", report.status);
+    if let Some(deps) = &report.depends_on {
+        if !deps.is_empty() {
+            println!("Depends on: {}", deps.join(", "));
+        }
+    }
     println!("File size: {} bytes", report.file_size);
 }
 
 pub(crate) fn ticket_report_json(report: &TicketReport) -> serde_json::Value {
+    let depends_on: serde_json::Value = match &report.depends_on {
+        Some(deps) if !deps.is_empty() => json!(deps),
+        _ => json!(null),
+    };
     json!({
         "ticket_id": report.ticket_id,
         "path": report.path.display().to_string(),
@@ -279,6 +309,7 @@ pub(crate) fn ticket_report_json(report: &TicketReport) -> serde_json::Value {
             "title": report.title,
             "creation_date": report.creation_date,
             "status": report.status,
+            "depends_on": depends_on,
         },
         "file_size": report.file_size,
     })
@@ -287,10 +318,12 @@ pub(crate) fn ticket_report_json(report: &TicketReport) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path;
 
     use tempfile::tempdir;
+    use toml::Value;
 
-    use super::{available_ticket_id, slugify_title};
+    use super::{available_ticket_id, slugify_title, TicketMetadata};
 
     #[test]
     fn slug_generation_matches_spec_rules() {
@@ -317,6 +350,61 @@ mod tests {
         assert!(slug[slug.len() - 4..]
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn ticket_metadata_depends_on_round_trips() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("ticket.md");
+        let toml = "title = \"Test\"\ncreation_date = 2026-06-22T12:00:00Z\nstatus = \"pending\"\ndepends_on = [\"tt-dep-a\", \"tt-dep-b\"]\n";
+        let value: Value = toml.parse().unwrap();
+
+        let metadata = TicketMetadata::from_frontmatter(&value, &path).unwrap();
+        assert_eq!(
+            metadata.depends_on,
+            Some(vec!["tt-dep-a".to_string(), "tt-dep-b".to_string()])
+        );
+
+        let lines = metadata.to_frontmatter_lines();
+        assert!(lines.contains("depends_on = [\"tt-dep-a\", \"tt-dep-b\"]"));
+    }
+
+    #[test]
+    fn ticket_metadata_missing_depends_on_is_none() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("ticket.md");
+        let toml = "title = \"Test\"\ncreation_date = 2026-06-22T12:00:00Z\nstatus = \"pending\"\n";
+        let value: Value = toml.parse().unwrap();
+
+        let metadata = TicketMetadata::from_frontmatter(&value, &path).unwrap();
+        assert_eq!(metadata.depends_on, None);
+        assert!(!metadata.to_frontmatter_lines().contains("depends_on"));
+    }
+
+    #[test]
+    fn ticket_metadata_empty_depends_on_is_none() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("ticket.md");
+        let toml = "title = \"Test\"\ncreation_date = 2026-06-22T12:00:00Z\nstatus = \"pending\"\ndepends_on = []\n";
+        let value: Value = toml.parse().unwrap();
+
+        let metadata = TicketMetadata::from_frontmatter(&value, &path).unwrap();
+        assert_eq!(metadata.depends_on, None);
+        assert!(!metadata.to_frontmatter_lines().contains("depends_on"));
+    }
+
+    #[test]
+    fn ticket_metadata_depends_on_non_array_is_error() {
+        let path = Path::new("ticket.md");
+        let toml = "title = \"Test\"\ncreation_date = 2026-06-22T12:00:00Z\nstatus = \"pending\"\ndepends_on = \"tt-dep-a\"\n";
+        let value: Value = toml.parse().unwrap();
+
+        let errors = TicketMetadata::from_frontmatter(&value, path)
+            .err()
+            .unwrap();
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("depends_on") && e.contains("array")));
     }
 
     #[test]

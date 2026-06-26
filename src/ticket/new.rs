@@ -39,6 +39,7 @@ pub(crate) fn create_ticket_with_markdown(
         title: title.to_string(),
         creation_date: creation_date.clone(),
         status: "pending".to_string(),
+        depends_on: None,
     };
     write_ticket_record(repo_root, &ticket_id, &metadata, &format!("\n{markdown}"))?;
     let path = ticket_path(repo_root, &ticket_id);
@@ -50,6 +51,7 @@ pub(crate) fn create_ticket_with_markdown(
         title: title.to_string(),
         creation_date,
         status: "pending".to_string(),
+        depends_on: None,
         file_size,
     })
 }

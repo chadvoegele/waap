@@ -37,6 +37,7 @@ pub(crate) fn load_ticket_report(repo_root: &Path, ticket_id: &str) -> io::Resul
         title: metadata.title,
         creation_date: metadata.creation_date,
         status: metadata.status,
+        depends_on: metadata.depends_on,
         file_size: fs::metadata(&path)?.len(),
     })
 }
@@ -130,6 +131,7 @@ status = \"ready\"
                 title: "New Ticket".to_string(),
                 creation_date: "2026-06-22T12:00:00Z".to_string(),
                 status: "pending".to_string(),
+                depends_on: None,
                 file_size: 123,
             },
             content: "# Body\n".to_string(),
@@ -144,10 +146,50 @@ status = \"ready\"
                     "title": "New Ticket",
                     "creation_date": "2026-06-22T12:00:00Z",
                     "status": "pending",
+                    "depends_on": null,
                 },
                 "file_size": 123,
                 "content": "# Body\n",
             })
+        );
+    }
+
+    #[test]
+    fn ticket_get_json_includes_depends_on_when_present() {
+        let report = TicketGetReport {
+            ticket: TicketReport {
+                ticket_id: "tt-feature".to_string(),
+                path: PathBuf::from(".waap/tickets/tt-feature/ticket.md"),
+                title: "Feature".to_string(),
+                creation_date: "2026-06-22T12:00:00Z".to_string(),
+                status: "pending".to_string(),
+                depends_on: Some(vec!["tt-dep-one".to_string(), "tt-dep-two".to_string()]),
+                file_size: 200,
+            },
+            content: "# Body\n".to_string(),
+        };
+
+        let json = ticket_get_report_json(&report);
+        assert_eq!(
+            json["metadata"]["depends_on"],
+            json!(["tt-dep-one", "tt-dep-two"])
+        );
+    }
+
+    #[test]
+    fn ticket_get_reads_depends_on_from_frontmatter() {
+        let dir = tempdir().unwrap();
+        let contents = "+++\ntitle = \"Feature\"\ncreation_date = 2026-06-22T12:00:00Z\nstatus = \"pending\"\ndepends_on = [\"tt-dep-one\", \"tt-dep-two\"]\n+++\n\n# Body\n";
+        write_file(
+            &dir.path().join(".waap/tickets/tt-feature/ticket.md"),
+            contents,
+        );
+
+        let report = get_ticket(dir.path(), "tt-feature").unwrap();
+
+        assert_eq!(
+            report.ticket.depends_on,
+            Some(vec!["tt-dep-one".to_string(), "tt-dep-two".to_string()])
         );
     }
 

@@ -150,6 +150,31 @@ pub(crate) fn require_string_choice(
     }
 }
 
+pub(crate) fn require_optional_string_array(
+    frontmatter: &Value,
+    key: &str,
+    path: &Path,
+    errors: &mut Vec<String>,
+) {
+    match frontmatter.get(key) {
+        None => {}
+        Some(Value::Array(arr)) => {
+            for (i, element) in arr.iter().enumerate() {
+                if element.as_str().is_none() {
+                    errors.push(format!(
+                        "{} frontmatter field {key}[{i}] must be a string",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        Some(_) => errors.push(format!(
+            "{} frontmatter field {key} must be an array of strings",
+            path.display()
+        )),
+    }
+}
+
 pub(crate) fn require_datetime(
     frontmatter: &Value,
     key: &str,
