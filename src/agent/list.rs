@@ -37,7 +37,7 @@ pub(crate) fn list_agents(
     let mut reports = Vec::new();
     for agent_id in list_record_ids(repo_root, WaapRecordKind::Agent)? {
         let report = load_agent_report(repo_root, &agent_id)?;
-        if status.is_none_or(|status| report.status == status.as_str()) {
+        if status.is_none_or(|status| report.metadata.status == status.as_str()) {
             reports.push(report);
         }
     }
@@ -55,8 +55,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{agent_list_json, list_agents};
-    use crate::agent::AgentReport;
-    use crate::agent::AgentStatus;
+    use crate::agent::{AgentMetadata, AgentReport, AgentStatus};
 
     #[test]
     fn agent_list_returns_sorted_agent_ids() {
@@ -140,19 +139,25 @@ status = \"pending\"
             AgentReport {
                 agent_id: "aa-00000001".to_string(),
                 path: PathBuf::from(".waap/agents/aa-00000001/agent.md"),
-                creation_date: "2026-06-18T15:00:34Z".to_string(),
-                role: "developer".to_string(),
-                status: "ready".to_string(),
-                session_id: None,
+                metadata: AgentMetadata {
+                    creation_date: "2026-06-18T15:00:34Z".to_string(),
+                    role: "developer".to_string(),
+                    status: "ready".to_string(),
+                    session_id: None,
+                    system: None,
+                },
                 file_size: 123,
             },
             AgentReport {
                 agent_id: "aa-00000002".to_string(),
                 path: PathBuf::from(".waap/agents/aa-00000002/agent.md"),
-                creation_date: "2026-06-18T15:00:34Z".to_string(),
-                role: "planner".to_string(),
-                status: "completed".to_string(),
-                session_id: Some("ses_123".to_string()),
+                metadata: AgentMetadata {
+                    creation_date: "2026-06-18T15:00:34Z".to_string(),
+                    role: "planner".to_string(),
+                    status: "completed".to_string(),
+                    session_id: Some("ses_123".to_string()),
+                    system: None,
+                },
                 file_size: 456,
             },
         ];

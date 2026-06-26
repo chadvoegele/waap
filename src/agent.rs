@@ -28,6 +28,7 @@ pub(crate) use run::run_agent;
 pub(crate) use stop::{print_agent_stop_report, stop_agents_with_systems};
 pub(crate) use update::{print_updated_agent_report, update_agent};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AgentMetadata {
     pub(crate) creation_date: String,
     pub(crate) role: String,
@@ -168,10 +169,7 @@ pub(crate) fn check_agent_frontmatter(path: &Path, errors: &mut Vec<String>) {
 pub(crate) struct AgentReport {
     pub(crate) agent_id: String,
     pub(crate) path: PathBuf,
-    pub(crate) creation_date: String,
-    pub(crate) role: String,
-    pub(crate) status: String,
-    pub(crate) session_id: Option<String>,
+    pub(crate) metadata: AgentMetadata,
     pub(crate) file_size: u64,
 }
 
@@ -268,10 +266,10 @@ pub(crate) fn is_agent_id(value: &str) -> bool {
 pub(crate) fn print_agent_report_human(header: &str, report: &AgentReport) {
     println!("{header} {}", report.agent_id);
     println!("Path: {}", report.path.display());
-    println!("Creation date: {}", report.creation_date);
-    println!("Role: {}", report.role);
-    println!("Status: {}", report.status);
-    if let Some(session_id) = &report.session_id {
+    println!("Creation date: {}", report.metadata.creation_date);
+    println!("Role: {}", report.metadata.role);
+    println!("Status: {}", report.metadata.status);
+    if let Some(session_id) = &report.metadata.session_id {
         println!("Session ID: {session_id}");
     }
     println!("File size: {} bytes", report.file_size);
@@ -282,10 +280,10 @@ pub(crate) fn agent_report_json(report: &AgentReport) -> serde_json::Value {
         "agent_id": report.agent_id,
         "path": report.path.display().to_string(),
         "metadata": {
-            "creation_date": report.creation_date,
-            "role": report.role,
-            "status": report.status,
-            "session_id": report.session_id,
+            "creation_date": report.metadata.creation_date,
+            "role": report.metadata.role,
+            "status": report.metadata.status,
+            "session_id": report.metadata.session_id,
         },
         "file_size": report.file_size,
     })
@@ -299,7 +297,10 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{agent_report_json, available_agent_id_with_generator, is_agent_id, AgentReport};
+    use super::{
+        agent_report_json, available_agent_id_with_generator, is_agent_id, AgentMetadata,
+        AgentReport,
+    };
     use crate::ids::random_hex_chars;
 
     #[test]
@@ -328,10 +329,13 @@ mod tests {
         let report = AgentReport {
             agent_id: "aa-3881fda0".to_string(),
             path: PathBuf::from(".waap/agents/aa-3881fda0/agent.md"),
-            creation_date: "2026-06-18T15:00:34Z".to_string(),
-            role: "developer".to_string(),
-            status: "running".to_string(),
-            session_id: Some("ses_123".to_string()),
+            metadata: AgentMetadata {
+                creation_date: "2026-06-18T15:00:34Z".to_string(),
+                role: "developer".to_string(),
+                status: "running".to_string(),
+                session_id: Some("ses_123".to_string()),
+                system: None,
+            },
             file_size: 456,
         };
 

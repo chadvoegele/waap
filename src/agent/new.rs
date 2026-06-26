@@ -34,9 +34,8 @@ pub(crate) fn create_agent_with_markdown(
     let agents_dir = WaapRecordKind::Agent.root_path(repo_root);
     let agent_id = available_agent_id(&agents_dir)?;
 
-    let creation_date = current_toml_datetime();
     let metadata = AgentMetadata {
-        creation_date: creation_date.clone(),
+        creation_date: current_toml_datetime(),
         role: role.as_str().to_string(),
         status: "ready".to_string(),
         session_id: None,
@@ -49,10 +48,7 @@ pub(crate) fn create_agent_with_markdown(
     Ok(AgentReport {
         agent_id,
         path,
-        creation_date,
-        role: role.as_str().to_string(),
-        status: "ready".to_string(),
-        session_id: None,
+        metadata,
         file_size,
     })
 }
@@ -77,9 +73,9 @@ mod tests {
         let contents = fs::read_to_string(&report.path).unwrap();
 
         assert!(is_agent_id(&report.agent_id));
-        assert_eq!(report.role, "planner");
-        assert_eq!(report.status, "ready");
-        assert_eq!(report.session_id, None);
+        assert_eq!(report.metadata.role, "planner");
+        assert_eq!(report.metadata.status, "ready");
+        assert_eq!(report.metadata.session_id, None);
         assert_eq!(report.file_size, contents.len() as u64);
         assert!(contents.starts_with("+++\ncreation_date = "));
         assert!(contents

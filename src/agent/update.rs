@@ -49,7 +49,7 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use crate::agent::{agent_report_json, update_agent, AgentReport, AgentStatus};
+    use crate::agent::{agent_report_json, update_agent, AgentMetadata, AgentReport, AgentStatus};
 
     #[test]
     fn agent_update_requires_at_least_one_update_field() {
@@ -97,10 +97,10 @@ mod tests {
         let contents = fs::read_to_string(&path).unwrap();
 
         assert_eq!(report.agent_id, "aa-3881fda0");
-        assert_eq!(report.creation_date, "2026-06-18T15:00:34Z");
-        assert_eq!(report.role, "planner");
-        assert_eq!(report.status, "completed");
-        assert_eq!(report.session_id.as_deref(), Some("ses_123"));
+        assert_eq!(report.metadata.creation_date, "2026-06-18T15:00:34Z");
+        assert_eq!(report.metadata.role, "planner");
+        assert_eq!(report.metadata.status, "completed");
+        assert_eq!(report.metadata.session_id.as_deref(), Some("ses_123"));
         assert_eq!(report.file_size, contents.len() as u64);
         assert!(contents.contains("creation_date = 2026-06-18T15:00:34Z\n"));
         assert!(contents.contains("role = \"planner\"\n"));
@@ -120,8 +120,8 @@ mod tests {
         let report = update_agent(dir.path(), "aa-3881fda0", None, Some("ses_new")).unwrap();
         let contents = fs::read_to_string(&path).unwrap();
 
-        assert_eq!(report.status, "running");
-        assert_eq!(report.session_id.as_deref(), Some("ses_new"));
+        assert_eq!(report.metadata.status, "running");
+        assert_eq!(report.metadata.session_id.as_deref(), Some("ses_new"));
         assert!(contents.contains("session_id = \"ses_new\"\n"));
         assert!(!contents.contains("ses_old"));
     }
@@ -131,10 +131,13 @@ mod tests {
         let report = AgentReport {
             agent_id: "aa-3881fda0".to_string(),
             path: PathBuf::from(".waap/agents/aa-3881fda0/agent.md"),
-            creation_date: "2026-06-18T15:00:34Z".to_string(),
-            role: "developer".to_string(),
-            status: "completed".to_string(),
-            session_id: Some("ses_123".to_string()),
+            metadata: AgentMetadata {
+                creation_date: "2026-06-18T15:00:34Z".to_string(),
+                role: "developer".to_string(),
+                status: "completed".to_string(),
+                session_id: Some("ses_123".to_string()),
+                system: None,
+            },
             file_size: 789,
         };
 

@@ -72,12 +72,12 @@ fn stop_agent_if_running(
     abort: &mut impl FnMut(&AgentSystem, &str) -> io::Result<()>,
 ) -> io::Result<Option<AgentReport>> {
     let report = load_agent_report(repo_root, agent_id)?;
-    if report.status != AgentStatus::Running.as_str() {
+    if report.metadata.status != AgentStatus::Running.as_str() {
         return Ok(None);
     }
 
     let (mut metadata, body) = read_agent_record(repo_root, agent_id)?;
-    if let Some(session_id) = &report.session_id {
+    if let Some(session_id) = &report.metadata.session_id {
         let system = metadata.system.as_ref().unwrap_or(&AgentSystem::Opencode);
         abort(system, session_id)?;
     }
@@ -99,7 +99,7 @@ mod tests {
 
     use super::{agent_stop_json, stop_agents};
     use crate::agent::get::load_agent_report;
-    use crate::agent::{AgentReport, AgentSystem};
+    use crate::agent::{AgentMetadata, AgentReport, AgentSystem};
 
     #[test]
     fn agent_stop_stops_one_running_agent() {
@@ -110,14 +110,20 @@ mod tests {
         let reports = stop_agents(dir.path(), Some("aa-3881fda0"), noop_abort).unwrap();
 
         assert_eq!(agent_ids(&reports), vec!["aa-3881fda0"]);
-        assert_eq!(reports[0].status, "aborted");
-        assert_eq!(reports[0].session_id.as_deref(), Some("ses_123"));
+        assert_eq!(reports[0].metadata.status, "aborted");
+        assert_eq!(reports[0].metadata.session_id.as_deref(), Some("ses_123"));
         assert_eq!(
-            load_agent_report(dir.path(), "aa-3881fda0").unwrap().status,
+            load_agent_report(dir.path(), "aa-3881fda0")
+                .unwrap()
+                .metadata
+                .status,
             "aborted"
         );
         assert_eq!(
-            load_agent_report(dir.path(), "aa-00000001").unwrap().status,
+            load_agent_report(dir.path(), "aa-00000001")
+                .unwrap()
+                .metadata
+                .status,
             "running"
         );
     }
@@ -132,11 +138,17 @@ mod tests {
 
         assert_eq!(agent_ids(&reports), vec!["aa-00000001", "aa-00000003"]);
         assert_eq!(
-            load_agent_report(dir.path(), "aa-00000001").unwrap().status,
+            load_agent_report(dir.path(), "aa-00000001")
+                .unwrap()
+                .metadata
+                .status,
             "aborted"
         );
         assert_eq!(
-            load_agent_report(dir.path(), "aa-00000003").unwrap().status,
+            load_agent_report(dir.path(), "aa-00000003")
+                .unwrap()
+                .metadata
+                .status,
             "aborted"
         );
     }
@@ -153,19 +165,31 @@ mod tests {
 
         assert_eq!(agent_ids(&reports), vec!["aa-00000002"]);
         assert_eq!(
-            load_agent_report(dir.path(), "aa-00000001").unwrap().status,
+            load_agent_report(dir.path(), "aa-00000001")
+                .unwrap()
+                .metadata
+                .status,
             "ready"
         );
         assert_eq!(
-            load_agent_report(dir.path(), "aa-00000002").unwrap().status,
+            load_agent_report(dir.path(), "aa-00000002")
+                .unwrap()
+                .metadata
+                .status,
             "aborted"
         );
         assert_eq!(
-            load_agent_report(dir.path(), "aa-00000003").unwrap().status,
+            load_agent_report(dir.path(), "aa-00000003")
+                .unwrap()
+                .metadata
+                .status,
             "completed"
         );
         assert_eq!(
-            load_agent_report(dir.path(), "aa-00000004").unwrap().status,
+            load_agent_report(dir.path(), "aa-00000004")
+                .unwrap()
+                .metadata
+                .status,
             "aborted"
         );
     }
@@ -179,7 +203,10 @@ mod tests {
 
         assert!(reports.is_empty());
         assert_eq!(
-            load_agent_report(dir.path(), "aa-3881fda0").unwrap().status,
+            load_agent_report(dir.path(), "aa-3881fda0")
+                .unwrap()
+                .metadata
+                .status,
             "completed"
         );
     }
@@ -243,7 +270,10 @@ mod tests {
         assert!(aborted.is_empty());
         assert_eq!(killed, vec!["ses_claude"]);
         assert_eq!(
-            load_agent_report(dir.path(), "aa-00000001").unwrap().status,
+            load_agent_report(dir.path(), "aa-00000001")
+                .unwrap()
+                .metadata
+                .status,
             "aborted"
         );
     }
@@ -260,7 +290,10 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert_eq!(
-            load_agent_report(dir.path(), "aa-00000001").unwrap().status,
+            load_agent_report(dir.path(), "aa-00000001")
+                .unwrap()
+                .metadata
+                .status,
             "running"
         );
     }
@@ -277,7 +310,10 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert_eq!(
-            load_agent_report(dir.path(), "aa-3881fda0").unwrap().status,
+            load_agent_report(dir.path(), "aa-3881fda0")
+                .unwrap()
+                .metadata
+                .status,
             "running"
         );
     }
@@ -287,10 +323,13 @@ mod tests {
         let reports = vec![AgentReport {
             agent_id: "aa-3881fda0".to_string(),
             path: PathBuf::from(".waap/agents/aa-3881fda0/agent.md"),
-            creation_date: "2026-06-18T15:00:34Z".to_string(),
-            role: "developer".to_string(),
-            status: "aborted".to_string(),
-            session_id: Some("ses_123".to_string()),
+            metadata: AgentMetadata {
+                creation_date: "2026-06-18T15:00:34Z".to_string(),
+                role: "developer".to_string(),
+                status: "aborted".to_string(),
+                session_id: Some("ses_123".to_string()),
+                system: None,
+            },
             file_size: 456,
         }];
 

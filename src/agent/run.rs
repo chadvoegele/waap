@@ -1,4 +1,3 @@
-use std::fs;
 use std::io;
 use std::path::Path;
 use std::process::ExitCode;
@@ -39,7 +38,6 @@ fn run_agent_opencode(
     output_format: &OutputFormat,
     agent_id: &str,
 ) -> io::Result<ExitCode> {
-    let mut report = load_agent_report(repo_root, agent_id)?;
     let config = opencode_run_config_from_env(repo_root)?;
     let session_id = create_opencode_session(&config)?;
 
@@ -55,9 +53,7 @@ fn run_agent_opencode(
     metadata.status = "running".to_string();
     write_agent_record(repo_root, agent_id, &metadata, &body)?;
 
-    report.session_id = Some(session_id);
-    report.status = "running".to_string();
-    report.file_size = fs::metadata(&report.path)?.len();
+    let report = load_agent_report(repo_root, agent_id)?;
     print_agent_report(output_format, &report);
     Ok(ExitCode::SUCCESS)
 }
@@ -67,7 +63,6 @@ fn run_agent_claude(
     output_format: &OutputFormat,
     agent_id: &str,
 ) -> io::Result<ExitCode> {
-    let mut report = load_agent_report(repo_root, agent_id)?;
     let config = claude_run_config_from_env(repo_root)?;
     let session_id = Uuid::new_v4().to_string();
 
@@ -80,9 +75,7 @@ fn run_agent_claude(
     metadata.status = "running".to_string();
     write_agent_record(repo_root, agent_id, &metadata, &body)?;
 
-    report.session_id = Some(session_id);
-    report.status = "running".to_string();
-    report.file_size = fs::metadata(&report.path)?.len();
+    let report = load_agent_report(repo_root, agent_id)?;
     print_agent_report(output_format, &report);
     Ok(ExitCode::SUCCESS)
 }
@@ -95,17 +88,20 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use crate::agent::{agent_report_json, AgentReport};
+    use crate::agent::{agent_report_json, AgentMetadata, AgentReport};
 
     #[test]
     fn run_report_json_includes_running_status_and_session_id() {
         let report = AgentReport {
             agent_id: "aa-3881fda0".to_string(),
             path: std::path::PathBuf::from(".waap/agents/aa-3881fda0/agent.md"),
-            creation_date: "2026-06-18T15:00:34Z".to_string(),
-            role: "developer".to_string(),
-            status: "running".to_string(),
-            session_id: Some("ses_abc123".to_string()),
+            metadata: AgentMetadata {
+                creation_date: "2026-06-18T15:00:34Z".to_string(),
+                role: "developer".to_string(),
+                status: "running".to_string(),
+                session_id: Some("ses_abc123".to_string()),
+                system: None,
+            },
             file_size: 512,
         };
 
@@ -136,9 +132,7 @@ mod tests {
 
     #[test]
     fn run_agent_claude_updates_status_and_session_id_in_frontmatter() {
-        use crate::agent::{read_agent_record, AgentSystem};
-        use crate::claude::ClaudeRunConfig;
-        use std::process::ExitCode;
+        use crate::agent::{load_agent_report, read_agent_record, AgentSystem};
 
         let dir = tempdir().unwrap();
         let agent_id = "aa-3881fda0";
@@ -148,15 +142,18 @@ mod tests {
             "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"ready\"\n+++\n\n# Purpose\nDo work\n",
         );
 
-        // We can't easily call run_agent_claude because it calls external processes.
-        // Instead, verify the logic by simulating what a successful run does:
-        // set session_id, system, then status=running, write.
+        // Simulate the run_agent_claude path: read once, mutate, write, then derive report.
         let (mut metadata, body) = read_agent_record(dir.path(), agent_id).unwrap();
         let session_id = "ses_test123".to_string();
         metadata.session_id = Some(session_id.clone());
         metadata.system = Some(AgentSystem::Claude);
         metadata.status = "running".to_string();
         crate::agent::write_agent_record(dir.path(), agent_id, &metadata, &body).unwrap();
+
+        let report = load_agent_report(dir.path(), agent_id).unwrap();
+
+        assert_eq!(report.metadata.status, "running");
+        assert_eq!(report.metadata.session_id.as_deref(), Some("ses_test123"));
 
         let contents = fs::read_to_string(&path).unwrap();
         assert!(contents.contains("status = \"running\"\n"));

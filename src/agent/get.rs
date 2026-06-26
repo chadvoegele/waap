@@ -39,10 +39,7 @@ pub(crate) fn load_agent_report(repo_root: &Path, agent_id: &str) -> io::Result<
     Ok(AgentReport {
         agent_id: agent_id.to_string(),
         path,
-        creation_date: metadata.creation_date,
-        role: metadata.role,
-        status: metadata.status,
-        session_id: metadata.session_id,
+        metadata,
         file_size,
     })
 }
@@ -67,7 +64,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{agent_content_report_json, load_agent_content, load_agent_report};
-    use crate::agent::AgentReport;
+    use crate::agent::{AgentMetadata, AgentReport};
 
     #[test]
     fn missing_agent_is_reported() {
@@ -124,10 +121,10 @@ session_id = \"ses_123\"
             report.path,
             dir.path().join(".waap/agents/aa-3881fda0/agent.md")
         );
-        assert_eq!(report.creation_date, "2026-06-18T15:00:34Z");
-        assert_eq!(report.role, "developer");
-        assert_eq!(report.status, "ready");
-        assert_eq!(report.session_id.as_deref(), Some("ses_123"));
+        assert_eq!(report.metadata.creation_date, "2026-06-18T15:00:34Z");
+        assert_eq!(report.metadata.role, "developer");
+        assert_eq!(report.metadata.status, "ready");
+        assert_eq!(report.metadata.session_id.as_deref(), Some("ses_123"));
         assert_eq!(report.file_size, contents.len() as u64);
     }
 
@@ -152,7 +149,7 @@ Do work
         let (report, content) = load_agent_content(dir.path(), "aa-3881fda0").unwrap();
 
         assert_eq!(report.agent_id, "aa-3881fda0");
-        assert_eq!(report.session_id.as_deref(), Some("ses_123"));
+        assert_eq!(report.metadata.session_id.as_deref(), Some("ses_123"));
         assert_eq!(content, "\n# Purpose\nDo work\n");
     }
 
@@ -161,10 +158,13 @@ Do work
         let report = AgentReport {
             agent_id: "aa-3881fda0".to_string(),
             path: PathBuf::from(".waap/agents/aa-3881fda0/agent.md"),
-            creation_date: "2026-06-18T15:00:34Z".to_string(),
-            role: "developer".to_string(),
-            status: "running".to_string(),
-            session_id: Some("ses_123".to_string()),
+            metadata: AgentMetadata {
+                creation_date: "2026-06-18T15:00:34Z".to_string(),
+                role: "developer".to_string(),
+                status: "running".to_string(),
+                session_id: Some("ses_123".to_string()),
+                system: None,
+            },
             file_size: 456,
         };
 
