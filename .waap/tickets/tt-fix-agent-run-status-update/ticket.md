@@ -1,7 +1,7 @@
 +++
 title = "Fix Agent Run Status Update"
 creation_date = 2026-06-24T18:10:31Z
-status = "pending"
+status = "completed"
 +++
 
 # Spec Reference
