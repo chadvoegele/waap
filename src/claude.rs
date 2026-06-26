@@ -38,7 +38,8 @@ pub(crate) fn kill_claude_session(session_id: &str) -> io::Result<()> {
 }
 
 pub(crate) fn run_claude_detached(command: &ClaudeRunCommand) -> io::Result<()> {
-    ProcessCommand::new(&command.program)
+    ProcessCommand::new("setsid")
+        .arg(&command.program)
         .args(&command.args)
         .current_dir(&command.working_dir)
         .stdin(Stdio::null())
