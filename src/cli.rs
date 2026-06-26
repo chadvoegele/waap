@@ -104,8 +104,12 @@ pub(crate) enum TicketCommand {
     Update {
         #[arg(long)]
         ticket_id: String,
+        #[arg(long, value_enum)]
+        set_status: Option<TicketStatus>,
         #[arg(long)]
-        set_status: TicketStatus,
+        add_depends_on: Vec<String>,
+        #[arg(long)]
+        remove_depends_on: Vec<String>,
     },
     /// List existing ticket ids.
     List {
@@ -160,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_ticket_update_arguments() {
+    fn parses_ticket_update_set_status() {
         let cli = Cli::try_parse_from([
             "waap",
             "--output-format",
@@ -180,22 +184,77 @@ mod tests {
             Command::Ticket {
                 command: TicketCommand::Update {
                     ticket_id,
-                    set_status: TicketStatus::InProgress,
+                    set_status: Some(TicketStatus::InProgress),
+                    ..
                 }
             } if ticket_id == "tt-new-ticket"
         ));
     }
 
     #[test]
-    fn ticket_update_requires_status_argument() {
-        let error =
-            Cli::try_parse_from(["waap", "ticket", "update", "--ticket-id", "tt-new-ticket"])
-                .unwrap_err();
+    fn parses_ticket_update_add_depends_on() {
+        let cli = Cli::try_parse_from([
+            "waap",
+            "ticket",
+            "update",
+            "--ticket-id",
+            "tt-new-ticket",
+            "--add-depends-on",
+            "tt-dep-a",
+            "--add-depends-on",
+            "tt-dep-b",
+        ])
+        .unwrap();
 
-        assert_eq!(
-            error.kind(),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
+        if let Command::Ticket {
+            command:
+                TicketCommand::Update {
+                    ticket_id,
+                    set_status,
+                    add_depends_on,
+                    remove_depends_on,
+                },
+        } = cli.command
+        {
+            assert_eq!(ticket_id, "tt-new-ticket");
+            assert!(set_status.is_none());
+            assert_eq!(add_depends_on, vec!["tt-dep-a", "tt-dep-b"]);
+            assert!(remove_depends_on.is_empty());
+        } else {
+            panic!("unexpected command");
+        }
+    }
+
+    #[test]
+    fn parses_ticket_update_remove_depends_on() {
+        let cli = Cli::try_parse_from([
+            "waap",
+            "ticket",
+            "update",
+            "--ticket-id",
+            "tt-new-ticket",
+            "--remove-depends-on",
+            "tt-dep-a",
+        ])
+        .unwrap();
+
+        if let Command::Ticket {
+            command:
+                TicketCommand::Update {
+                    ticket_id,
+                    set_status,
+                    add_depends_on,
+                    remove_depends_on,
+                },
+        } = cli.command
+        {
+            assert_eq!(ticket_id, "tt-new-ticket");
+            assert!(set_status.is_none());
+            assert!(add_depends_on.is_empty());
+            assert_eq!(remove_depends_on, vec!["tt-dep-a"]);
+        } else {
+            panic!("unexpected command");
+        }
     }
 
     #[test]

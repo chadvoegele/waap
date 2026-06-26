@@ -11,7 +11,7 @@ use crate::check::{check_waap, print_check_result};
 use crate::cli::{AgentCommand, Cli, Command, TicketCommand};
 use crate::ticket::{
     create_ticket, get_ticket, list_tickets, print_ticket_get_report, print_ticket_list,
-    print_ticket_report, print_updated_ticket_report, update_ticket_status,
+    print_ticket_report, print_updated_ticket_report, update_ticket,
 };
 
 pub(crate) fn run() -> ExitCode {
@@ -126,16 +126,31 @@ pub(crate) fn run() -> ExitCode {
             TicketCommand::Update {
                 ticket_id,
                 set_status,
-            } => match update_ticket_status(repo_root, &ticket_id, &set_status) {
-                Ok(report) => {
-                    print_updated_ticket_report(&cli.output_format, &report);
-                    ExitCode::SUCCESS
+                add_depends_on,
+                remove_depends_on,
+            } => {
+                if set_status.is_none() && add_depends_on.is_empty() && remove_depends_on.is_empty()
+                {
+                    eprintln!("at least one of --set-status, --add-depends-on, or --remove-depends-on must be provided");
+                    return ExitCode::from(1);
                 }
-                Err(error) => {
-                    eprintln!("failed to update ticket: {error}");
-                    ExitCode::from(1)
+                match update_ticket(
+                    repo_root,
+                    &ticket_id,
+                    set_status.as_ref(),
+                    &add_depends_on,
+                    &remove_depends_on,
+                ) {
+                    Ok(report) => {
+                        print_updated_ticket_report(&cli.output_format, &report);
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => {
+                        eprintln!("failed to update ticket: {error}");
+                        ExitCode::from(1)
+                    }
                 }
-            },
+            }
             TicketCommand::List { status } => match list_tickets(repo_root, status.as_ref()) {
                 Ok(reports) => {
                     print_ticket_list(&cli.output_format, &reports);

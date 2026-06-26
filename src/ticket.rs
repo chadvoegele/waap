@@ -22,7 +22,7 @@ pub(crate) mod update;
 pub(crate) use get::{get_ticket, print_ticket_get_report};
 pub(crate) use list::{list_tickets, print_ticket_list};
 pub(crate) use new::{create_ticket, print_ticket_report};
-pub(crate) use update::{print_updated_ticket_report, update_ticket_status};
+pub(crate) use update::{print_updated_ticket_report, update_ticket};
 
 pub(crate) struct TicketMetadata {
     pub(crate) title: String,

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::cli::OutputFormat;
 use crate::ticket::{
-    print_ticket_report_human, read_ticket_record, ticket_path, ticket_report_json,
+    is_ticket_id, print_ticket_report_human, read_ticket_record, ticket_path, ticket_report_json,
     write_ticket_record, TicketReport, TicketStatus,
 };
 
@@ -15,13 +15,39 @@ pub(crate) fn print_updated_ticket_report(output_format: &OutputFormat, report: 
     }
 }
 
-pub(crate) fn update_ticket_status(
+pub(crate) fn update_ticket(
     repo_root: &Path,
     ticket_id: &str,
-    status: &TicketStatus,
+    set_status: Option<&TicketStatus>,
+    add_depends_on: &[String],
+    remove_depends_on: &[String],
 ) -> io::Result<TicketReport> {
+    for dep_id in add_depends_on.iter().chain(remove_depends_on.iter()) {
+        if !is_ticket_id(dep_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{dep_id:?} is not a valid ticket id"),
+            ));
+        }
+    }
+
     let (mut metadata, body) = read_ticket_record(repo_root, ticket_id)?;
-    metadata.status = status.as_str().to_string();
+
+    if let Some(status) = set_status {
+        metadata.status = status.as_str().to_string();
+    }
+
+    let mut deps: Vec<String> = metadata.depends_on.unwrap_or_default();
+    for dep_id in add_depends_on {
+        if !deps.contains(dep_id) {
+            deps.push(dep_id.clone());
+        }
+    }
+    for dep_id in remove_depends_on {
+        deps.retain(|d| d != dep_id);
+    }
+    metadata.depends_on = if deps.is_empty() { None } else { Some(deps) };
+
     write_ticket_record(repo_root, ticket_id, &metadata, &body)?;
 
     let path = ticket_path(repo_root, ticket_id);
@@ -45,14 +71,35 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use crate::ticket::{ticket_report_json, update_ticket_status, TicketReport, TicketStatus};
+    use crate::ticket::{ticket_report_json, update_ticket, TicketReport, TicketStatus};
+
+    fn write_file(path: &Path, contents: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
+    fn make_ticket(dir: &Path, ticket_id: &str, extra_frontmatter: &str) {
+        let path = dir.join(format!(".waap/tickets/{ticket_id}/ticket.md"));
+        write_file(
+            &path,
+            &format!(
+                "+++\ntitle = \"Test\"\ncreation_date = 2026-06-22T12:00:00Z\nstatus = \"pending\"\n{extra_frontmatter}+++\n\n# Body\n"
+            ),
+        );
+    }
 
     #[test]
     fn ticket_update_reports_missing_ticket() {
         let dir = tempdir().unwrap();
 
-        let error = update_ticket_status(dir.path(), "tt-new-ticket", &TicketStatus::Completed)
-            .unwrap_err();
+        let error = update_ticket(
+            dir.path(),
+            "tt-new-ticket",
+            Some(&TicketStatus::Completed),
+            &[],
+            &[],
+        )
+        .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
         assert!(error
@@ -64,8 +111,14 @@ mod tests {
     fn ticket_update_rejects_invalid_ticket_id() {
         let dir = tempdir().unwrap();
 
-        let error =
-            update_ticket_status(dir.path(), "new-ticket", &TicketStatus::Completed).unwrap_err();
+        let error = update_ticket(
+            dir.path(),
+            "new-ticket",
+            Some(&TicketStatus::Completed),
+            &[],
+            &[],
+        )
+        .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("not a valid ticket id"));
@@ -83,8 +136,14 @@ mod tests {
             ),
         );
 
-        let report =
-            update_ticket_status(dir.path(), "tt-new-ticket", &TicketStatus::Completed).unwrap();
+        let report = update_ticket(
+            dir.path(),
+            "tt-new-ticket",
+            Some(&TicketStatus::Completed),
+            &[],
+            &[],
+        )
+        .unwrap();
         let contents = fs::read_to_string(&path).unwrap();
 
         assert_eq!(report.ticket_id, "tt-new-ticket");
@@ -128,8 +187,114 @@ mod tests {
         );
     }
 
-    fn write_file(path: &Path, contents: &str) {
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, contents).unwrap();
+    #[test]
+    fn add_depends_on_adds_new_dependency() {
+        let dir = tempdir().unwrap();
+        make_ticket(dir.path(), "tt-my-ticket", "");
+
+        let report = update_ticket(
+            dir.path(),
+            "tt-my-ticket",
+            None,
+            &["tt-dep-a".to_string()],
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(report.depends_on, Some(vec!["tt-dep-a".to_string()]));
+        let contents =
+            fs::read_to_string(dir.path().join(".waap/tickets/tt-my-ticket/ticket.md")).unwrap();
+        assert!(contents.contains("depends_on = [\"tt-dep-a\"]"));
+    }
+
+    #[test]
+    fn remove_depends_on_removes_existing_dependency() {
+        let dir = tempdir().unwrap();
+        make_ticket(
+            dir.path(),
+            "tt-my-ticket",
+            "depends_on = [\"tt-dep-a\", \"tt-dep-b\"]\n",
+        );
+
+        let report = update_ticket(
+            dir.path(),
+            "tt-my-ticket",
+            None,
+            &[],
+            &["tt-dep-a".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(report.depends_on, Some(vec!["tt-dep-b".to_string()]));
+    }
+
+    #[test]
+    fn add_and_remove_depends_on_in_one_call() {
+        let dir = tempdir().unwrap();
+        make_ticket(dir.path(), "tt-my-ticket", "depends_on = [\"tt-dep-a\"]\n");
+
+        let report = update_ticket(
+            dir.path(),
+            "tt-my-ticket",
+            None,
+            &["tt-dep-b".to_string()],
+            &["tt-dep-a".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(report.depends_on, Some(vec!["tt-dep-b".to_string()]));
+    }
+
+    #[test]
+    fn remove_nonexistent_depends_on_is_noop() {
+        let dir = tempdir().unwrap();
+        make_ticket(dir.path(), "tt-my-ticket", "depends_on = [\"tt-dep-a\"]\n");
+
+        let report = update_ticket(
+            dir.path(),
+            "tt-my-ticket",
+            None,
+            &[],
+            &["tt-dep-x".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(report.depends_on, Some(vec!["tt-dep-a".to_string()]));
+    }
+
+    #[test]
+    fn add_depends_on_rejects_invalid_ticket_id() {
+        let dir = tempdir().unwrap();
+        make_ticket(dir.path(), "tt-my-ticket", "");
+
+        let error = update_ticket(
+            dir.path(),
+            "tt-my-ticket",
+            None,
+            &["not-a-ticket-id".to_string()],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("not a valid ticket id"));
+    }
+
+    #[test]
+    fn remove_depends_on_rejects_invalid_ticket_id() {
+        let dir = tempdir().unwrap();
+        make_ticket(dir.path(), "tt-my-ticket", "");
+
+        let error = update_ticket(
+            dir.path(),
+            "tt-my-ticket",
+            None,
+            &[],
+            &["not-a-ticket-id".to_string()],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("not a valid ticket id"));
     }
 }
