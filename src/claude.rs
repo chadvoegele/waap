@@ -64,6 +64,9 @@ pub(crate) fn build_claude_run_command(
         "json".to_string(),
         "--permission-mode".to_string(),
         "auto".to_string(),
+        // Disable the bash sandbox; its /dev/null dotfile mounts break the agent's `git worktree remove`.
+        "--settings".to_string(),
+        "{\"sandbox\":{\"enabled\":false}}".to_string(),
     ];
     if let Some(model) = &config.model {
         args.push("--model".to_string());
@@ -108,6 +111,8 @@ mod tests {
                     "json".to_string(),
                     "--permission-mode".to_string(),
                     "auto".to_string(),
+                    "--settings".to_string(),
+                    "{\"sandbox\":{\"enabled\":false}}".to_string(),
                     "--model".to_string(),
                     "opus".to_string(),
                     "Complete when instructions in /.waap/agents/aa-3881fda0/agent.md are satisfied"
