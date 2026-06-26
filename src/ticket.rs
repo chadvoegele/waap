@@ -44,6 +44,18 @@ impl TicketMetadata {
             &mut errors,
         );
         require_optional_string_array(value, "depends_on", path, &mut errors);
+        if let Some(Value::Array(arr)) = value.get("depends_on") {
+            for (i, entry) in arr.iter().enumerate() {
+                if let Some(s) = entry.as_str() {
+                    if !is_ticket_id(s) {
+                        errors.push(format!(
+                            "{} frontmatter field depends_on[{i}] {s:?} is not a valid ticket id",
+                            path.display()
+                        ));
+                    }
+                }
+            }
+        }
         if !errors.is_empty() {
             return Err(errors);
         }

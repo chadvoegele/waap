@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -6,8 +7,10 @@ use serde_json::json;
 use crate::agent::check_agent_frontmatter;
 use crate::agent::is_agent_id;
 use crate::cli::OutputFormat;
+use crate::frontmatter::parse_frontmatter;
 use crate::ticket::check_ticket_frontmatter;
 use crate::ticket::is_ticket_id;
+use crate::ticket::TicketMetadata;
 
 pub(crate) fn check_waap(repo_root: &Path) -> Vec<String> {
     let mut errors = Vec::new();
@@ -92,6 +95,9 @@ pub(crate) fn check_agents(agents_dir: &Path, errors: &mut Vec<String>) {
 
 pub(crate) fn check_tickets(tickets_dir: &Path, errors: &mut Vec<String>) {
     let entries = read_dir(tickets_dir, ".waap/tickets", errors);
+    let mut known_ids: HashSet<String> = HashSet::new();
+    let mut deps_map: HashMap<String, Vec<String>> = HashMap::new();
+
     for entry in entries {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -102,7 +108,9 @@ pub(crate) fn check_tickets(tickets_dir: &Path, errors: &mut Vec<String>) {
             continue;
         }
 
-        if !is_ticket_id(&name) {
+        if is_ticket_id(&name) {
+            known_ids.insert(name.clone());
+        } else {
             errors.push(format!(
                 "{label} must be named as a ticket id like tt-list-tickets"
             ));
@@ -113,8 +121,80 @@ pub(crate) fn check_tickets(tickets_dir: &Path, errors: &mut Vec<String>) {
             errors.push(format!("{label}/ticket.md is required"));
         } else {
             check_ticket_frontmatter(&ticket_file, errors);
+            if let Some(frontmatter) = parse_frontmatter(&ticket_file, &mut Vec::new()) {
+                if let Ok(metadata) = TicketMetadata::from_frontmatter(&frontmatter, &ticket_file) {
+                    if let Some(deps) = metadata.depends_on {
+                        deps_map.insert(name.clone(), deps);
+                    }
+                }
+            }
         }
     }
+
+    check_ticket_dependencies(&known_ids, &deps_map, errors);
+}
+
+fn check_ticket_dependencies(
+    known_ids: &HashSet<String>,
+    deps_map: &HashMap<String, Vec<String>>,
+    errors: &mut Vec<String>,
+) {
+    for (ticket_id, deps) in deps_map {
+        for dep in deps {
+            if !known_ids.contains(dep) {
+                errors.push(format!(
+                    ".waap/tickets/{ticket_id}/ticket.md depends_on {dep:?} which does not exist"
+                ));
+            }
+        }
+    }
+
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut in_stack: HashSet<String> = HashSet::new();
+
+    for ticket_id in known_ids {
+        if !visited.contains(ticket_id) {
+            let mut path = Vec::new();
+            detect_cycle(
+                ticket_id,
+                deps_map,
+                &mut visited,
+                &mut in_stack,
+                &mut path,
+                errors,
+            );
+        }
+    }
+}
+
+fn detect_cycle(
+    id: &str,
+    deps_map: &HashMap<String, Vec<String>>,
+    visited: &mut HashSet<String>,
+    in_stack: &mut HashSet<String>,
+    path: &mut Vec<String>,
+    errors: &mut Vec<String>,
+) {
+    visited.insert(id.to_string());
+    in_stack.insert(id.to_string());
+    path.push(id.to_string());
+
+    if let Some(deps) = deps_map.get(id) {
+        for dep in deps {
+            if !visited.contains(dep.as_str()) {
+                detect_cycle(dep, deps_map, visited, in_stack, path, errors);
+            } else if in_stack.contains(dep.as_str()) {
+                let cycle_start = path.iter().position(|p| p == dep).unwrap_or(0);
+                let cycle_nodes: Vec<&str> =
+                    path[cycle_start..].iter().map(|s| s.as_str()).collect();
+                let cycle_str = format!("{} -> {}", cycle_nodes.join(" -> "), dep);
+                errors.push(format!("dependency cycle detected: {cycle_str}"));
+            }
+        }
+    }
+
+    in_stack.remove(id);
+    path.pop();
 }
 
 pub(crate) fn read_dir(path: &Path, label: &str, errors: &mut Vec<String>) -> Vec<fs::DirEntry> {
@@ -246,6 +326,87 @@ mod tests {
         assert!(errors
             .iter()
             .any(|error| error.contains("must be named as a ticket id")));
+    }
+
+    #[test]
+    fn depends_on_missing_ticket_fails() {
+        let dir = tempdir().unwrap();
+        write_file(
+            &dir.path().join(".waap/tickets/tt-child/ticket.md"),
+            "+++\ntitle = \"Child\"\ncreation_date = 2026-06-18T10:15:02Z\nstatus = \"pending\"\ndepends_on = [\"tt-nonexistent\"]\n+++\n",
+        );
+
+        let errors = check_waap(dir.path());
+
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("tt-nonexistent") && e.contains("does not exist")));
+    }
+
+    #[test]
+    fn depends_on_self_cycle_fails() {
+        let dir = tempdir().unwrap();
+        write_file(
+            &dir.path().join(".waap/tickets/tt-self/ticket.md"),
+            "+++\ntitle = \"Self\"\ncreation_date = 2026-06-18T10:15:02Z\nstatus = \"pending\"\ndepends_on = [\"tt-self\"]\n+++\n",
+        );
+
+        let errors = check_waap(dir.path());
+
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("cycle") && e.contains("tt-self")));
+    }
+
+    #[test]
+    fn depends_on_two_ticket_cycle_fails() {
+        let dir = tempdir().unwrap();
+        write_file(
+            &dir.path().join(".waap/tickets/tt-alpha/ticket.md"),
+            "+++\ntitle = \"Alpha\"\ncreation_date = 2026-06-18T10:15:02Z\nstatus = \"pending\"\ndepends_on = [\"tt-beta\"]\n+++\n",
+        );
+        write_file(
+            &dir.path().join(".waap/tickets/tt-beta/ticket.md"),
+            "+++\ntitle = \"Beta\"\ncreation_date = 2026-06-18T10:15:02Z\nstatus = \"pending\"\ndepends_on = [\"tt-alpha\"]\n+++\n",
+        );
+
+        let errors = check_waap(dir.path());
+
+        assert!(errors.iter().any(|e| e.contains("cycle")));
+    }
+
+    #[test]
+    fn depends_on_valid_graph_passes() {
+        let dir = tempdir().unwrap();
+        write_file(
+            &dir.path().join(".waap/tickets/tt-base/ticket.md"),
+            "+++\ntitle = \"Base\"\ncreation_date = 2026-06-18T10:15:02Z\nstatus = \"completed\"\n+++\n",
+        );
+        write_file(
+            &dir.path().join(".waap/tickets/tt-mid/ticket.md"),
+            "+++\ntitle = \"Mid\"\ncreation_date = 2026-06-18T10:15:02Z\nstatus = \"pending\"\ndepends_on = [\"tt-base\"]\n+++\n",
+        );
+        write_file(
+            &dir.path().join(".waap/tickets/tt-top/ticket.md"),
+            "+++\ntitle = \"Top\"\ncreation_date = 2026-06-18T10:15:02Z\nstatus = \"pending\"\ndepends_on = [\"tt-base\", \"tt-mid\"]\n+++\n",
+        );
+
+        assert!(check_waap(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn depends_on_invalid_ticket_id_format_fails() {
+        let dir = tempdir().unwrap();
+        write_file(
+            &dir.path().join(".waap/tickets/tt-child/ticket.md"),
+            "+++\ntitle = \"Child\"\ncreation_date = 2026-06-18T10:15:02Z\nstatus = \"pending\"\ndepends_on = [\"not-a-ticket-id\"]\n+++\n",
+        );
+
+        let errors = check_waap(dir.path());
+
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("not-a-ticket-id") && e.contains("not a valid ticket id")));
     }
 
     fn write_file(path: &Path, contents: &str) {
