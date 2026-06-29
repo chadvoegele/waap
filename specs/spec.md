@@ -245,11 +245,11 @@ Agents can be run with different agent systems, selected with `waap agent run --
 
 ### Worktree Lifecycle
 
-`waap agent run` owns the agent worktree lifecycle so it does not depend on the agent following its prompt. Before launching the selected system, it creates an isolated git worktree at `worktrees/$agent_id` (a fresh branch named after the agent, checked out from the current `HEAD`) and launches the system — both `opencode` and `claude` — inside that worktree. After the attached system process exits, it removes the worktree, regardless of whether the system exited successfully or with a non-zero code. Agent instructions therefore do not tell agents to create or delete their own worktree; agents simply operate in the worktree prepared for them.
+`waap agent run` owns the agent worktree lifecycle so it does not depend on the agent following its prompt. It first commits the agent's `running` status (and the session id and chosen system) to `main`, then creates an isolated git worktree at `worktrees/$agent_id` (a fresh branch named after the agent, checked out from the current `HEAD`) and launches the system — both `opencode` and `claude` — inside that worktree. Committing the run-status *before* cutting the worktree means the agent branch descends from that commit and carries it, keeping history linear; the commit stays on `main` (not the worktree branch) so `waap agent list --status running` and `waap agent stop` see the running status and session id from the main worktree during the run. After the attached system process exits, it removes the worktree, regardless of whether the system exited successfully or with a non-zero code. Agent instructions therefore do not tell agents to create or delete their own worktree; agents simply operate in the worktree prepared for them, and to keep history linear they rebase their branch onto the current `main` `HEAD` and merge with `--ff-only` before finishing.
 
 ### opencode (default)
 
-opencode runs against a remote server. Create a session, then submit a goal command attached to that session. The session and command target the prepared agent worktree (`--dir "$WORKTREE"`) rather than the repository root.
+opencode runs against a remote server. The session is created before the worktree is cut (so its id can be committed with the `running` status in a single commit on `main`); the goal command then attaches to that session and targets the prepared agent worktree (`--dir "$WORKTREE"`).
 
 ```
 opencode run --attach "$OPENCODE_SERVER_URL" \
@@ -316,7 +316,7 @@ Be aware that many agents are editing the code simultaneously. `waap agent run` 
 
 Before you start, mark your ticket as in-progress with `waap ticket update --ticket-id $ticket_id --set-status in-progress`.
 
-Include your agent id and the ticket id your worked on in your commit message. Use a fast-forward merge when possible to keep a linear history.
+Include your agent id and the ticket id your worked on in your commit message. Your branch already descends from the `running` commit `waap agent run` made on `main`; rebase your branch onto the current `main` `HEAD` and merge with `--ff-only` to keep a linear history.
 
 When your code is merged and tested, complete your `/goal`.
 

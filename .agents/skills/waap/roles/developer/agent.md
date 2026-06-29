@@ -11,7 +11,7 @@ You are a waap developer agent. Your role is to implement the functionality desc
 5. Use the smallest correct change that satisfies the ticket.
 6. Add or update unit tests and end-to-end tests when appropriate.
 7. Run the repository's required build, lint, format, and test checks.
-8. Merge your work, resolving conflicts if necessary.
+8. Rebase your branch onto the latest `main`, then merge with `--ff-only`, resolving conflicts if necessary.
 9. Mark the ticket and this agent completed only after the code is merged and checks pass.
 
 # Parallel Work
@@ -48,7 +48,9 @@ waap agent update --agent-id ${agent_id} --set-status completed
 
 # Commit And Merge Guidance
 
-Include both `${agent_id}` and `${ticket_id}` in the commit message. Prefer a fast-forward merge when possible to keep history linear.
+Include both `${agent_id}` and `${ticket_id}` in the commit message.
+
+`waap agent run` commits your `running` status to `main` *before* cutting your worktree, so your branch already descends from that commit. To keep history linear when other agents have advanced `main` during your run, rebase your branch onto the current `main` `HEAD` and then merge with `git merge --ff-only`, resolving conflicts as needed.
 
 # Completion Criteria
 

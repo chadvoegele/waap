@@ -54,14 +54,23 @@ pub(crate) fn run_agent(
 
 /// Own the agent worktree lifecycle around a system run.
 ///
-/// A fresh worktree is prepared before `run` is invoked and is always removed afterwards, even when
-/// `run` returns an error or the system exits non-zero. The worktree path is passed to `run` so the
-/// selected system is launched inside it. The run result is propagated only after cleanup so a
-/// failing run cannot leave a stale worktree behind.
-fn run_in_agent_worktree<F>(repo_root: &Path, agent_id: &str, run: F) -> io::Result<ExitStatus>
+/// `prepare` runs first, *before* the worktree is cut. It commits the agent's `running` status to
+/// `main` so the worktree branch is created from that commit and carries it, keeping history linear
+/// (see the worktree-base reordering in the ticket). A fresh worktree is then prepared before `run`
+/// is invoked and is always removed afterwards, even when `run` returns an error or the system exits
+/// non-zero. The worktree path is passed to `run` so the selected system is launched inside it. The
+/// run result is propagated only after cleanup so a failing run cannot leave a stale worktree behind.
+fn run_in_agent_worktree<P, F>(
+    repo_root: &Path,
+    agent_id: &str,
+    prepare: P,
+    run: F,
+) -> io::Result<ExitStatus>
 where
+    P: FnOnce() -> io::Result<()>,
     F: FnOnce(&Path) -> io::Result<ExitStatus>,
 {
+    prepare()?;
     let worktree = create_agent_worktree(repo_root, agent_id)?;
     let run_result = run(&worktree);
     let cleanup_result = remove_agent_worktree(repo_root, agent_id);
@@ -77,20 +86,24 @@ fn run_agent_opencode(
 ) -> io::Result<ExitCode> {
     let mut config = opencode_run_config_from_env(repo_root)?;
 
-    let status = run_in_agent_worktree(repo_root, agent_id, |worktree| {
-        // Launch opencode against the prepared worktree rather than the repository root.
-        config.repo_root = worktree.to_path_buf();
-        let session_id = create_opencode_session(&config)?;
+    // Create the session before cutting the worktree so the session id can be committed with the
+    // `running` status in a single commit on `main`, ahead of the worktree.
+    let session_id = create_opencode_session(&config)?;
+    let (mut metadata, body) = read_agent_record(repo_root, agent_id)?;
+    metadata.session_id = Some(session_id.clone());
+    metadata.system = Some(AgentSystem::Opencode);
 
-        let (mut metadata, body) = read_agent_record(repo_root, agent_id)?;
-        metadata.session_id = Some(session_id.clone());
-        metadata.system = Some(AgentSystem::Opencode);
-
-        let command = build_opencode_run_command(&config, agent_id, &session_id);
-        run_opencode_attached(&command, || {
-            mark_running(repo_root, output_format, agent_id, &mut metadata, &body)
-        })
-    })?;
+    let status = run_in_agent_worktree(
+        repo_root,
+        agent_id,
+        || mark_running(repo_root, output_format, agent_id, &mut metadata, &body),
+        |worktree| {
+            // Launch opencode against the prepared worktree rather than the repository root.
+            config.repo_root = worktree.to_path_buf();
+            let command = build_opencode_run_command(&config, agent_id, &session_id);
+            run_opencode_attached(&command, || Ok(()))
+        },
+    )?;
     Ok(exit_code_from_status(status))
 }
 
@@ -102,25 +115,30 @@ fn run_agent_claude(
     let mut config = claude_run_config_from_env(repo_root)?;
     let session_id = Uuid::new_v4().to_string();
 
-    let status = run_in_agent_worktree(repo_root, agent_id, |worktree| {
-        // Launch claude in the prepared worktree rather than the repository root.
-        config.repo_root = worktree.to_path_buf();
+    let (mut metadata, body) = read_agent_record(repo_root, agent_id)?;
+    metadata.session_id = Some(session_id.clone());
+    metadata.system = Some(AgentSystem::Claude);
 
-        let (mut metadata, body) = read_agent_record(repo_root, agent_id)?;
-        metadata.session_id = Some(session_id.clone());
-        metadata.system = Some(AgentSystem::Claude);
-
-        let command = build_claude_run_command(&config, agent_id, &session_id);
-        run_claude_attached(&command, || {
-            mark_running(repo_root, output_format, agent_id, &mut metadata, &body)
-        })
-    })?;
+    let status = run_in_agent_worktree(
+        repo_root,
+        agent_id,
+        || mark_running(repo_root, output_format, agent_id, &mut metadata, &body),
+        |worktree| {
+            // Launch claude in the prepared worktree rather than the repository root.
+            config.repo_root = worktree.to_path_buf();
+            let command = build_claude_run_command(&config, agent_id, &session_id);
+            run_claude_attached(&command, || Ok(()))
+        },
+    )?;
     Ok(exit_code_from_status(status))
 }
 
-/// Mark the agent as running, commit the state change, and report it, once the
-/// system process has started. Runs as the `on_started` hook of the attached run
-/// helpers so the durable "running" status is committed before the long session.
+/// Mark the agent as running, commit the state change to `main`, and report it.
+///
+/// This runs as the worktree `prepare` step, *before* the worktree is cut, so the worktree branch
+/// descends from the `running` commit (keeping history linear). The commit always lands on `main`
+/// (`repo_root`) rather than the worktree branch so `waap agent list --status running` and
+/// `waap agent stop` see the running status and session id from the main worktree during the run.
 fn mark_running(
     repo_root: &Path,
     output_format: &OutputFormat,
@@ -153,26 +171,29 @@ mod tests {
 
     use super::run_in_agent_worktree;
     use crate::agent::{agent_report_json, AgentMetadata, AgentReport};
+    use crate::git::{create_agent_worktree, remove_agent_worktree};
+
+    fn git(root: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
 
     fn init_repo_with_commit(root: &Path) {
-        let run = |args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .current_dir(root)
-                .args(args)
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "git {args:?} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        };
-        run(&["init", "-q"]);
-        run(&["config", "user.name", "Test"]);
-        run(&["config", "user.email", "test@example.com"]);
+        git(root, &["init", "-q"]);
+        git(root, &["config", "user.name", "Test"]);
+        git(root, &["config", "user.email", "test@example.com"]);
         fs::write(root.join("README.md"), "seed\n").unwrap();
-        run(&["add", "-A"]);
-        run(&["commit", "-q", "-m", "seed"]);
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-q", "-m", "seed"]);
     }
 
     #[test]
@@ -181,12 +202,17 @@ mod tests {
         init_repo_with_commit(dir.path());
 
         let mut launch_dir: Option<PathBuf> = None;
-        let status = run_in_agent_worktree(dir.path(), "aa-00000001", |worktree| {
-            // The system is launched in the prepared worktree, which exists during the run.
-            assert!(worktree.is_dir());
-            launch_dir = Some(worktree.to_path_buf());
-            Ok(ExitStatus::from_raw(0))
-        })
+        let status = run_in_agent_worktree(
+            dir.path(),
+            "aa-00000001",
+            || Ok(()),
+            |worktree| {
+                // The system is launched in the prepared worktree, which exists during the run.
+                assert!(worktree.is_dir());
+                launch_dir = Some(worktree.to_path_buf());
+                Ok(ExitStatus::from_raw(0))
+            },
+        )
         .unwrap();
 
         assert_eq!(status.code(), Some(0));
@@ -201,10 +227,15 @@ mod tests {
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path());
 
-        let status = run_in_agent_worktree(dir.path(), "aa-00000001", |worktree| {
-            assert!(worktree.is_dir());
-            Ok(ExitStatus::from_raw(7 << 8))
-        })
+        let status = run_in_agent_worktree(
+            dir.path(),
+            "aa-00000001",
+            || Ok(()),
+            |worktree| {
+                assert!(worktree.is_dir());
+                Ok(ExitStatus::from_raw(7 << 8))
+            },
+        )
         .unwrap();
 
         assert_eq!(status.code(), Some(7));
@@ -216,16 +247,102 @@ mod tests {
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path());
 
-        let error = run_in_agent_worktree(dir.path(), "aa-00000001", |worktree| {
-            // Simulate a failure mid-run (e.g. the system process could not be launched).
-            assert!(worktree.is_dir());
-            Err(std::io::Error::other("boom"))
-        })
+        let error = run_in_agent_worktree(
+            dir.path(),
+            "aa-00000001",
+            || Ok(()),
+            |worktree| {
+                // Simulate a failure mid-run (e.g. the system process could not be launched).
+                assert!(worktree.is_dir());
+                Err(std::io::Error::other("boom"))
+            },
+        )
         .unwrap_err();
 
         assert_eq!(error.to_string(), "boom");
         // Cleanup still runs when the run fails.
         assert!(!dir.path().join("worktrees/aa-00000001").exists());
+    }
+
+    #[test]
+    fn run_in_agent_worktree_cuts_branch_from_prepare_commit() {
+        // The `prepare` step commits the run-status to `main` before the worktree is cut, so the
+        // worktree branch must descend from that commit and carry it (acceptance criteria 1 & 3).
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let seed = git(dir.path(), &["rev-parse", "HEAD"]);
+
+        let mut head_at_run = None;
+        run_in_agent_worktree(
+            dir.path(),
+            "aa-00000001",
+            || {
+                // Simulate `mark_running` committing the run-status to `main`.
+                fs::write(dir.path().join("running.txt"), "running\n").unwrap();
+                git(dir.path(), &["add", "running.txt"]);
+                git(
+                    dir.path(),
+                    &["commit", "-q", "-m", "waap agent run aa-00000001"],
+                );
+                Ok(())
+            },
+            |worktree| {
+                // The worktree branch was cut after the run-status commit, so it contains the file.
+                assert!(worktree.join("running.txt").exists());
+                head_at_run = Some(git(worktree, &["rev-parse", "HEAD"]));
+                Ok(ExitStatus::from_raw(0))
+            },
+        )
+        .unwrap();
+
+        let run_commit = git(dir.path(), &["rev-parse", "HEAD"]);
+        // The run-status commit descends from the seed and the worktree branch was cut from it.
+        assert_ne!(run_commit, seed);
+        assert_eq!(head_at_run.unwrap(), run_commit);
+        // History up to the run-status commit is linear: each commit has at most one parent.
+        let parents = git(dir.path(), &["rev-list", "--merges", "HEAD"]);
+        assert!(parents.is_empty(), "unexpected merge commits: {parents}");
+    }
+
+    #[test]
+    fn agent_branch_rebase_and_ff_merge_keeps_main_linear() {
+        // End-to-end of the ordering + the agent's rebase/`--ff-only` merge step: even when `main`
+        // advances during the run, history stays linear with no merge bubble (acceptance criteria
+        // 1, 4 & 6).
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+
+        // The run commits the run-status to `main`, then cuts the worktree branch from it.
+        fs::write(dir.path().join("running.txt"), "running\n").unwrap();
+        git(dir.path(), &["add", "running.txt"]);
+        git(
+            dir.path(),
+            &["commit", "-q", "-m", "waap agent run aa-00000001"],
+        );
+        let worktree = create_agent_worktree(dir.path(), "aa-00000001").unwrap();
+
+        // The agent commits its work on its branch.
+        fs::write(worktree.join("feature.txt"), "feature\n").unwrap();
+        git(&worktree, &["add", "feature.txt"]);
+        git(&worktree, &["commit", "-q", "-m", "feature aa-00000001"]);
+
+        // Meanwhile another agent advances `main`.
+        fs::write(dir.path().join("other.txt"), "other\n").unwrap();
+        git(dir.path(), &["add", "other.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "other agent"]);
+
+        // The agent rebases onto the current `main` and fast-forward merges back.
+        git(&worktree, &["rebase", "main"]);
+        git(dir.path(), &["merge", "--ff-only", "aa-00000001"]);
+
+        // No merge commits: `git log --graph` would show a straight line.
+        let merges = git(dir.path(), &["rev-list", "--merges", "HEAD"]);
+        assert!(merges.is_empty(), "unexpected merge commits: {merges}");
+        // Both the other agent's work and this agent's work are present on the linear `main`.
+        assert!(dir.path().join("other.txt").exists());
+        assert!(dir.path().join("feature.txt").exists());
+
+        remove_agent_worktree(dir.path(), "aa-00000001").unwrap();
     }
 
     #[test]
