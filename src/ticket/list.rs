@@ -281,7 +281,7 @@ status = \"ready\"
         assert!(!ids.contains(&"tt-blocked"));
     }
 
-    fn ticket_ids<'a>(entries: &'a [TicketListEntry]) -> Vec<&'a str> {
+    fn ticket_ids(entries: &[TicketListEntry]) -> Vec<&str> {
         entries
             .iter()
             .map(|entry| entry.report.ticket_id.as_str())
