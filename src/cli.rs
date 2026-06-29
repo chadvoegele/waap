@@ -9,10 +9,10 @@ use crate::ticket::TicketStatus;
 #[command(name = "waap")]
 #[command(about = "Waap Agent Automation Platform")]
 pub(crate) struct Cli {
-    #[arg(long, value_enum, default_value = "human-readable")]
+    #[arg(long, value_enum, default_value = "human-readable", global = true)]
     pub(crate) output_format: OutputFormat,
 
-    #[arg(long, default_value = ".")]
+    #[arg(long, default_value = ".", global = true)]
     pub(crate) repo_root: PathBuf,
 
     #[command(subcommand)]
@@ -570,6 +570,105 @@ mod tests {
                     set_session_id: Some(session_id),
                 }
             } if agent_id == "aa-3881fda0" && session_id == "ses_123"
+        ));
+    }
+
+    #[test]
+    fn parses_output_format_after_ticket_list_flags() {
+        let cli = Cli::try_parse_from([
+            "waap",
+            "ticket",
+            "list",
+            "--status",
+            "pending",
+            "--unblocked",
+            "--output-format",
+            "json",
+        ])
+        .unwrap();
+
+        assert!(matches!(cli.output_format, OutputFormat::Json));
+        assert!(matches!(
+            cli.command,
+            Command::Ticket {
+                command: TicketCommand::List {
+                    status: Some(TicketStatus::Pending),
+                    blocked: false,
+                    unblocked: true,
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_repo_root_after_ticket_list_flags() {
+        let cli = Cli::try_parse_from([
+            "waap",
+            "ticket",
+            "list",
+            "--status",
+            "pending",
+            "--repo-root",
+            "/some/path",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.repo_root, PathBuf::from("/some/path"));
+        assert!(matches!(
+            cli.command,
+            Command::Ticket {
+                command: TicketCommand::List {
+                    status: Some(TicketStatus::Pending),
+                    blocked: false,
+                    unblocked: false,
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_output_format_after_agent_list_flags() {
+        let cli = Cli::try_parse_from([
+            "waap",
+            "agent",
+            "list",
+            "--status",
+            "running",
+            "--output-format",
+            "json",
+        ])
+        .unwrap();
+
+        assert!(matches!(cli.output_format, OutputFormat::Json));
+        assert!(matches!(
+            cli.command,
+            Command::Agent {
+                command: AgentCommand::List {
+                    status: Some(AgentStatus::Running)
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_repo_root_after_agent_get_flags() {
+        let cli = Cli::try_parse_from([
+            "waap",
+            "agent",
+            "get",
+            "--agent-id",
+            "aa-3881fda0",
+            "--repo-root",
+            "/some/path",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.repo_root, PathBuf::from("/some/path"));
+        assert!(matches!(
+            cli.command,
+            Command::Agent {
+                command: AgentCommand::Get { agent_id }
+            } if agent_id == "aa-3881fda0"
         ));
     }
 
