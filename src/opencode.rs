@@ -1,11 +1,11 @@
 use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, Stdio};
-use std::thread;
-use std::time::Duration;
+use std::process::{Command as ProcessCommand, ExitStatus};
 
 use serde_json::{json, Value as JsonValue};
+
+use crate::process::run_forwarding;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct OpencodeRunConfig {
@@ -41,14 +41,19 @@ pub(crate) fn required_env(name: &str) -> io::Result<String> {
     })
 }
 
-pub(crate) fn run_opencode_detached(command: &OpencodeRunCommand) -> io::Result<()> {
-    ProcessCommand::new(&command.program)
-        .args(&command.args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    Ok(())
+/// Run the OpenCode system in the foreground, forwarding its stdout and stderr
+/// to this process's stdout and stderr, and return its exit status.
+/// `on_started` runs once the process has been launched.
+pub(crate) fn run_opencode_attached<F>(
+    command: &OpencodeRunCommand,
+    on_started: F,
+) -> io::Result<ExitStatus>
+where
+    F: FnOnce() -> io::Result<()>,
+{
+    let mut process = ProcessCommand::new(&command.program);
+    process.args(&command.args);
+    run_forwarding(&mut process, on_started)
 }
 
 pub(crate) fn create_opencode_session(config: &OpencodeRunConfig) -> io::Result<String> {
@@ -75,36 +80,6 @@ pub(crate) fn create_opencode_session(config: &OpencodeRunConfig) -> io::Result<
         })
 }
 
-pub(crate) fn wait_for_opencode_session_status(
-    config: &OpencodeRunConfig,
-    session_id: &str,
-) -> io::Result<bool> {
-    for _ in 0..10 {
-        if opencode_session_has_status(config, session_id)? {
-            return Ok(true);
-        }
-        thread::sleep(Duration::from_millis(200));
-    }
-    Ok(false)
-}
-
-pub(crate) fn opencode_session_has_status(
-    config: &OpencodeRunConfig,
-    session_id: &str,
-) -> io::Result<bool> {
-    let response: JsonValue = reqwest::blocking::Client::new()
-        .get(opencode_url(config, "/session/status"))
-        .basic_auth(&config.username, Some(&config.password))
-        .query(&[("directory", config.repo_root.display().to_string())])
-        .send()
-        .and_then(reqwest::blocking::Response::error_for_status)
-        .map_err(opencode_http_error)?
-        .json()
-        .map_err(opencode_http_error)?;
-
-    Ok(session_status_type(&response, session_id).is_some())
-}
-
 pub(crate) fn abort_opencode_session(
     config: &OpencodeRunConfig,
     session_id: &str,
@@ -121,16 +96,6 @@ pub(crate) fn abort_opencode_session(
         .map_err(opencode_http_error)?;
 
     Ok(())
-}
-
-pub(crate) fn session_status_type<'a>(
-    response: &'a JsonValue,
-    session_id: &str,
-) -> Option<&'a str> {
-    response
-        .get(session_id)
-        .and_then(|status| status.get("type"))
-        .and_then(JsonValue::as_str)
 }
 
 pub(crate) fn opencode_http_error(error: reqwest::Error) -> io::Error {
@@ -187,8 +152,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        build_opencode_run_command, create_session_payload, opencode_url, session_status_type,
-        OpencodeRunConfig,
+        build_opencode_run_command, create_session_payload, opencode_url, run_opencode_attached,
+        OpencodeRunCommand, OpencodeRunConfig,
     };
 
     #[test]
@@ -217,15 +182,21 @@ mod tests {
     }
 
     #[test]
-    fn session_status_type_reads_status_map() {
-        let response = json!({
-            "ses_123": { "type": "busy" },
-            "ses_456": { "type": "idle" },
-        });
+    fn run_opencode_attached_propagates_exit_code_and_marks_started() {
+        let command = OpencodeRunCommand {
+            program: "sh".to_string(),
+            args: vec!["-c".to_string(), "exit 3".to_string()],
+        };
 
-        assert_eq!(session_status_type(&response, "ses_123"), Some("busy"));
-        assert_eq!(session_status_type(&response, "ses_456"), Some("idle"));
-        assert_eq!(session_status_type(&response, "ses_missing"), None);
+        let mut started = false;
+        let status = run_opencode_attached(&command, || {
+            started = true;
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(started);
+        assert_eq!(status.code(), Some(3));
     }
 
     #[test]

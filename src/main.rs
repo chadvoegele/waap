@@ -6,6 +6,7 @@ mod cli;
 mod frontmatter;
 mod ids;
 mod opencode;
+mod process;
 mod record;
 mod ticket;
 

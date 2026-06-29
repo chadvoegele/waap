@@ -1,7 +1,9 @@
 use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, Stdio};
+use std::process::{Command as ProcessCommand, ExitStatus};
+
+use crate::process::run_forwarding;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ClaudeRunConfig {
@@ -39,16 +41,21 @@ pub(crate) fn kill_claude_session(session_id: &str) -> io::Result<()> {
     }
 }
 
-pub(crate) fn run_claude_detached(command: &ClaudeRunCommand) -> io::Result<()> {
-    ProcessCommand::new("setsid")
-        .arg(&command.program)
+/// Run the Claude system in the foreground, forwarding its stdout and stderr to
+/// this process's stdout and stderr, and return its exit status. `on_started`
+/// runs once the process has been launched.
+pub(crate) fn run_claude_attached<F>(
+    command: &ClaudeRunCommand,
+    on_started: F,
+) -> io::Result<ExitStatus>
+where
+    F: FnOnce() -> io::Result<()>,
+{
+    let mut process = ProcessCommand::new(&command.program);
+    process
         .args(&command.args)
-        .current_dir(&command.working_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    Ok(())
+        .current_dir(&command.working_dir);
+    run_forwarding(&mut process, on_started)
 }
 
 pub(crate) fn build_claude_run_command(
@@ -87,7 +94,26 @@ pub(crate) fn build_claude_run_command(
 mod tests {
     use std::path::PathBuf;
 
-    use super::{build_claude_run_command, ClaudeRunCommand, ClaudeRunConfig};
+    use super::{build_claude_run_command, run_claude_attached, ClaudeRunCommand, ClaudeRunConfig};
+
+    #[test]
+    fn run_claude_attached_propagates_exit_code_and_marks_started() {
+        let command = ClaudeRunCommand {
+            program: "sh".to_string(),
+            args: vec!["-c".to_string(), "exit 5".to_string()],
+            working_dir: std::env::temp_dir(),
+        };
+
+        let mut started = false;
+        let status = run_claude_attached(&command, || {
+            started = true;
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(started);
+        assert_eq!(status.code(), Some(5));
+    }
 
     #[test]
     fn claude_run_command_matches_spec() {
