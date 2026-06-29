@@ -1,15 +1,14 @@
 // Minimal JSON-RPC client for `codex app-server --stdio`.
 //
-// `run_agent_codex` (see /specs/codex-agent-system.md §3) now drives a run through this client.
-// `turn_interrupt` is the lone exception: it is exercised only by the graceful-stop signal handler,
-// which lands in the dependent `waap agent stop` ticket (§5), so allow dead code module-wide to keep
-// `cargo clippy --all-targets -- -D warnings` green until that wiring exists.
-#![allow(dead_code)]
+// `run_agent_codex` (see /specs/codex-agent-system.md §3) drives a run through this client;
+// `signal_codex_run` and the `pump_until_turn_completed` interrupt path implement the graceful
+// `waap agent stop` flow (§5).
 
 use std::env;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command as ProcessCommand, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{json, Value as JsonValue};
 
@@ -49,6 +48,34 @@ pub(crate) fn codex_run_config_from_env(repo_root: &Path) -> io::Result<CodexRun
             .filter(|model| !model.is_empty()),
         repo_root: repo_root.canonicalize()?,
     })
+}
+
+/// Send `SIGTERM` to the `waap agent run` process (R) driving the codex agent,
+/// matched by its unique argv `agent run --agent-id <agent-id>`. This matches R,
+/// not the `codex app-server --stdio` child (which lacks the agent id), and is
+/// independent of whether R runs in the foreground or backgrounded
+/// (`nohup`/`setsid`) — see /specs/codex-agent-system.md §5. R's `SIGTERM`
+/// handler then issues a graceful `turn/interrupt`. Mirrors
+/// `kill_claude_session`'s pkill exit-code handling (0 or 1 ⇒ Ok).
+pub(crate) fn signal_codex_run(agent_id: &str) -> io::Result<()> {
+    let mut command = ProcessCommand::new("pkill");
+    command
+        .arg("-TERM")
+        .arg("-f")
+        .arg(format!("agent run --agent-id {agent_id}"));
+    map_pkill_status(command)
+}
+
+/// Run a `pkill`-style command and map its exit code: 0 (a process was
+/// signalled) and 1 (no process matched — R already exited) are both success;
+/// any other code, or termination by a signal, is an error.
+fn map_pkill_status(mut command: ProcessCommand) -> io::Result<()> {
+    let status = command.status()?;
+    match status.code() {
+        Some(0) | Some(1) => Ok(()),
+        Some(code) => Err(io::Error::other(format!("pkill exited with status {code}"))),
+        None => Err(io::Error::other("pkill terminated by signal")),
+    }
 }
 
 /// Final state of a turn, mirroring `codex_app_server_protocol::v2::TurnStatus`.
@@ -166,6 +193,9 @@ fn completed_status_for_turn(
     thread_id: &str,
     turn_id: &str,
 ) -> Option<io::Result<TurnStatus>> {
+    if message.get("method").and_then(JsonValue::as_str)? != METHOD_TURN_COMPLETED {
+        return None;
+    }
     let params = message.get("params")?;
     if params.get("threadId").and_then(JsonValue::as_str)? != thread_id {
         return None;
@@ -195,7 +225,9 @@ pub(crate) struct CodexClient<R, W, O> {
     model: Option<String>,
     /// Held to keep the spawned `codex app-server` process alive for the life of
     /// the client; `None` in tests. Dropping `writer` EOFs the child's stdin,
-    /// which tears the server down.
+    /// which tears the server down. Never read — it is an RAII guard for the
+    /// child handle.
+    #[allow(dead_code)]
     child: Option<Child>,
 }
 
@@ -234,6 +266,10 @@ pub(crate) fn spawn_codex_app_server(
 }
 
 impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
+    /// Construct a client over arbitrary transports. Used by tests to drive the
+    /// client with in-memory buffers; production code uses
+    /// `spawn_codex_app_server`.
+    #[cfg(test)]
     fn new(reader: R, writer: W, out: O, model: Option<String>) -> Self {
         Self {
             reader,
@@ -374,12 +410,28 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
 
     /// Pump inbound notifications until the turn completes, forwarding agent
     /// message deltas to waap stdout, and return the final `TurnStatus`.
+    ///
+    /// `interrupt` is the graceful-stop flag set by the run process's `SIGTERM`
+    /// handler (see /specs/codex-agent-system.md §5). When it is observed the
+    /// pump issues a single `turn/interrupt`; the server then ends the turn with
+    /// a non-`Completed` (`interrupted`) status, which this loop returns. The
+    /// flag is checked at the top of each loop iteration, so it is acted on as
+    /// soon as the next inbound message unblocks the read — during an active turn
+    /// codex streams notifications continuously, so the interrupt is prompt
+    /// without needing to wake the blocking read from the signal handler.
     pub(crate) fn pump_until_turn_completed(
         &mut self,
         thread_id: &str,
         turn_id: &str,
+        interrupt: &AtomicBool,
     ) -> io::Result<TurnStatus> {
+        let mut interrupt_sent = false;
         loop {
+            if !interrupt_sent && interrupt.load(Ordering::SeqCst) {
+                self.turn_interrupt(thread_id, turn_id)?;
+                interrupt_sent = true;
+            }
+
             let message = self.read_message()?.ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -539,7 +591,9 @@ mod tests {
             );
             let mut client = client_over(&input);
 
-            let status = client.pump_until_turn_completed("th", "tu").unwrap();
+            let status = client
+                .pump_until_turn_completed("th", "tu", &AtomicBool::new(false))
+                .unwrap();
 
             assert_eq!(status, expected, "wire status {wire}");
         }
@@ -554,7 +608,9 @@ mod tests {
         );
         let mut client = client_over(input);
 
-        let status = client.pump_until_turn_completed("th", "tu").unwrap();
+        let status = client
+            .pump_until_turn_completed("th", "tu", &AtomicBool::new(false))
+            .unwrap();
 
         assert_eq!(status, TurnStatus::Completed);
         assert_eq!(
@@ -569,7 +625,7 @@ mod tests {
         let mut client = client_over(input);
 
         let error = client
-            .pump_until_turn_completed("th", "tu")
+            .pump_until_turn_completed("th", "tu", &AtomicBool::new(false))
             .expect_err("EOF before turn/completed must error");
 
         assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
@@ -581,5 +637,63 @@ mod tests {
         assert!(!TurnStatus::Failed.is_success());
         assert!(!TurnStatus::Interrupted.is_success());
         assert!(!TurnStatus::InProgress.is_success());
+    }
+
+    #[test]
+    fn pump_interrupts_when_flag_is_set_and_returns_interrupted_status() {
+        // With the interrupt flag pre-set, the pump issues `turn/interrupt`
+        // (request id 0, the first request on this client), reads its `{}`
+        // response, and then returns the resulting non-`Completed` status from
+        // the `turn/completed` the server emits for the interrupted turn (§5).
+        let input = concat!(
+            "{\"id\":0,\"result\":{}}\n",
+            "{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"th\",\"turn\":{\"id\":\"tu\",\"status\":\"interrupted\"}}}\n",
+        );
+        let mut client = client_over(input);
+        let interrupt = AtomicBool::new(true);
+
+        let status = client
+            .pump_until_turn_completed("th", "tu", &interrupt)
+            .unwrap();
+
+        assert_eq!(status, TurnStatus::Interrupted);
+        // A single `turn/interrupt` request was sent for the turn.
+        let request = parse(&String::from_utf8(client.writer.clone()).unwrap());
+        assert_eq!(request["method"], json!("turn/interrupt"));
+        assert_eq!(request["params"]["threadId"], json!("th"));
+        assert_eq!(request["params"]["turnId"], json!("tu"));
+    }
+
+    #[test]
+    fn pump_does_not_interrupt_when_flag_is_unset() {
+        // Without the flag set, the pump never writes a `turn/interrupt` request.
+        let input = "{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"th\",\"turn\":{\"id\":\"tu\",\"status\":\"completed\"}}}\n";
+        let mut client = client_over(input);
+
+        let status = client
+            .pump_until_turn_completed("th", "tu", &AtomicBool::new(false))
+            .unwrap();
+
+        assert_eq!(status, TurnStatus::Completed);
+        assert!(client.writer.is_empty(), "no request should be written");
+    }
+
+    #[test]
+    fn signal_status_maps_zero_and_one_to_ok_and_other_to_err() {
+        // Mirrors `kill_claude_session`'s exit-code handling, exercised with
+        // `sh -c "exit N"` stand-ins for `pkill`: 0/1 ⇒ Ok, anything else ⇒ Err.
+        for code in [0, 1] {
+            let mut command = ProcessCommand::new("sh");
+            command.arg("-c").arg(format!("exit {code}"));
+            assert!(
+                map_pkill_status(command).is_ok(),
+                "exit {code} should be Ok"
+            );
+        }
+
+        let mut command = ProcessCommand::new("sh");
+        command.arg("-c").arg("exit 2");
+        let error = map_pkill_status(command).expect_err("exit 2 should be Err");
+        assert!(error.to_string().contains("status 2"));
     }
 }

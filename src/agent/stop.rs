@@ -10,6 +10,7 @@ use crate::agent::{
 };
 use crate::claude::kill_claude_session;
 use crate::cli::OutputFormat;
+use crate::codex::signal_codex_run;
 use crate::opencode::{abort_opencode_session, opencode_run_config_from_env};
 use crate::record::{list_record_ids, WaapRecordKind};
 
@@ -43,28 +44,30 @@ pub(crate) fn stop_agents_with_systems(
     agent_id: Option<&str>,
 ) -> io::Result<Vec<AgentReport>> {
     let mut config = None;
-    stop_agents(repo_root, agent_id, |system, session_id| match system {
-        AgentSystem::Opencode => {
-            if config.is_none() {
-                config = Some(opencode_run_config_from_env(repo_root)?);
+    // The abort closure receives both `agent_id` and `session_id`: claude/opencode key their stop on
+    // the `session_id`, while codex keys on the `agent_id` because `turn/interrupt` requires the live
+    // JSON-RPC connection held only by the running `waap agent run` process, which is signalled by its
+    // unique argv (see /specs/codex-agent-system.md §5).
+    stop_agents(
+        repo_root,
+        agent_id,
+        |system, agent_id, session_id| match system {
+            AgentSystem::Opencode => {
+                if config.is_none() {
+                    config = Some(opencode_run_config_from_env(repo_root)?);
+                }
+                abort_opencode_session(config.as_ref().expect("config initialized"), session_id)
             }
-            abort_opencode_session(config.as_ref().expect("config initialized"), session_id)
-        }
-        AgentSystem::Claude => kill_claude_session(session_id),
-        // Stub until `tt-graceful-codex-stop` wires the SIGTERM/turn-interrupt
-        // stop path (spec /specs/codex-agent-system.md §5). No codex run can be
-        // started yet (see `run_agent`), so this is unreachable in practice.
-        AgentSystem::Codex => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "stopping system \"codex\" is not yet implemented",
-        )),
-    })
+            AgentSystem::Claude => kill_claude_session(session_id),
+            AgentSystem::Codex => signal_codex_run(agent_id),
+        },
+    )
 }
 
 pub(crate) fn stop_agents(
     repo_root: &Path,
     agent_id: Option<&str>,
-    mut abort: impl FnMut(&AgentSystem, &str) -> io::Result<()>,
+    mut abort: impl FnMut(&AgentSystem, &str, &str) -> io::Result<()>,
 ) -> io::Result<Vec<AgentReport>> {
     match agent_id {
         Some(agent_id) => stop_agent_if_running(repo_root, agent_id, &mut abort)
@@ -84,7 +87,7 @@ pub(crate) fn stop_agents(
 fn stop_agent_if_running(
     repo_root: &Path,
     agent_id: &str,
-    abort: &mut impl FnMut(&AgentSystem, &str) -> io::Result<()>,
+    abort: &mut impl FnMut(&AgentSystem, &str, &str) -> io::Result<()>,
 ) -> io::Result<Option<AgentReport>> {
     let report = load_agent_report(repo_root, agent_id)?;
     if report.metadata.status != AgentStatus::Running.as_str() {
@@ -94,7 +97,7 @@ fn stop_agent_if_running(
     let (mut metadata, body) = read_agent_record(repo_root, agent_id)?;
     if let Some(session_id) = &report.metadata.session_id {
         let system = metadata.system.as_ref().unwrap_or(&AgentSystem::Opencode);
-        abort(system, session_id)?;
+        abort(system, agent_id, session_id)?;
     }
 
     metadata.status = AgentStatus::Aborted.as_str().to_string();
@@ -255,7 +258,7 @@ mod tests {
         write_agent_with_session(dir.path(), "aa-00000002", "ready", Some("ses_ready"));
         let mut aborted = Vec::new();
 
-        let reports = stop_agents(dir.path(), None, |_system, session_id| {
+        let reports = stop_agents(dir.path(), None, |_system, _agent_id, session_id| {
             aborted.push(session_id.to_string());
             Ok(())
         })
@@ -272,7 +275,7 @@ mod tests {
         let mut aborted = Vec::new();
         let mut killed = Vec::new();
 
-        let reports = stop_agents(dir.path(), None, |system, session_id| {
+        let reports = stop_agents(dir.path(), None, |system, _agent_id, session_id| {
             match system {
                 AgentSystem::Opencode => aborted.push(session_id.to_string()),
                 AgentSystem::Claude => killed.push(session_id.to_string()),
@@ -299,9 +302,62 @@ mod tests {
         let dir = tempdir().unwrap();
         write_claude_agent_with_session(dir.path(), "aa-00000001", "running", "ses_claude");
 
-        let error = stop_agents(dir.path(), Some("aa-00000001"), |_system, _session_id| {
-            Err(io::Error::other("kill failed"))
+        let error = stop_agents(
+            dir.path(),
+            Some("aa-00000001"),
+            |_system, _agent_id, _session_id| Err(io::Error::other("kill failed")),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(
+            load_agent_report(dir.path(), "aa-00000001")
+                .unwrap()
+                .metadata
+                .status,
+            "running"
+        );
+    }
+
+    #[test]
+    fn agent_stop_signals_codex_run_with_agent_id_not_session_id() {
+        let dir = tempdir().unwrap();
+        write_codex_agent_with_session(dir.path(), "aa-00000001", "running", "th_codex");
+        let mut signalled = Vec::new();
+
+        let reports = stop_agents(dir.path(), None, |system, agent_id, session_id| {
+            match system {
+                // The codex arm keys on the agent id, not the session id (§5).
+                AgentSystem::Codex => signalled.push(agent_id.to_string()),
+                AgentSystem::Claude | AgentSystem::Opencode => {
+                    signalled.push(session_id.to_string())
+                }
+            }
+            Ok(())
         })
+        .unwrap();
+
+        assert_eq!(agent_ids(&reports), vec!["aa-00000001"]);
+        assert_eq!(signalled, vec!["aa-00000001"]);
+        assert_eq!(
+            load_agent_report(dir.path(), "aa-00000001")
+                .unwrap()
+                .metadata
+                .status,
+            "aborted"
+        );
+    }
+
+    #[test]
+    fn agent_stop_does_not_mark_aborted_when_codex_signal_fails() {
+        let dir = tempdir().unwrap();
+        write_codex_agent_with_session(dir.path(), "aa-00000001", "running", "th_codex");
+
+        let error = stop_agents(
+            dir.path(),
+            Some("aa-00000001"),
+            |_system, _agent_id, _session_id| Err(io::Error::other("signal failed")),
+        )
         .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::Other);
@@ -319,9 +375,11 @@ mod tests {
         let dir = tempdir().unwrap();
         write_agent_with_session(dir.path(), "aa-3881fda0", "running", Some("ses_123"));
 
-        let error = stop_agents(dir.path(), Some("aa-3881fda0"), |_system, _session_id| {
-            Err(io::Error::other("abort failed"))
-        })
+        let error = stop_agents(
+            dir.path(),
+            Some("aa-3881fda0"),
+            |_system, _agent_id, _session_id| Err(io::Error::other("abort failed")),
+        )
         .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::Other);
@@ -410,12 +468,26 @@ mod tests {
         );
     }
 
+    fn write_codex_agent_with_session(
+        repo_root: &Path,
+        agent_id: &str,
+        status: &str,
+        session_id: &str,
+    ) {
+        write_file(
+            &repo_root.join(format!(".waap/agents/{agent_id}/agent.md")),
+            &format!(
+                "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"{status}\"\nsession_id = \"{session_id}\"\nsystem = \"codex\"\n+++\n\n# Purpose\n"
+            ),
+        );
+    }
+
     fn write_file(path: &Path, contents: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, contents).unwrap();
     }
 
-    fn noop_abort(_: &AgentSystem, _: &str) -> io::Result<()> {
+    fn noop_abort(_: &AgentSystem, _: &str, _: &str) -> io::Result<()> {
         Ok(())
     }
 }

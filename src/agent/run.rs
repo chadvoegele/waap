@@ -1,6 +1,8 @@
 use std::io;
 use std::path::Path;
 use std::process::{ExitCode, ExitStatus};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use crate::agent::{
     agent_report_json, load_agent_report, print_agent_report_human, read_agent_record,
@@ -155,6 +157,15 @@ fn run_agent_codex(
     metadata.system = Some(AgentSystem::Codex);
     // session_id (the ThreadId) is unknown until thread/start returns inside the worktree.
 
+    // Install a SIGTERM handler that flips this flag; `waap agent stop` signals this process (R) and
+    // `pump_until_turn_completed` observes the flag to issue a graceful `turn/interrupt` before
+    // unwinding (see /specs/codex-agent-system.md §5). The interrupted turn yields a non-`Completed`
+    // status, so `finalize_codex_run` leaves the agent `running` and does not overwrite the `aborted`
+    // status `stop` wrote to the record.
+    let interrupt = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&interrupt))
+        .map_err(|error| io::Error::other(format!("failed to install SIGTERM handler: {error}")))?;
+
     let status = run_in_agent_worktree(
         repo_root,
         agent_id,
@@ -174,7 +185,7 @@ fn run_agent_codex(
                 "Complete when instructions in /.waap/agents/{agent_id}/agent.md are satisfied"
             );
             let turn_id = client.turn_start(&thread_id, &prompt)?;
-            client.pump_until_turn_completed(&thread_id, &turn_id)
+            client.pump_until_turn_completed(&thread_id, &turn_id, &interrupt)
         },
     )?;
     finalize_codex_run(repo_root, output_format, agent_id, status)
