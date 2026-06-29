@@ -1,71 +1,42 @@
 # Add `codex` as an agent-run system
 
-Implementation plan for adding `codex` as a third value of
-`waap agent run --system`, alongside `opencode` and `claude`. This is a design
-document; the ticket that introduces it makes no `src/` change.
+Implementation plan for adding `codex` as a third value of `waap agent run
+--system`, alongside `opencode` and `claude`.
 
 ## Design
 
 `codex` is driven through **`codex app-server --stdio`**, a JSON-RPC 2.0 server
-spawned as a per-run child process (the same process lifecycle as claude — no
-standing server). Within a run:
+spawned as a per-run child process. Within a run:
 
 - `session_id` is codex's authentic `ThreadId`, returned synchronously by
-  `thread/start`.
-- The agent runs with never-prompt approvals and full sandbox access (matching
-  the claude path).
+`thread/start`.
+- The agent runs with never-prompt approvals and full sandbox access.
 - The agent's event stream is forwarded to the operator's stdout.
 - Completion is derived from the `turn/completed` status.
 - `waap agent stop` signals the run process, which issues a graceful
-  `turn/interrupt`.
-
-## Existing wiring this builds on
-
-- `src/agent.rs` — `AgentSystem` enum (`Opencode`, `Claude`) with
-  `as_str`/`parse`/`labels`, persisted to/from agent frontmatter (`system = "…"`).
-- `src/cli.rs` — `AgentCommand::Run { agent_id, system }`; `system` is a clap
-  `value_enum` defaulting to `opencode`.
-- `src/claude.rs` — `build_claude_run_command`, `run_claude_attached`,
-  `kill_claude_session`, `claude_run_config_from_env` (`CLAUDE_MODEL`).
-- `src/opencode.rs` — the opencode equivalent, with HTTP session creation
-  (`create_opencode_session`, a real id up front) and abort
-  (`abort_opencode_session`). codex's app-server path is the closest analogue.
-- `src/agent/run.rs` — `run_agent` dispatch, `run_agent_claude`/
-  `run_agent_opencode`, `run_in_agent_worktree` (worktree lifecycle),
-  `mark_running` (commits `running` to `main` before the worktree is cut),
-  `finalize_agent_run`/`mark_completed`.
-- `src/agent/stop.rs` — `stop_agents_with_systems` dispatches the per-system
-  abort.
-- `src/process.rs` — `run_forwarding`, the shared inherit-stdio + `on_started`
-  primitive claude/opencode use. codex does not use it (it owns the child's
-  stdin/stdout for JSON-RPC).
+`turn/interrupt`.
 
 ## codex app-server protocol
 
-`codex app-server` (alias `--stdio` / `--listen stdio://`, the default) speaks
-JSON-RPC 2.0 over stdin/stdout as newline-delimited JSON (the `"jsonrpc":"2.0"`
-header is omitted on the wire). One connection per process; the process exits
-when the connection closes. Methods waap uses:
+`codex app-server` (alias `--stdio`) speaks JSON-RPC 2.0 over stdin/stdout as
+newline-delimited JSON (the `"jsonrpc":"2.0"` header is omitted on the wire).
+One connection per process; the process exits when the connection closes.
+Methods waap uses:
 
 - **`initialize`** (with client metadata/capabilities), followed by the
-  `initialized` notification. Any other request before this handshake is
-  rejected.
+`initialized` notification. Any other request before this handshake is
+rejected.
 - **`thread/start`** — params include `cwd`, permission/sandbox overrides,
-  optional `model`. The response returns the thread object including its
-  `ThreadId`; the server also emits `thread/started` and auto-subscribes the
-  connection to that thread's turn/item events.
-- **`turn/start`** — `{ threadId, input, … }`; returns the new turn object (with
-  a turn id), emits `turn/started`, then streams `item/started`,
-  `item/completed`, `item/agentMessage/delta`, and tool-progress notifications.
+optional `model`. The response returns the thread object including its
+`ThreadId`; the server also emits `thread/started` and auto-subscribes the
+connection to that thread's turn/item events.
+- **`turn/start`** — `{ threadId, input, … }`; returns the new turn object
+(with a turn id), emits `turn/started`, then streams `item/started`,
+`item/completed`, `item/agentMessage/delta`, and tool-progress notifications.
 - **`turn/completed`** — sent with the final turn state (status + token usage)
-  when the model finishes or the turn is interrupted.
+when the model finishes or the turn is interrupted.
 - **`turn/interrupt { thread_id, turn_id }`** → `{}`; the turn ends with
-  `status: "interrupted"`.
-
-Exact field names for the approval/sandbox overrides and params
-(`InitializeParams`, `ThreadStartParams`, `TurnStartParams`) are pinned at
-implementation time from `codex app-server generate-json-schema` for the
-targeted codex version, which is recorded as the minimum supported version.
+`status: "interrupted"`.
 
 ## 1. `AgentSystem::Codex` variant and CLI wiring
 
@@ -75,12 +46,6 @@ and `labels` need no change (they iterate `value_variants()`), so frontmatter
 
 In `src/cli.rs`: no structural change — `--system` is a `value_enum` over
 `AgentSystem`.
-
-Tests: replace `src/cli.rs::agent_run_rejects_invalid_system_argument` (which
-asserts `--system codex` is invalid) with a positive `parses_agent_run_system_codex`
-test plus a negative test on a still-invalid value; add the codex analogue beside
-`parses_agent_run_system_argument`; assert `AgentSystem::parse("codex")` /
-`as_str()` round-trip in `src/agent.rs`.
 
 ## 2. JSON-RPC app-server client (`src/codex.rs`)
 
@@ -105,17 +70,17 @@ pub(crate) struct CodexRunConfig {
 A minimal JSON-RPC client over the child's stdin/stdout:
 
 - write framed requests/notifications (newline-delimited JSON, no `jsonrpc`
-  header), correlate responses by `id`, and dispatch inbound notifications;
+header), correlate responses by `id`, and dispatch inbound notifications;
 - typed for the methods waap uses: `initialize`, `initialized`, `thread/start`,
-  `turn/start`, `turn/interrupt`, and inbound `turn/completed` +
-  `item/agentMessage/delta`;
+`turn/start`, `turn/interrupt`, and inbound `turn/completed` +
+`item/agentMessage/delta`;
 - configure `thread/start` (and/or `turn/start`) for never-prompt approvals and
-  full sandbox access.
+full sandbox access.
 
 ## 3. Driving a run (`run_agent_codex` in `src/agent/run.rs`)
 
-codex does not reuse `run_forwarding` (it owns the child's stdio for JSON-RPC).
-Add `run_agent_codex`, modeled structurally on `run_agent_opencode`:
+codex does not reuse `run_forwarding`. Add `run_agent_codex`, modeled
+structurally on `run_agent_opencode`:
 
 ```rust
 fn run_agent_codex(repo_root, output_format, agent_id) -> io::Result<ExitCode> {
@@ -150,15 +115,15 @@ fn run_agent_codex(repo_root, output_format, agent_id) -> io::Result<ExitCode> {
 }
 ```
 
-Extend the `run_agent` dispatch with
-`AgentSystem::Codex => run_agent_codex(...)`. The worktree lifecycle
-(`run_in_agent_worktree`, `mark_running`) is reused verbatim.
+Extend the `run_agent` dispatch with `AgentSystem::Codex =>
+run_agent_codex(...)`. The worktree lifecycle (`run_in_agent_worktree`,
+`mark_running`) is reused verbatim.
 
 `mark_running` commits `running` before the worktree is cut, so `session_id` is
-not known yet; `thread/start` returns the `ThreadId` once the server is up inside
-the worktree, and `update_codex_session` writes it and commits (one extra commit
-per codex run). `session_id` already exists on `AgentMetadata` — no schema
-change.
+not known yet; `thread/start` returns the `ThreadId` once the server is up
+inside the worktree, and `update_codex_session` writes it and commits (one
+extra commit per codex run). `session_id` already exists on `AgentMetadata` —
+no schema change.
 
 `run_agent_codex` installs a `SIGTERM` handler that calls
 `turn/interrupt(thread_id, turn_id)` and closes the connection (see §5).
@@ -168,9 +133,9 @@ change.
 claude/opencode derive completion from a process exit code via
 `finalize_agent_run`. codex derives it from the `turn/completed` status:
 `Completed` ⇒ success (mark agent `completed`, exit 0); `Failed`/`Interrupted`
-⇒ leave `running`, return a non-zero `ExitCode`. `finalize_codex_run` applies the
-same mark/commit logic as `finalize_agent_run`/`mark_completed`, keyed on the
-turn status instead of an `ExitStatus` (alternatively, refactor
+⇒ leave `running`, return a non-zero `ExitCode`. `finalize_codex_run` applies
+the same mark/commit logic as `finalize_agent_run`/`mark_completed`, keyed on
+the turn status instead of an `ExitStatus` (alternatively, refactor
 `finalize_agent_run` to take a `success: bool`).
 
 ## 4. Session id
@@ -185,20 +150,20 @@ turn status instead of an `ExitStatus` (alternatively, refactor
 `waap agent run` process (R). `waap agent stop` therefore signals R and lets R
 interrupt gracefully:
 
-- `waap agent stop` sends `SIGTERM` to R, matched by R's unique argv:
-  `pkill -TERM -f "agent run --agent-id <agent-id>"`. This matches R, not the
-  `codex app-server --stdio` child (which lacks the agent id), and is independent
-  of whether R runs in the foreground or backgrounded (`nohup`/`setsid`).
+- `waap agent stop` sends `SIGTERM` to R, matched by R's unique argv: `pkill
+-TERM -f "agent run --agent-id <agent-id>"`. This matches R, not the `codex
+app-server --stdio` child (which lacks the agent id), and is independent of
+whether R runs in the foreground or backgrounded (`nohup`/`setsid`).
 - R's `SIGTERM` handler calls `turn/interrupt(thread_id, turn_id)`, closes the
-  connection, and returns through `run_in_agent_worktree` so the worktree is
-  cleaned up. The interrupted turn yields a non-`Completed` status, so
-  `finalize_codex_run` leaves the agent `running` and never overwrites the
-  `aborted` status `waap agent stop` writes to the record.
-- In `src/agent/stop.rs::stop_agents_with_systems`, the `AgentSystem::Codex` arm
-  needs the **agent id** (available in `stop_agent_if_running`), not the
-  `session_id`, so the abort closure signature passes `agent_id`. This is the one
-  place codex diverges from the claude/opencode `abort(system, session_id)`
-  shape.
+connection, and returns through `run_in_agent_worktree` so the worktree is
+cleaned up. The interrupted turn yields a non-`Completed` status, so
+`finalize_codex_run` leaves the agent `running` and never overwrites the
+`aborted` status `waap agent stop` writes to the record.
+- In `src/agent/stop.rs::stop_agents_with_systems`, the `AgentSystem::Codex`
+arm needs the **agent id** (available in `stop_agent_if_running`), not the
+`session_id`, so the abort closure signature passes `agent_id`. This is the one
+place codex diverges from the claude/opencode `abort(system, session_id)`
+shape.
 
 Because a stdio server exits when its stdin EOFs, the child app-server is torn
 down automatically if R dies for any reason; signalling R is the only stop path
@@ -215,29 +180,12 @@ environment, is not the worktree, and is neither set nor relocated by waap.
 
 ## 7. Config / env
 
-- **Model:** `CODEX_MODEL`, mirroring `CLAUDE_MODEL`. `codex_run_config_from_env`
-  reads it with `env::var("CODEX_MODEL").ok().filter(|m| !m.is_empty())`; when
-  set, pass it as the `model` field on `thread/start`/`turn/start`, else use
-  codex's default.
+- **Model:** `CODEX_MODEL`, mirroring `CLAUDE_MODEL`.
+`codex_run_config_from_env` reads it with
+`env::var("CODEX_MODEL").ok().filter(|m| !m.is_empty())`; when set, pass it as
+the `model` field on `thread/start`/`turn/start`, else use codex's default.
 - **Auth:** codex auth (API key or prior `codex login`) is an operator
-  precondition for `--system codex`, as claude assumes its own auth.
-  `codex_run_config_from_env` has no required vars, so it never fails for missing
-  config; a misconfigured environment surfaces as an `initialize`/`thread/start`
-  error and the agent is left `running`.
-
-## 8. Tests
-
-- `src/codex.rs` (exercise framing/protocol against a scripted stdio peer; no
-  real codex): spawn command matches `codex app-server --stdio` with
-  `current_dir`; JSON-RPC request/response id correlation; `initialize` →
-  `initialized` ordering; `thread/start` response yields the `ThreadId`;
-  `turn/start` returns a turn id; `turn/completed` status parsing
-  (Completed/Failed/Interrupted); `turn/interrupt` request shape;
-  `pump_until_turn_completed` maps each terminal status to the right outcome.
-- `src/cli.rs`: `parses_agent_run_system_codex` + a new negative test.
-- `src/agent.rs`: round-trip `system = "codex"`.
-- `src/agent/run.rs`: `finalize_codex_run` (Completed ⇒ `completed` + zero exit;
-  Failed/Interrupted ⇒ `running` + non-zero).
-- `src/agent/stop.rs`: a codex stop test asserting the `Codex` arm fires for a
-  running `system = "codex"` agent (agent-id-based signal) and the record becomes
-  `aborted`.
+precondition for `--system codex`, as claude assumes its own auth.
+`codex_run_config_from_env` has no required vars, so it never fails for missing
+config; a misconfigured environment surfaces as an `initialize`/`thread/start`
+error and the agent is left `running`.
