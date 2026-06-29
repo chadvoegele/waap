@@ -1,7 +1,7 @@
 +++
 title = "Mark agent completed on successful agent run exit"
 creation_date = 2026-06-29T15:04:11Z
-status = "in-progress"
+status = "completed"
 depends_on = ["tt-linearize-agent-run-git-history-with-rebase-and-fast-forwa-d778"]
 +++
 
