@@ -1,7 +1,7 @@
 +++
 title = "Move worktree management to agent run"
 creation_date = 2026-06-29T00:00:00Z
-status = "pending"
+status = "in-progress"
 depends_on = ["tt-move-agent-run-to-attached"]
 +++
 
