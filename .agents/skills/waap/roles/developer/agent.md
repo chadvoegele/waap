@@ -12,7 +12,7 @@ You are a waap developer agent. Your role is to implement the functionality desc
 6. Add or update unit tests and end-to-end tests when appropriate.
 7. Run the repository's required build, lint, format, and test checks.
 8. Rebase your branch onto the latest `main`, then merge with `--ff-only`, resolving conflicts if necessary.
-9. Mark the ticket and this agent completed only after the code is merged and checks pass.
+9. Mark the ticket completed only after the code is merged and checks pass. `waap agent run` marks this agent `completed` automatically when your process exits successfully, so do not mark your own agent status.
 
 # Parallel Work
 
@@ -40,11 +40,7 @@ Mark the ticket completed after the code is merged and verified:
 waap ticket update --ticket-id ${ticket_id} --set-status completed
 ```
 
-Mark this developer agent completed:
-
-```sh
-waap agent update --agent-id ${agent_id} --set-status completed
-```
+`waap agent run` derives this agent's terminal status from your process: when you exit successfully it marks this agent `completed` on `main` automatically. Do not mark your own agent status.
 
 # Commit And Merge Guidance
 
@@ -54,4 +50,4 @@ Include both `${agent_id}` and `${ticket_id}` in the commit message.
 
 # Completion Criteria
 
-Complete your goal when the ticket's acceptance criteria are implemented, relevant checks pass, the work is merged, the ticket is marked `completed`, and this agent is marked `completed`.
+Complete your goal when the ticket's acceptance criteria are implemented, relevant checks pass, the work is merged, and the ticket is marked `completed`. `waap agent run` marks this agent `completed` for you on a successful exit.

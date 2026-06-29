@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 pub(crate) fn print_run_agent_report(
     output_format: &OutputFormat,
+    header: &str,
     report: &AgentReport,
     commit: &str,
 ) {
@@ -27,7 +28,7 @@ pub(crate) fn print_run_agent_report(
             println!("{value}");
         }
         OutputFormat::HumanReadable => {
-            print_agent_report_human("Running agent", report);
+            print_agent_report_human(header, report);
             println!("Commit: {commit}");
         }
     }
@@ -104,7 +105,7 @@ fn run_agent_opencode(
             run_opencode_attached(&command, || Ok(()))
         },
     )?;
-    Ok(exit_code_from_status(status))
+    finalize_agent_run(repo_root, output_format, agent_id, status)
 }
 
 fn run_agent_claude(
@@ -130,7 +131,7 @@ fn run_agent_claude(
             run_claude_attached(&command, || Ok(()))
         },
     )?;
-    Ok(exit_code_from_status(status))
+    finalize_agent_run(repo_root, output_format, agent_id, status)
 }
 
 /// Mark the agent as running, commit the state change to `main`, and report it.
@@ -155,8 +156,54 @@ fn mark_running(
         &[report.path.as_path()],
         &format!("waap agent run {agent_id}"),
     )?;
-    print_run_agent_report(output_format, &report, &commit);
+    print_run_agent_report(output_format, "Running agent", &report, &commit);
     Ok(())
+}
+
+/// After a successful system run, mark the agent `completed` and commit that state to `main`.
+///
+/// `waap agent run` derives the terminal status from the system process so completion no longer
+/// depends on the agent self-reporting (which was unreliable). By the time the process exits the
+/// agent has already merged its branch into `main`, so the agent record on `main` still carries the
+/// `running` status. Re-read the record from `main`, flip the status to `completed`, and commit it on
+/// top of the merged work so the completion lands cleanly and history stays linear.
+///
+/// Only a zero exit reaches here. A non-zero exit deliberately leaves the agent `running` so the
+/// failure stays visible (see `run_agent_*`). This sets only the AGENT status; the ticket status is
+/// the agent's responsibility and is never touched here.
+fn mark_completed(
+    repo_root: &Path,
+    output_format: &OutputFormat,
+    agent_id: &str,
+) -> io::Result<()> {
+    let (mut metadata, body) = read_agent_record(repo_root, agent_id)?;
+    metadata.status = "completed".to_string();
+    write_agent_record(repo_root, agent_id, &metadata, &body)?;
+
+    let report = load_agent_report(repo_root, agent_id)?;
+    let commit = commit_paths(
+        repo_root,
+        &[report.path.as_path()],
+        &format!("waap agent completed {agent_id}"),
+    )?;
+    print_run_agent_report(output_format, "Completed agent", &report, &commit);
+    Ok(())
+}
+
+/// Derive the agent's terminal status from the finished system process and return the CLI exit code.
+///
+/// On a zero exit the agent is marked `completed` and that state is committed to `main`. A non-zero
+/// exit is left `running` so the failure stays visible. The CLI exit code always mirrors the system.
+fn finalize_agent_run(
+    repo_root: &Path,
+    output_format: &OutputFormat,
+    agent_id: &str,
+    status: ExitStatus,
+) -> io::Result<ExitCode> {
+    if status.success() {
+        mark_completed(repo_root, output_format, agent_id)?;
+    }
+    Ok(exit_code_from_status(status))
 }
 
 #[cfg(test)]
@@ -169,8 +216,9 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::run_in_agent_worktree;
+    use super::{finalize_agent_run, run_in_agent_worktree};
     use crate::agent::{agent_report_json, AgentMetadata, AgentReport};
+    use crate::cli::OutputFormat;
     use crate::git::{create_agent_worktree, remove_agent_worktree};
 
     fn git(root: &Path, args: &[&str]) -> String {
@@ -381,6 +429,99 @@ mod tests {
     fn write_file(path: &Path, contents: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, contents).unwrap();
+    }
+
+    /// Seed a committed agent record on `main` with the given status so `finalize_agent_run` has a
+    /// record to read and update.
+    fn seed_agent_record(root: &Path, agent_id: &str, status: &str) -> PathBuf {
+        let path = root.join(format!(".waap/agents/{agent_id}/agent.md"));
+        write_file(
+            &path,
+            &format!(
+                "+++\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"{status}\"\n+++\n\n# Purpose\nDo work\n"
+            ),
+        );
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-q", "-m", "seed agent"]);
+        path
+    }
+
+    #[test]
+    fn finalize_agent_run_marks_completed_on_zero_exit() {
+        // Acceptance criteria 1 & 3: a successful run leaves the agent `completed` on `main` via a
+        // commit that lands on top of the agent's merged work.
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let agent_id = "aa-00000001";
+        let path = seed_agent_record(dir.path(), agent_id, "running");
+
+        finalize_agent_run(
+            dir.path(),
+            &OutputFormat::Json,
+            agent_id,
+            ExitStatus::from_raw(0),
+        )
+        .unwrap();
+
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("status = \"completed\"\n"));
+        // The completion is committed on `main` and history stays linear.
+        let subject = git(dir.path(), &["log", "-1", "--format=%s"]);
+        assert_eq!(subject, format!("waap agent completed {agent_id}"));
+        let merges = git(dir.path(), &["rev-list", "--merges", "HEAD"]);
+        assert!(merges.is_empty(), "unexpected merge commits: {merges}");
+    }
+
+    #[test]
+    fn finalize_agent_run_leaves_running_on_nonzero_exit() {
+        // Acceptance criteria 2: a non-zero exit does not mark the agent completed and commits
+        // nothing; the agent stays `running` so the failure is visible.
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let agent_id = "aa-00000001";
+        let path = seed_agent_record(dir.path(), agent_id, "running");
+        let head_before = git(dir.path(), &["rev-parse", "HEAD"]);
+
+        finalize_agent_run(
+            dir.path(),
+            &OutputFormat::Json,
+            agent_id,
+            ExitStatus::from_raw(7 << 8),
+        )
+        .unwrap();
+
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("status = \"running\"\n"));
+        // No commit was made for a failed run.
+        let head_after = git(dir.path(), &["rev-parse", "HEAD"]);
+        assert_eq!(head_before, head_after);
+    }
+
+    #[test]
+    fn finalize_agent_run_does_not_change_ticket_status() {
+        // Acceptance criteria 5: marking the agent completed never touches the ticket status.
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let agent_id = "aa-00000001";
+        seed_agent_record(dir.path(), agent_id, "running");
+
+        let ticket_path = dir.path().join(".waap/tickets/tt-some-ticket/ticket.md");
+        write_file(
+            &ticket_path,
+            "+++\ntitle = \"Some ticket\"\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"in-progress\"\n+++\n\n# Problem\nstuff\n",
+        );
+        let ticket_before = fs::read_to_string(&ticket_path).unwrap();
+
+        finalize_agent_run(
+            dir.path(),
+            &OutputFormat::Json,
+            agent_id,
+            ExitStatus::from_raw(0),
+        )
+        .unwrap();
+
+        let ticket_after = fs::read_to_string(&ticket_path).unwrap();
+        assert_eq!(ticket_before, ticket_after);
     }
 
     #[test]

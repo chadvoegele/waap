@@ -306,7 +306,7 @@ If the application is fully implemented, consider whether it is also fully teste
 
 If the application is fully implemented and tested, complete your `/goal`.
 
-After completing your `/goal`, mark your status as 'completed' with `waap agent update --agent-id $agent_id --set-status completed`.
+`waap agent run` marks this agent 'completed' automatically when your process exits successfully, so you do not need to mark your own agent status.
 
 ### .agents/skills/waap/roles/developer/agent.md
 
@@ -322,9 +322,7 @@ When your code is merged and tested, complete your `/goal`.
 
 If the ticket is already completed or abandoned, complete your `/goal`.
 
-After completing your `/goal`,
-1. mark your ticket as 'completed' with `waap ticket update --ticket-id $ticket_id --set-status completed`.
-1. mark your status as 'completed' with `waap agent update --agent-id $agent_id --set-status completed`.
+After completing your `/goal`, mark your ticket as 'completed' with `waap ticket update --ticket-id $ticket_id --set-status completed`. `waap agent run` marks this agent 'completed' for you on a successful exit, so do not mark your own agent status.
 
 ### Bootstrap
 
