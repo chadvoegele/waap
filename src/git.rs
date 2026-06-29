@@ -65,35 +65,67 @@ pub(crate) fn commit_paths(repo_root: &Path, paths: &[&Path], message: &str) -> 
     add_args.extend(paths.iter().map(|path| path.as_os_str().to_os_string()));
     run_git(repo_root, &add_args)?;
 
-    let mut commit_args: Vec<OsString> =
-        vec!["commit".into(), "-m".into(), message.into(), "--".into()];
-    commit_args.extend(paths.iter().map(|path| path.as_os_str().to_os_string()));
-    run_git(repo_root, &commit_args)?;
+    // A no-op state write (the paths have no staged diff) is a successful no-op: skip the commit so
+    // idempotent state writes don't abort on git's "nothing to commit" non-zero exit. `git diff
+    // --cached --quiet` signals via its exit code (0 = nothing staged, 1 = staged changes), so it
+    // must bypass the success-only `run_git` wrapper.
+    let mut diff_args: Vec<OsString> = vec![
+        "diff".into(),
+        "--cached".into(),
+        "--quiet".into(),
+        "--".into(),
+    ];
+    diff_args.extend(paths.iter().map(|path| path.as_os_str().to_os_string()));
+    let diff = git_command(repo_root, &diff_args)?;
+    let has_staged_changes = match diff.status.code() {
+        Some(0) => false,
+        Some(1) => true,
+        // Any other exit status (or a signal) is a genuine failure, not the documented diff signal.
+        _ => return Err(run_git_error(&diff_args, &diff)),
+    };
+
+    if has_staged_changes {
+        let mut commit_args: Vec<OsString> =
+            vec!["commit".into(), "-m".into(), message.into(), "--".into()];
+        commit_args.extend(paths.iter().map(|path| path.as_os_str().to_os_string()));
+        run_git(repo_root, &commit_args)?;
+    }
 
     let output = run_git(repo_root, &["rev-parse".into(), "HEAD".into()])?;
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn run_git(repo_root: &Path, args: &[OsString]) -> io::Result<Output> {
-    let output = Command::new("git")
+/// Run `git` in `repo_root` and return its raw [`Output`] without treating a non-zero exit as an
+/// error, so callers can inspect the exit code themselves.
+fn git_command(repo_root: &Path, args: &[OsString]) -> io::Result<Output> {
+    Command::new("git")
         .current_dir(repo_root)
         .args(args)
         .output()
-        .map_err(|error| io::Error::new(error.kind(), format!("failed to run git: {error}")))?;
+        .map_err(|error| io::Error::new(error.kind(), format!("failed to run git: {error}")))
+}
+
+/// Build the error for a `git` invocation that exited unsuccessfully.
+fn run_git_error(args: &[OsString], output: &Output) -> io::Error {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    let subcommand = args
+        .first()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let detail = if stderr.is_empty() {
+        format!("git {subcommand} exited with {}", output.status)
+    } else {
+        format!("git {subcommand} failed: {stderr}")
+    };
+    io::Error::other(detail)
+}
+
+fn run_git(repo_root: &Path, args: &[OsString]) -> io::Result<Output> {
+    let output = git_command(repo_root, args)?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stderr = stderr.trim();
-        let subcommand = args
-            .first()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let detail = if stderr.is_empty() {
-            format!("git {subcommand} exited with {}", output.status)
-        } else {
-            format!("git {subcommand} failed: {stderr}")
-        };
-        return Err(io::Error::other(detail));
+        return Err(run_git_error(args, &output));
     }
 
     Ok(output)
@@ -217,6 +249,30 @@ mod tests {
         );
         assert!(committed.contains("aa-00000001"));
         assert!(!committed.contains("aa-00000002"));
+    }
+
+    #[test]
+    fn commit_paths_noop_returns_head_without_new_commit() {
+        let dir = tempdir().unwrap();
+        init_repo(dir.path());
+        let file = dir.path().join(".waap/agents/aa-00000001/agent.md");
+        write_file(&file, "+++\nstatus = \"completed\"\n+++\n");
+        // First write creates the commit; the second writes identical contents (no staged diff).
+        let first =
+            commit_paths(dir.path(), &[file.as_path()], "waap agent run aa-00000001").unwrap();
+
+        let count_before = run(dir.path(), &["rev-list", "--count", "HEAD"])
+            .parse::<u32>()
+            .unwrap();
+        let second =
+            commit_paths(dir.path(), &[file.as_path()], "waap agent run aa-00000001").unwrap();
+        let count_after = run(dir.path(), &["rev-list", "--count", "HEAD"])
+            .parse::<u32>()
+            .unwrap();
+
+        assert_eq!(count_after, count_before, "no new commit should be created");
+        assert_eq!(second, first, "the current HEAD is returned for a no-op");
+        assert_eq!(run(dir.path(), &["rev-parse", "HEAD"]), second);
     }
 
     #[test]
