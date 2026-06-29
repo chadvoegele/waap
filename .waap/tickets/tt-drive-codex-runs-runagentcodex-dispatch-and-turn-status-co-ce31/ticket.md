@@ -1,7 +1,7 @@
 +++
 title = "Drive codex runs: run_agent_codex, dispatch, and turn-status completion"
 creation_date = 2026-06-29T19:06:51Z
-status = "pending"
+status = "in-progress"
 depends_on = ["tt-implement-codex-app-server-json-rpc-client-srccodexrs"]
 +++
 
