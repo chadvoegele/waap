@@ -311,6 +311,36 @@ mod tests {
     }
 
     #[test]
+    fn unknown_ticket_field_fails_with_path_and_field() {
+        let dir = tempdir().unwrap();
+        write_file(
+            &dir.path().join(".waap/tickets/tt-child/ticket.md"),
+            "+++\ntitle = \"Child\"\ncreation_date = 2026-06-18T10:15:02Z\nstatus = \"pending\"\ndependencies = [\"tt-base\"]\n+++\n",
+        );
+
+        let errors = check_waap(dir.path());
+
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("unknown field dependencies")
+                && e.contains(".waap/tickets/tt-child/ticket.md")));
+    }
+
+    #[test]
+    fn unknown_agent_field_fails_with_path_and_field() {
+        let dir = tempdir().unwrap();
+        write_file(
+            &dir.path().join(".waap/agents/aa-3881fda0/agent.md"),
+            "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"ready\"\nworktree = \"some/path\"\n+++\n",
+        );
+
+        let errors = check_waap(dir.path());
+
+        assert!(errors.iter().any(|e| e.contains("unknown field worktree")
+            && e.contains(".waap/agents/aa-3881fda0/agent.md")));
+    }
+
+    #[test]
     fn invalid_ticket_id_fails() {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join(".waap/agents")).unwrap();

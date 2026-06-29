@@ -76,6 +76,26 @@ pub(crate) fn parse_frontmatter_from_contents(
     None
 }
 
+pub(crate) fn reject_unknown_fields(
+    frontmatter: &Value,
+    allowed: &[&str],
+    path: &Path,
+    errors: &mut Vec<String>,
+) {
+    let Some(table) = frontmatter.as_table() else {
+        return;
+    };
+    for key in table.keys() {
+        if !allowed.contains(&key.as_str()) {
+            errors.push(format!(
+                "{} frontmatter has unknown field {key}; allowed fields are {}",
+                path.display(),
+                allowed.join(", ")
+            ));
+        }
+    }
+}
+
 pub(crate) fn require_string(
     frontmatter: &Value,
     key: &str,

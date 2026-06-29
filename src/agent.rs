@@ -8,8 +8,8 @@ use toml::Value;
 
 use crate::frontmatter::{
     datetime_string, invalid_frontmatter_error, parse_frontmatter, parse_frontmatter_from_contents,
-    require_datetime, require_optional_string, require_optional_string_choice,
-    require_string_choice, serialize_record,
+    reject_unknown_fields, require_datetime, require_optional_string,
+    require_optional_string_choice, require_string_choice, serialize_record,
 };
 use crate::ids::{random_hex_chars, toml_string};
 use crate::record::{markdown_body_after_frontmatter, WaapRecordKind};
@@ -40,6 +40,12 @@ pub(crate) struct AgentMetadata {
 impl AgentMetadata {
     pub(crate) fn from_frontmatter(value: &Value, path: &Path) -> Result<Self, Vec<String>> {
         let mut errors = Vec::new();
+        reject_unknown_fields(
+            value,
+            &["creation_date", "role", "status", "session_id", "system"],
+            path,
+            &mut errors,
+        );
         require_datetime(value, "creation_date", path, &mut errors);
         require_string_choice(value, "role", &["developer", "planner"], path, &mut errors);
         require_string_choice(
@@ -322,6 +328,27 @@ mod tests {
         let id = format!("aa-{}", random_hex_chars(8).unwrap());
 
         assert!(is_agent_id(&id));
+    }
+
+    #[test]
+    fn agent_metadata_unknown_field_is_error() {
+        let path = PathBuf::from("agent.md");
+        let toml = "creation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"ready\"\nworktree = \"some/path\"\n";
+        let value: toml::Value = toml.parse().unwrap();
+
+        let errors = AgentMetadata::from_frontmatter(&value, &path)
+            .err()
+            .unwrap();
+        assert!(errors.iter().any(|e| e.contains("unknown field worktree")));
+    }
+
+    #[test]
+    fn agent_metadata_known_fields_pass() {
+        let path = PathBuf::from("agent.md");
+        let toml = "creation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"ready\"\nsession_id = \"ses_1\"\nsystem = \"claude\"\n";
+        let value: toml::Value = toml.parse().unwrap();
+
+        assert!(AgentMetadata::from_frontmatter(&value, &path).is_ok());
     }
 
     #[test]

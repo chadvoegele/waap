@@ -7,8 +7,9 @@ use serde_json::json;
 use toml::Value;
 
 use crate::frontmatter::{
-    datetime_string, invalid_frontmatter_error, parse_frontmatter_from_contents, require_datetime,
-    require_optional_string_array, require_string, require_string_choice, serialize_record,
+    datetime_string, invalid_frontmatter_error, parse_frontmatter_from_contents,
+    reject_unknown_fields, require_datetime, require_optional_string_array, require_string,
+    require_string_choice, serialize_record,
 };
 use crate::ids::{random_hex_chars, toml_string};
 use crate::record::{markdown_body_after_frontmatter, WaapRecordKind};
@@ -33,6 +34,12 @@ pub(crate) struct TicketMetadata {
 impl TicketMetadata {
     pub(crate) fn from_frontmatter(value: &Value, path: &Path) -> Result<Self, Vec<String>> {
         let mut errors = Vec::new();
+        reject_unknown_fields(
+            value,
+            &["title", "creation_date", "status", "depends_on"],
+            path,
+            &mut errors,
+        );
         require_string(value, "title", path, &mut errors);
         require_datetime(value, "creation_date", path, &mut errors);
         require_string_choice(
@@ -405,6 +412,20 @@ mod tests {
         assert!(errors
             .iter()
             .any(|e| e.contains("depends_on") && e.contains("array")));
+    }
+
+    #[test]
+    fn ticket_metadata_unknown_field_is_error() {
+        let path = Path::new("ticket.md");
+        let toml = "title = \"Test\"\ncreation_date = 2026-06-22T12:00:00Z\nstatus = \"pending\"\ndependencies = [\"tt-dep-a\"]\n";
+        let value: Value = toml.parse().unwrap();
+
+        let errors = TicketMetadata::from_frontmatter(&value, path)
+            .err()
+            .unwrap();
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("unknown field dependencies")));
     }
 
     #[test]

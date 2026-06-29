@@ -145,6 +145,8 @@ Missing state is considered valid. Only validate directories and files that alre
 1. Agent frontmatter is valid.
 1. Ticket frontmatter is valid.
 
+Frontmatter is validated strictly: unknown fields outside the documented agent and ticket schemas are rejected. The error names the offending field and the record path so it can be located. Optional known fields such as `depends_on` remain optional.
+
 ### waap ticket
 - new
     - Creates a new ticket
