@@ -8,6 +8,7 @@ use crate::agent::{
 };
 use crate::claude::{build_claude_run_command, claude_run_config_from_env, run_claude_attached};
 use crate::cli::OutputFormat;
+use crate::codex::{codex_run_config_from_env, spawn_codex_app_server, TurnStatus};
 use crate::git::{commit_paths, create_agent_worktree, remove_agent_worktree};
 use crate::opencode::{
     build_opencode_run_command, create_opencode_session, opencode_run_config_from_env,
@@ -50,13 +51,7 @@ pub(crate) fn run_agent(
     match system {
         AgentSystem::Opencode => run_agent_opencode(repo_root, output_format, agent_id),
         AgentSystem::Claude => run_agent_claude(repo_root, output_format, agent_id),
-        // Stub until `tt-driving-a-codex-run` adds `run_agent_codex` (spec
-        // /specs/codex-agent-system.md §3). Keeps this foundation ticket
-        // compilable while `--system codex` parses and frontmatter validates.
-        AgentSystem::Codex => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "system \"codex\" is not yet implemented",
-        )),
+        AgentSystem::Codex => run_agent_codex(repo_root, output_format, agent_id),
     }
 }
 
@@ -68,23 +63,26 @@ pub(crate) fn run_agent(
 /// is invoked and is always removed afterwards, even when `run` returns an error or the system exits
 /// non-zero. The worktree path is passed to `run` so the selected system is launched inside it. The
 /// run result is propagated only after cleanup so a failing run cannot leave a stale worktree behind.
-fn run_in_agent_worktree<P, F>(
+///
+/// Generic over the run closure's outcome `R`: opencode/claude return an `ExitStatus`, while codex
+/// returns a `TurnStatus` (its completion is derived from the turn status, not a process exit code).
+fn run_in_agent_worktree<P, F, R>(
     repo_root: &Path,
     agent_id: &str,
     prepare: P,
     run: F,
-) -> io::Result<ExitStatus>
+) -> io::Result<R>
 where
     P: FnOnce() -> io::Result<()>,
-    F: FnOnce(&Path) -> io::Result<ExitStatus>,
+    F: FnOnce(&Path) -> io::Result<R>,
 {
     prepare()?;
     let worktree = create_agent_worktree(repo_root, agent_id)?;
     let run_result = run(&worktree);
     let cleanup_result = remove_agent_worktree(repo_root, agent_id);
-    let status = run_result?;
+    let outcome = run_result?;
     cleanup_result?;
-    Ok(status)
+    Ok(outcome)
 }
 
 fn run_agent_opencode(
@@ -141,6 +139,47 @@ fn run_agent_claude(
     finalize_agent_run(repo_root, output_format, agent_id, status)
 }
 
+/// Drive a `codex` run via the `codex app-server --stdio` JSON-RPC client (see
+/// /specs/codex-agent-system.md §3). Structurally mirrors `run_agent_opencode`, but codex's
+/// `session_id` (its authentic `ThreadId`) is unknown until `thread/start` returns inside the
+/// worktree, so it is persisted and committed mid-run by `update_codex_session` rather than ahead of
+/// the worktree. Completion is derived from the turn status, not a process exit code.
+fn run_agent_codex(
+    repo_root: &Path,
+    output_format: &OutputFormat,
+    agent_id: &str,
+) -> io::Result<ExitCode> {
+    let mut config = codex_run_config_from_env(repo_root)?;
+
+    let (mut metadata, body) = read_agent_record(repo_root, agent_id)?;
+    metadata.system = Some(AgentSystem::Codex);
+    // session_id (the ThreadId) is unknown until thread/start returns inside the worktree.
+
+    let status = run_in_agent_worktree(
+        repo_root,
+        agent_id,
+        || mark_running(repo_root, output_format, agent_id, &mut metadata, &body),
+        |worktree| {
+            // Spawn the app-server in the prepared worktree and pass that cwd to thread/start so the
+            // model's tools operate inside the worktree.
+            config.repo_root = worktree.to_path_buf();
+            let mut client = spawn_codex_app_server(&config)?;
+            client.initialize()?;
+            let thread_id = client.thread_start(worktree)?;
+
+            // Persist the authentic ThreadId as session_id, then commit (one extra commit on `main`).
+            update_codex_session(repo_root, output_format, agent_id, &thread_id)?;
+
+            let prompt = format!(
+                "Complete when instructions in /.waap/agents/{agent_id}/agent.md are satisfied"
+            );
+            let turn_id = client.turn_start(&thread_id, &prompt)?;
+            client.pump_until_turn_completed(&thread_id, &turn_id)
+        },
+    )?;
+    finalize_codex_run(repo_root, output_format, agent_id, status)
+}
+
 /// Mark the agent as running, commit the state change to `main`, and report it.
 ///
 /// This runs as the worktree `prepare` step, *before* the worktree is cut, so the worktree branch
@@ -164,6 +203,32 @@ fn mark_running(
         &format!("waap agent run {agent_id}"),
     )?;
     print_run_agent_report(output_format, "Running agent", &report, &commit);
+    Ok(())
+}
+
+/// Persist codex's authentic `ThreadId` as the agent's `session_id`, commit it to `main`, and report
+/// it. Unlike opencode/claude, codex's session id is only known after `thread/start` returns inside
+/// the worktree, so this runs mid-run and adds one extra commit on `main` (mirrors `mark_running`'s
+/// write+`commit_paths` pattern). `metadata.system` is set to `codex` so the record on `main` carries
+/// the system alongside the session id.
+fn update_codex_session(
+    repo_root: &Path,
+    output_format: &OutputFormat,
+    agent_id: &str,
+    thread_id: &str,
+) -> io::Result<()> {
+    let (mut metadata, body) = read_agent_record(repo_root, agent_id)?;
+    metadata.session_id = Some(thread_id.to_string());
+    metadata.system = Some(AgentSystem::Codex);
+    write_agent_record(repo_root, agent_id, &metadata, &body)?;
+
+    let report = load_agent_report(repo_root, agent_id)?;
+    let commit = commit_paths(
+        repo_root,
+        &[report.path.as_path()],
+        &format!("waap agent codex session {agent_id}"),
+    )?;
+    print_run_agent_report(output_format, "Codex session", &report, &commit);
     Ok(())
 }
 
@@ -207,10 +272,45 @@ fn finalize_agent_run(
     agent_id: &str,
     status: ExitStatus,
 ) -> io::Result<ExitCode> {
-    if status.success() {
+    finalize_run(repo_root, output_format, agent_id, status.success())?;
+    Ok(exit_code_from_status(status))
+}
+
+/// Derive the agent's terminal status from a finished codex turn and return the CLI exit code.
+///
+/// codex completion is keyed on the `turn/completed` status rather than a process exit code (see
+/// /specs/codex-agent-system.md §3 "Completion"): only `TurnStatus::Completed` is a success — the
+/// agent is marked `completed`, committed to `main`, and exit 0 is returned. `Failed`/`Interrupted`/
+/// `InProgress` leave the agent `running` so the failure (or graceful interrupt) stays visible and a
+/// non-zero `ExitCode` is returned. Shares the mark/commit core with `finalize_agent_run`.
+fn finalize_codex_run(
+    repo_root: &Path,
+    output_format: &OutputFormat,
+    agent_id: &str,
+    status: TurnStatus,
+) -> io::Result<ExitCode> {
+    let success = status.is_success();
+    finalize_run(repo_root, output_format, agent_id, success)?;
+    Ok(if success {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+/// Shared completion core for `finalize_agent_run`/`finalize_codex_run`: on success mark the agent
+/// `completed` and commit it to `main`; on failure do nothing so the agent stays `running` and the
+/// failure remains visible. Never touches the ticket status.
+fn finalize_run(
+    repo_root: &Path,
+    output_format: &OutputFormat,
+    agent_id: &str,
+    success: bool,
+) -> io::Result<()> {
+    if success {
         mark_completed(repo_root, output_format, agent_id)?;
     }
-    Ok(exit_code_from_status(status))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -223,9 +323,12 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{finalize_agent_run, run_in_agent_worktree};
+    use super::{
+        finalize_agent_run, finalize_codex_run, run_in_agent_worktree, update_codex_session,
+    };
     use crate::agent::{agent_report_json, AgentMetadata, AgentReport};
     use crate::cli::OutputFormat;
+    use crate::codex::TurnStatus;
     use crate::git::{create_agent_worktree, remove_agent_worktree};
 
     fn git(root: &Path, args: &[&str]) -> String {
@@ -309,7 +412,7 @@ mod tests {
             |worktree| {
                 // Simulate a failure mid-run (e.g. the system process could not be launched).
                 assert!(worktree.is_dir());
-                Err(std::io::Error::other("boom"))
+                Err::<ExitStatus, _>(std::io::Error::other("boom"))
             },
         )
         .unwrap_err();
@@ -561,5 +664,129 @@ mod tests {
         assert!(contents.contains("session_id = \"ses_test123\"\n"));
         assert!(contents.contains("system = \"claude\"\n"));
         assert!(contents.contains("# Purpose\nDo work\n"));
+    }
+
+    #[test]
+    fn run_in_agent_worktree_propagates_non_exit_status_outcome() {
+        // The helper is generic over the run closure's outcome: codex returns a `TurnStatus`, not an
+        // `ExitStatus`. Exercise a non-`ExitStatus` return and confirm cleanup still happens.
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+
+        let outcome = run_in_agent_worktree(
+            dir.path(),
+            "aa-00000001",
+            || Ok(()),
+            |worktree| {
+                assert!(worktree.is_dir());
+                Ok(TurnStatus::Completed)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome, TurnStatus::Completed);
+        assert!(!dir.path().join("worktrees/aa-00000001").exists());
+    }
+
+    #[test]
+    fn finalize_codex_run_marks_completed_on_completed_status() {
+        // Completion (§3): only `TurnStatus::Completed` marks the agent `completed` on `main` via a
+        // commit, and returns success.
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let agent_id = "aa-00000001";
+        let path = seed_agent_record(dir.path(), agent_id, "running");
+
+        finalize_codex_run(
+            dir.path(),
+            &OutputFormat::Json,
+            agent_id,
+            TurnStatus::Completed,
+        )
+        .unwrap();
+
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("status = \"completed\"\n"));
+        let subject = git(dir.path(), &["log", "-1", "--format=%s"]);
+        assert_eq!(subject, format!("waap agent completed {agent_id}"));
+        let merges = git(dir.path(), &["rev-list", "--merges", "HEAD"]);
+        assert!(merges.is_empty(), "unexpected merge commits: {merges}");
+    }
+
+    #[test]
+    fn finalize_codex_run_leaves_running_on_non_completed_status() {
+        // A `Failed`/`Interrupted`/`InProgress` turn leaves the agent `running` and commits nothing,
+        // so the failure (or graceful interrupt) stays visible.
+        for status in [
+            TurnStatus::Failed,
+            TurnStatus::Interrupted,
+            TurnStatus::InProgress,
+        ] {
+            let dir = tempdir().unwrap();
+            init_repo_with_commit(dir.path());
+            let agent_id = "aa-00000001";
+            let path = seed_agent_record(dir.path(), agent_id, "running");
+            let head_before = git(dir.path(), &["rev-parse", "HEAD"]);
+
+            finalize_codex_run(dir.path(), &OutputFormat::Json, agent_id, status).unwrap();
+
+            let contents = fs::read_to_string(&path).unwrap();
+            assert!(
+                contents.contains("status = \"running\"\n"),
+                "status {status:?} should leave agent running"
+            );
+            let head_after = git(dir.path(), &["rev-parse", "HEAD"]);
+            assert_eq!(head_before, head_after, "status {status:?} made a commit");
+        }
+    }
+
+    #[test]
+    fn finalize_codex_run_does_not_change_ticket_status() {
+        // Marking the agent completed never touches the ticket status (mirrors the claude/opencode
+        // finalize behavior).
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let agent_id = "aa-00000001";
+        seed_agent_record(dir.path(), agent_id, "running");
+
+        let ticket_path = dir.path().join(".waap/tickets/tt-some-ticket/ticket.md");
+        write_file(
+            &ticket_path,
+            "+++\ntitle = \"Some ticket\"\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"in-progress\"\n+++\n\n# Problem\nstuff\n",
+        );
+        let ticket_before = fs::read_to_string(&ticket_path).unwrap();
+
+        finalize_codex_run(
+            dir.path(),
+            &OutputFormat::Json,
+            agent_id,
+            TurnStatus::Completed,
+        )
+        .unwrap();
+
+        let ticket_after = fs::read_to_string(&ticket_path).unwrap();
+        assert_eq!(ticket_before, ticket_after);
+    }
+
+    #[test]
+    fn update_codex_session_writes_session_id_and_system_and_commits() {
+        // `update_codex_session` persists the authentic ThreadId as `session_id`, sets the system to
+        // `codex`, and commits the record to `main` with a codex-session subject.
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let agent_id = "aa-00000001";
+        let path = seed_agent_record(dir.path(), agent_id, "running");
+
+        update_codex_session(dir.path(), &OutputFormat::Json, agent_id, "th_abc123").unwrap();
+
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("status = \"running\"\n"));
+        assert!(contents.contains("session_id = \"th_abc123\"\n"));
+        assert!(contents.contains("system = \"codex\"\n"));
+
+        let subject = git(dir.path(), &["log", "-1", "--format=%s"]);
+        assert_eq!(subject, format!("waap agent codex session {agent_id}"));
+        let merges = git(dir.path(), &["rev-list", "--merges", "HEAD"]);
+        assert!(merges.is_empty(), "unexpected merge commits: {merges}");
     }
 }

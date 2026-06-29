@@ -1,9 +1,9 @@
 // Minimal JSON-RPC client for `codex app-server --stdio`.
 //
-// This is the protocol/client layer only; wiring it into `run_agent` lands in a
-// dependent ticket (see /specs/codex-agent-system.md §3). Until that wiring
-// exists nothing in non-test code calls this module, so allow dead code here to
-// keep `cargo clippy --all-targets -- -D warnings` green in the interim.
+// `run_agent_codex` (see /specs/codex-agent-system.md §3) now drives a run through this client.
+// `turn_interrupt` is the lone exception: it is exercised only by the graceful-stop signal handler,
+// which lands in the dependent `waap agent stop` ticket (§5), so allow dead code module-wide to keep
+// `cargo clippy --all-targets -- -D warnings` green until that wiring exists.
 #![allow(dead_code)]
 
 use std::env;
