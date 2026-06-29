@@ -3,6 +3,7 @@ mod app;
 mod check;
 mod claude;
 mod cli;
+mod codex;
 mod frontmatter;
 mod git;
 mod ids;
