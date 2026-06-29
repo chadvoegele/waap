@@ -297,7 +297,7 @@ mod tests {
         fs::create_dir_all(dir.path().join(".waap/tickets")).unwrap();
         write_file(
             &dir.path().join(".waap/agents/aa-3881fda0/agent.md"),
-            "+++\ncreation_date = \"not a datetime\"\nrole = \"designer\"\nstatus = \"ready\"\n+++\n",
+            "+++\ncreation_date = \"not a datetime\"\nstatus = \"ready\"\n+++\n",
         );
 
         let errors = check_waap(dir.path());
@@ -305,9 +305,18 @@ mod tests {
         assert!(errors
             .iter()
             .any(|error| error.contains("creation_date must be a TOML datetime")));
-        assert!(errors
-            .iter()
-            .any(|error| error.contains("role has invalid value")));
+    }
+
+    #[test]
+    fn deprecated_role_field_is_tolerated() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".waap/tickets")).unwrap();
+        write_file(
+            &dir.path().join(".waap/agents/aa-3881fda0/agent.md"),
+            "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"designer\"\nstatus = \"ready\"\n+++\n\n# Purpose\n",
+        );
+
+        assert!(check_waap(dir.path()).is_empty());
     }
 
     #[test]

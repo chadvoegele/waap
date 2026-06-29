@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::agent::{AgentRole, AgentStatus, AgentSystem};
+use crate::agent::{AgentStatus, AgentSystem};
 use crate::ticket::TicketStatus;
 
 #[derive(Debug, Parser)]
@@ -44,10 +44,7 @@ pub(crate) enum Command {
 #[derive(Debug, Subcommand)]
 pub(crate) enum AgentCommand {
     /// Create a new agent from stdin.
-    New {
-        #[arg(long, value_enum)]
-        role: AgentRole,
-    },
+    New,
     /// Run an existing agent with the selected agent system.
     Run {
         #[arg(long)]
@@ -129,7 +126,7 @@ mod tests {
     use clap::Parser;
 
     use super::{AgentCommand, Cli, Command, TicketCommand};
-    use crate::agent::{AgentRole, AgentStatus, AgentSystem};
+    use crate::agent::{AgentStatus, AgentSystem};
     use crate::cli::OutputFormat;
     use crate::ticket::TicketStatus;
 
@@ -482,24 +479,22 @@ mod tests {
 
     #[test]
     fn parses_agent_new_arguments() {
-        let cli = Cli::try_parse_from(["waap", "agent", "new", "--role", "developer"]).unwrap();
+        let cli = Cli::try_parse_from(["waap", "agent", "new"]).unwrap();
 
         assert!(matches!(
             cli.command,
             Command::Agent {
-                command: AgentCommand::New {
-                    role: AgentRole::Developer
-                }
+                command: AgentCommand::New
             }
         ));
     }
 
     #[test]
-    fn agent_new_rejects_invalid_roles() {
+    fn agent_new_rejects_role_argument() {
         let error =
-            Cli::try_parse_from(["waap", "agent", "new", "--role", "designer"]).unwrap_err();
+            Cli::try_parse_from(["waap", "agent", "new", "--role", "developer"]).unwrap_err();
 
-        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]

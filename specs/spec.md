@@ -33,9 +33,9 @@ Example:
 
 waap maintains its own datastore within the application's repository at `/.waap/`.
 
-## Agent Roles
+## Agent Purposes
 
-waap uses different agent roles to perform each stage of the software development lifecycle.
+waap uses agents with different purposes to perform each stage of the software development lifecycle. An agent's purpose is carried by its instructions/content, not by a separate metadata field.
 
 - Planner
 	- Translates application specifications into an implementation plan via tickets.
@@ -56,7 +56,6 @@ Agent metadata is stored in TOML frontmatter.
 ```
 +++
 creation_date = 2026-06-18T15:00:34Z
-role = "developer"  # developer, planner
 status = "ready"  # ready, running, completed, aborted
 session_id = "ses_9032dd..."  # add after agent is started
 system = "opencode"  # opencode, claude; add after agent is started
@@ -191,9 +190,6 @@ Frontmatter is validated strictly: unknown fields outside the documented agent a
     - Prepends TOML frontmatter in agent.md
     - Appends agent.md contents from stdin
     - Commits the agent.md to git
-    - Parameters
-        - Required
-            - `--role`
     - Streams
         - stdin: write to agent markdown
         - stdout: reports created agent path, metadata, and file size
@@ -342,7 +338,7 @@ To start the waap software lifecyle, first run a planner agent to create tickets
 
 ```
 cd ${APP_REPO_ROOT}
-planner_id=$(cat .agents/skills/waap/roles/planner/agent.md | waap --output-format json agent new --role planner | jq -r '."agent-id"')
+planner_id=$(cat .agents/skills/waap/roles/planner/agent.md | waap --output-format json agent new | jq -r '."agent-id"')
 waap agent run --agent-id ${planner_id}
 ```
 
@@ -350,7 +346,7 @@ Then select a ticket for an agent, insert it into the developer agent.md templat
 ```
 cd ${APP_REPO_ROOT}
 # replace ${ticket_id} in .agents/skills/waap/roles/developer/agent.md to create resolved_developer_agent.md
-developer_id=$(cat resolved_developer_agent.md | waap --output-format json agent new --role developer | jq -r '."agent-id"')
+developer_id=$(cat resolved_developer_agent.md | waap --output-format json agent new | jq -r '."agent-id"')
 waap agent run --agent-id ${developer_id}
 ```
 

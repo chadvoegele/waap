@@ -31,7 +31,6 @@ pub(crate) use update::{print_updated_agent_report, update_agent};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AgentMetadata {
     pub(crate) creation_date: String,
-    pub(crate) role: String,
     pub(crate) status: String,
     pub(crate) session_id: Option<String>,
     pub(crate) system: Option<AgentSystem>,
@@ -47,7 +46,8 @@ impl AgentMetadata {
             &mut errors,
         );
         require_datetime(value, "creation_date", path, &mut errors);
-        require_string_choice(value, "role", &["developer", "planner"], path, &mut errors);
+        // `role` is a deprecated field; tolerate it when present for backward compatibility.
+        require_optional_string(value, "role", path, &mut errors);
         require_string_choice(
             value,
             "status",
@@ -62,11 +62,6 @@ impl AgentMetadata {
         }
         Ok(Self {
             creation_date: datetime_string(value, "creation_date"),
-            role: value
-                .get("role")
-                .and_then(Value::as_str)
-                .expect("validated role")
-                .to_string(),
             status: value
                 .get("status")
                 .and_then(Value::as_str)
@@ -86,7 +81,6 @@ impl AgentMetadata {
     pub(crate) fn to_frontmatter_lines(&self) -> String {
         let mut lines = String::new();
         lines.push_str(&format!("creation_date = {}\n", self.creation_date));
-        lines.push_str(&format!("role = {}\n", toml_string(&self.role)));
         lines.push_str(&format!("status = {}\n", toml_string(&self.status)));
         if let Some(session_id) = &self.session_id {
             lines.push_str(&format!("session_id = {}\n", toml_string(session_id)));
@@ -180,12 +174,6 @@ pub(crate) struct AgentReport {
 }
 
 #[derive(Clone, Debug, ValueEnum)]
-pub(crate) enum AgentRole {
-    Developer,
-    Planner,
-}
-
-#[derive(Clone, Debug, ValueEnum)]
 pub(crate) enum AgentStatus {
     Ready,
     Running,
@@ -234,15 +222,6 @@ impl AgentSystem {
     }
 }
 
-impl AgentRole {
-    pub(crate) fn as_str(&self) -> &'static str {
-        match self {
-            AgentRole::Developer => "developer",
-            AgentRole::Planner => "planner",
-        }
-    }
-}
-
 pub(crate) fn available_agent_id(agents_dir: &Path) -> io::Result<String> {
     available_agent_id_with_generator(agents_dir, || random_hex_chars(8))
 }
@@ -273,7 +252,6 @@ pub(crate) fn print_agent_report_human(header: &str, report: &AgentReport) {
     println!("{header} {}", report.agent_id);
     println!("Path: {}", report.path.display());
     println!("Creation date: {}", report.metadata.creation_date);
-    println!("Role: {}", report.metadata.role);
     println!("Status: {}", report.metadata.status);
     if let Some(session_id) = &report.metadata.session_id {
         println!("Session ID: {session_id}");
@@ -287,7 +265,6 @@ pub(crate) fn agent_report_json(report: &AgentReport) -> serde_json::Value {
         "path": report.path.display().to_string(),
         "metadata": {
             "creation_date": report.metadata.creation_date,
-            "role": report.metadata.role,
             "status": report.metadata.status,
             "session_id": report.metadata.session_id,
         },
@@ -358,7 +335,6 @@ mod tests {
             path: PathBuf::from(".waap/agents/aa-3881fda0/agent.md"),
             metadata: AgentMetadata {
                 creation_date: "2026-06-18T15:00:34Z".to_string(),
-                role: "developer".to_string(),
                 status: "running".to_string(),
                 session_id: Some("ses_123".to_string()),
                 system: None,
@@ -373,7 +349,6 @@ mod tests {
                 "path": ".waap/agents/aa-3881fda0/agent.md",
                 "metadata": {
                     "creation_date": "2026-06-18T15:00:34Z",
-                    "role": "developer",
                     "status": "running",
                     "session_id": "ses_123",
                 },

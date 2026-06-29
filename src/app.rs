@@ -29,7 +29,7 @@ pub(crate) fn run() -> ExitCode {
             }
         }
         Command::Agent { command } => match command {
-            AgentCommand::New { role } => match create_agent(repo_root, &role) {
+            AgentCommand::New => match create_agent(repo_root) {
                 Ok(report) => {
                     print_created_agent_report(&cli.output_format, &report);
                     ExitCode::SUCCESS

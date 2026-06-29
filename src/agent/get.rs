@@ -122,7 +122,6 @@ session_id = \"ses_123\"
             dir.path().join(".waap/agents/aa-3881fda0/agent.md")
         );
         assert_eq!(report.metadata.creation_date, "2026-06-18T15:00:34Z");
-        assert_eq!(report.metadata.role, "developer");
         assert_eq!(report.metadata.status, "ready");
         assert_eq!(report.metadata.session_id.as_deref(), Some("ses_123"));
         assert_eq!(report.file_size, contents.len() as u64);
@@ -160,7 +159,6 @@ Do work
             path: PathBuf::from(".waap/agents/aa-3881fda0/agent.md"),
             metadata: AgentMetadata {
                 creation_date: "2026-06-18T15:00:34Z".to_string(),
-                role: "developer".to_string(),
                 status: "running".to_string(),
                 session_id: Some("ses_123".to_string()),
                 system: None,
@@ -175,7 +173,6 @@ Do work
                 "path": ".waap/agents/aa-3881fda0/agent.md",
                 "metadata": {
                     "creation_date": "2026-06-18T15:00:34Z",
-                    "role": "developer",
                     "status": "running",
                     "session_id": "ses_123",
                 },

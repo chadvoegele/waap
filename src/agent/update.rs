@@ -98,12 +98,11 @@ mod tests {
 
         assert_eq!(report.agent_id, "aa-3881fda0");
         assert_eq!(report.metadata.creation_date, "2026-06-18T15:00:34Z");
-        assert_eq!(report.metadata.role, "planner");
         assert_eq!(report.metadata.status, "completed");
         assert_eq!(report.metadata.session_id.as_deref(), Some("ses_123"));
         assert_eq!(report.file_size, contents.len() as u64);
         assert!(contents.contains("creation_date = 2026-06-18T15:00:34Z\n"));
-        assert!(contents.contains("role = \"planner\"\n"));
+        assert!(!contents.contains("role ="));
         assert!(contents.contains("status = \"completed\"\n"));
         assert!(contents.contains("session_id = \"ses_123\"\n+++\n\n# Purpose\nDo work\n"));
     }
@@ -133,7 +132,6 @@ mod tests {
             path: PathBuf::from(".waap/agents/aa-3881fda0/agent.md"),
             metadata: AgentMetadata {
                 creation_date: "2026-06-18T15:00:34Z".to_string(),
-                role: "developer".to_string(),
                 status: "completed".to_string(),
                 session_id: Some("ses_123".to_string()),
                 system: None,
@@ -148,7 +146,6 @@ mod tests {
                 "path": ".waap/agents/aa-3881fda0/agent.md",
                 "metadata": {
                     "creation_date": "2026-06-18T15:00:34Z",
-                    "role": "developer",
                     "status": "completed",
                     "session_id": "ses_123",
                 },

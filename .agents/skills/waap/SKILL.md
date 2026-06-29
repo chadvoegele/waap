@@ -18,7 +18,7 @@ This creates a ticket at `.waap/tickets/<ticket-id>/ticket.md`. Ticket IDs start
 Next, create a waap agent to complete the work in the ticket. The agent's instructions are also described in markdown format, e.g. `agents.md`, and should indicate to work on the ticket.
 
 ```sh
-$ cat agents.md | waap agent new --role developer
+$ cat agents.md | waap agent new
 Agent ID: aa-1234abcd
 ```
 This creates an agent at `.waap/agents/<agent-id>/agent.md`. Agent IDs start with `aa-` followed by eight lowercase hex characters.
@@ -64,7 +64,7 @@ The agent instructions should include the work to be completed, typically by ref
 
 When appropriate the instructions should also include to merge their changes back to the repository.
 
-If your agents are repeating the same function, consider storing the common instructions as a role. Some example roles are at:
+If your agents are repeating the same function, consider storing the common instructions as a reusable template. Some example templates are at:
 
 - [Planner](./roles/planner/agent.md)
     - Creates waap tickets for implementing a program defined in spec.md
@@ -94,7 +94,6 @@ Agent metadata is stored as TOML frontmatter at the top of the agent markdown fi
 +++
 creation_date = 2026-06-18T15:00:34Z
 status = "ready"
-role = "developer"
 session_id = "ses_9032dd..."
 system = "opencode"
 +++
@@ -129,11 +128,11 @@ waap ticket update --ticket-id tt-example-feature --set-status in-progress
 waap ticket update --ticket-id tt-example-feature --set-status completed
 ```
 
-Create an agent from a role prompt on stdin:
+Create an agent from an instruction prompt on stdin:
 
 ```sh
-waap agent new --role planner < .agents/skills/waap/roles/planner/agent.md
-waap agent new --role developer < resolved-developer-agent.md
+waap agent new < .agents/skills/waap/roles/planner/agent.md
+waap agent new < resolved-developer-agent.md
 ```
 
 Run an agent:
