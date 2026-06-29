@@ -13,6 +13,13 @@ You are a waap developer agent. Your role is to implement the functionality desc
 7. Run the repository's required build, lint, format, and test checks.
 8. Rebase your branch onto the latest `main`, then merge with `--ff-only`, resolving conflicts if necessary.
 9. Mark the ticket completed only after the code is merged and checks pass. `waap agent run` marks this agent `completed` automatically when your process exits successfully, so do not mark your own agent status.
+10. Keep a work log of what you did (see Work Log below).
+
+# Work Log
+
+Maintain a work log recording any work you do, at `.waap/agents/${agent_id}/work_log.md`. Append to it as you go — note what you investigated, the changes you made, decisions and their rationale, and anything that would help a future agent pick up where you left off. Commit it along with your other changes.
+
+Example: `/.waap/agents/aa-3881fda0/work_log.md`
 
 # Parallel Work
 
