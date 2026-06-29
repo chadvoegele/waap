@@ -10,10 +10,21 @@ use crate::cli::OutputFormat;
 use crate::ids::current_toml_datetime;
 use crate::record::WaapRecordKind;
 
-pub(crate) fn print_created_agent_report(output_format: &OutputFormat, report: &AgentReport) {
+pub(crate) fn print_created_agent_report(
+    output_format: &OutputFormat,
+    report: &AgentReport,
+    commit: &str,
+) {
     match output_format {
-        OutputFormat::Json => println!("{}", agent_report_json(report)),
-        OutputFormat::HumanReadable => print_agent_report_human("Created agent", report),
+        OutputFormat::Json => {
+            let mut value = agent_report_json(report);
+            value["commit"] = serde_json::json!(commit);
+            println!("{value}");
+        }
+        OutputFormat::HumanReadable => {
+            print_agent_report_human("Created agent", report);
+            println!("Commit: {commit}");
+        }
     }
 }
 

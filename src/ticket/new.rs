@@ -10,10 +10,21 @@ use crate::ticket::{
     write_ticket_record, TicketMetadata, TicketReport,
 };
 
-pub(crate) fn print_ticket_report(output_format: &OutputFormat, report: &TicketReport) {
+pub(crate) fn print_ticket_report(
+    output_format: &OutputFormat,
+    report: &TicketReport,
+    commit: &str,
+) {
     match output_format {
-        OutputFormat::Json => println!("{}", ticket_report_json(report)),
-        OutputFormat::HumanReadable => print_ticket_report_human("Created ticket", report),
+        OutputFormat::Json => {
+            let mut value = ticket_report_json(report);
+            value["commit"] = serde_json::json!(commit);
+            println!("{value}");
+        }
+        OutputFormat::HumanReadable => {
+            print_ticket_report_human("Created ticket", report);
+            println!("Commit: {commit}");
+        }
     }
 }
 

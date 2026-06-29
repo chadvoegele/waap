@@ -4,6 +4,7 @@ mod check;
 mod claude;
 mod cli;
 mod frontmatter;
+mod git;
 mod ids;
 mod opencode;
 mod process;

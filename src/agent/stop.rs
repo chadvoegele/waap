@@ -13,20 +13,28 @@ use crate::cli::OutputFormat;
 use crate::opencode::{abort_opencode_session, opencode_run_config_from_env};
 use crate::record::{list_record_ids, WaapRecordKind};
 
-pub(crate) fn print_agent_stop_report(output_format: &OutputFormat, reports: &[AgentReport]) {
+pub(crate) fn print_agent_stop_report(
+    output_format: &OutputFormat,
+    reports: &[AgentReport],
+    commit: Option<&str>,
+) {
     match output_format {
-        OutputFormat::Json => println!("{}", agent_stop_json(reports)),
+        OutputFormat::Json => println!("{}", agent_stop_json(reports, commit)),
         OutputFormat::HumanReadable => {
             for report in reports {
                 print_agent_report_human("Stopped agent", report);
+            }
+            if let Some(commit) = commit {
+                println!("Commit: {commit}");
             }
         }
     }
 }
 
-pub(crate) fn agent_stop_json(reports: &[AgentReport]) -> serde_json::Value {
+pub(crate) fn agent_stop_json(reports: &[AgentReport], commit: Option<&str>) -> serde_json::Value {
     json!({
         "stopped_agents": reports.iter().map(agent_report_json).collect::<Vec<_>>(),
+        "commit": commit,
     })
 }
 
@@ -333,7 +341,7 @@ mod tests {
         }];
 
         assert_eq!(
-            agent_stop_json(&reports),
+            agent_stop_json(&reports, Some("abc123")),
             json!({
                 "stopped_agents": [
                     {
@@ -347,6 +355,7 @@ mod tests {
                         "file_size": 456,
                     }
                 ],
+                "commit": "abc123",
             })
         );
     }

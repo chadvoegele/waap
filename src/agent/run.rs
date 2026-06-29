@@ -4,20 +4,32 @@ use std::process::{ExitCode, ExitStatus};
 
 use crate::agent::{
     agent_report_json, load_agent_report, print_agent_report_human, read_agent_record,
-    write_agent_record, AgentReport, AgentSystem,
+    write_agent_record, AgentMetadata, AgentReport, AgentSystem,
 };
 use crate::claude::{build_claude_run_command, claude_run_config_from_env, run_claude_attached};
 use crate::cli::OutputFormat;
+use crate::git::commit_paths;
 use crate::opencode::{
     build_opencode_run_command, create_opencode_session, opencode_run_config_from_env,
     run_opencode_attached,
 };
 use uuid::Uuid;
 
-pub(crate) fn print_agent_report(output_format: &OutputFormat, report: &AgentReport) {
+pub(crate) fn print_run_agent_report(
+    output_format: &OutputFormat,
+    report: &AgentReport,
+    commit: &str,
+) {
     match output_format {
-        OutputFormat::Json => println!("{}", agent_report_json(report)),
-        OutputFormat::HumanReadable => print_agent_report_human("Running agent", report),
+        OutputFormat::Json => {
+            let mut value = agent_report_json(report);
+            value["commit"] = serde_json::json!(commit);
+            println!("{value}");
+        }
+        OutputFormat::HumanReadable => {
+            print_agent_report_human("Running agent", report);
+            println!("Commit: {commit}");
+        }
     }
 }
 
@@ -78,20 +90,26 @@ fn run_agent_claude(
     Ok(exit_code_from_status(status))
 }
 
-/// Mark the agent as running and report it, once the system process has
-/// started. Runs as the `on_started` hook of the attached run helpers.
+/// Mark the agent as running, commit the state change, and report it, once the
+/// system process has started. Runs as the `on_started` hook of the attached run
+/// helpers so the durable "running" status is committed before the long session.
 fn mark_running(
     repo_root: &Path,
     output_format: &OutputFormat,
     agent_id: &str,
-    metadata: &mut crate::agent::AgentMetadata,
+    metadata: &mut AgentMetadata,
     body: &str,
 ) -> io::Result<()> {
     metadata.status = "running".to_string();
     write_agent_record(repo_root, agent_id, metadata, body)?;
 
     let report = load_agent_report(repo_root, agent_id)?;
-    print_agent_report(output_format, &report);
+    let commit = commit_paths(
+        repo_root,
+        &[report.path.as_path()],
+        &format!("waap agent run {agent_id}"),
+    )?;
+    print_run_agent_report(output_format, &report, &commit);
     Ok(())
 }
 

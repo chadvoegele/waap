@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -9,10 +10,33 @@ use crate::agent::{
 };
 use crate::check::{check_waap, print_check_result};
 use crate::cli::{AgentCommand, Cli, Command, TicketCommand};
+use crate::git::commit_paths;
 use crate::ticket::{
     create_ticket, get_ticket, list_tickets, print_ticket_get_report, print_ticket_list,
     print_ticket_report, print_updated_ticket_report, update_ticket,
 };
+
+/// Commit the waap state files changed by a command, then run `print` with the commit hash.
+///
+/// On commit failure the waap state update is left intact on disk and a non-zero exit code is
+/// returned with a diagnostic on stderr.
+fn commit_and_print(
+    repo_root: &Path,
+    paths: &[&Path],
+    message: &str,
+    print: impl FnOnce(&str),
+) -> ExitCode {
+    match commit_paths(repo_root, paths, message) {
+        Ok(commit) => {
+            print(&commit);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("failed to commit waap state change: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
 
 pub(crate) fn run() -> ExitCode {
     let cli = Cli::parse();
@@ -30,15 +54,19 @@ pub(crate) fn run() -> ExitCode {
         }
         Command::Agent { command } => match command {
             AgentCommand::New => match create_agent(repo_root) {
-                Ok(report) => {
-                    print_created_agent_report(&cli.output_format, &report);
-                    ExitCode::SUCCESS
-                }
+                Ok(report) => commit_and_print(
+                    repo_root,
+                    &[report.path.as_path()],
+                    &format!("waap agent new {}", report.agent_id),
+                    |commit| print_created_agent_report(&cli.output_format, &report, commit),
+                ),
                 Err(error) => {
                     eprintln!("failed to create agent: {error}");
                     ExitCode::from(1)
                 }
             },
+            // `agent run` commits the running-state change from inside the attached
+            // run's on_started hook, then forwards the system's exit code.
             AgentCommand::Run { agent_id, system } => {
                 match run_agent(repo_root, &cli.output_format, &agent_id, &system) {
                     Ok(status) => status,
@@ -61,8 +89,24 @@ pub(crate) fn run() -> ExitCode {
             AgentCommand::Stop { agent_id } => {
                 match stop_agents_with_systems(repo_root, agent_id.as_deref()) {
                     Ok(reports) => {
-                        print_agent_stop_report(&cli.output_format, &reports);
-                        ExitCode::SUCCESS
+                        if reports.is_empty() {
+                            print_agent_stop_report(&cli.output_format, &reports, None);
+                            return ExitCode::SUCCESS;
+                        }
+                        let paths: Vec<&Path> =
+                            reports.iter().map(|report| report.path.as_path()).collect();
+                        let ids: Vec<&str> = reports
+                            .iter()
+                            .map(|report| report.agent_id.as_str())
+                            .collect();
+                        commit_and_print(
+                            repo_root,
+                            &paths,
+                            &format!("waap agent stop {}", ids.join(" ")),
+                            |commit| {
+                                print_agent_stop_report(&cli.output_format, &reports, Some(commit))
+                            },
+                        )
                     }
                     Err(error) => {
                         eprintln!("failed to stop agent: {error}");
@@ -80,10 +124,12 @@ pub(crate) fn run() -> ExitCode {
                 set_status.as_ref(),
                 set_session_id.as_deref(),
             ) {
-                Ok(report) => {
-                    print_updated_agent_report(&cli.output_format, &report);
-                    ExitCode::SUCCESS
-                }
+                Ok(report) => commit_and_print(
+                    repo_root,
+                    &[report.path.as_path()],
+                    &format!("waap agent update {}", report.agent_id),
+                    |commit| print_updated_agent_report(&cli.output_format, &report, commit),
+                ),
                 Err(error) => {
                     eprintln!("failed to update agent: {error}");
                     ExitCode::from(1)
@@ -103,10 +149,12 @@ pub(crate) fn run() -> ExitCode {
         Command::Ticket { command } => match command {
             TicketCommand::New { title, depends_on } => {
                 match create_ticket(repo_root, &title, &depends_on) {
-                    Ok(report) => {
-                        print_ticket_report(&cli.output_format, &report);
-                        ExitCode::SUCCESS
-                    }
+                    Ok(report) => commit_and_print(
+                        repo_root,
+                        &[report.path.as_path()],
+                        &format!("waap ticket new {}", report.ticket_id),
+                        |commit| print_ticket_report(&cli.output_format, &report, commit),
+                    ),
                     Err(error) => {
                         eprintln!("failed to create ticket: {error}");
                         ExitCode::from(1)
@@ -141,10 +189,12 @@ pub(crate) fn run() -> ExitCode {
                     &add_depends_on,
                     &remove_depends_on,
                 ) {
-                    Ok(report) => {
-                        print_updated_ticket_report(&cli.output_format, &report);
-                        ExitCode::SUCCESS
-                    }
+                    Ok(report) => commit_and_print(
+                        repo_root,
+                        &[report.path.as_path()],
+                        &format!("waap ticket update {}", report.ticket_id),
+                        |commit| print_updated_ticket_report(&cli.output_format, &report, commit),
+                    ),
                     Err(error) => {
                         eprintln!("failed to update ticket: {error}");
                         ExitCode::from(1)
