@@ -1,7 +1,7 @@
 +++
 title = "Add ticket status to ticket list output"
 creation_date = 2026-06-29T21:58:51Z
-status = "in-progress"
+status = "completed"
 +++
 
 # Problem
