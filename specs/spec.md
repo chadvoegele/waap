@@ -243,16 +243,20 @@ Frontmatter is validated strictly: unknown fields outside the documented agent a
 
 Agents can be run with different agent systems, selected with `waap agent run --system`. Each system is given the same goal: complete the instructions in `/.waap/agents/$agent_id/agent.md`. The chosen system and the resulting session id are recorded in the agent metadata.
 
+### Worktree Lifecycle
+
+`waap agent run` owns the agent worktree lifecycle so it does not depend on the agent following its prompt. Before launching the selected system, it creates an isolated git worktree at `worktrees/$agent_id` (a fresh branch named after the agent, checked out from the current `HEAD`) and launches the system — both `opencode` and `claude` — inside that worktree. After the attached system process exits, it removes the worktree, regardless of whether the system exited successfully or with a non-zero code. Agent instructions therefore do not tell agents to create or delete their own worktree; agents simply operate in the worktree prepared for them.
+
 ### opencode (default)
 
-opencode runs against a remote server. Create a session, then submit a goal command attached to that session.
+opencode runs against a remote server. Create a session, then submit a goal command attached to that session. The session and command target the prepared agent worktree (`--dir "$WORKTREE"`) rather than the repository root.
 
 ```
 opencode run --attach "$OPENCODE_SERVER_URL" \
   --username "$OPENCODE_SERVER_USERNAME" \
   --password "$OPENCODE_SERVER_PASSWORD" \
   --model "$OPENCODE_SERVER_MODEL" \
-  --dir "$REPO_ROOT" \
+  --dir "$WORKTREE" \
   --agent build \
   --command goal \
   --format json \
@@ -263,7 +267,7 @@ Extract the opencode session id from the response and record it in the agent met
 
 ### claude
 
-claude runs as a local headless process (`claude -p`) in the repository root. There is no remote server: waap mints the session id itself (a UUID) and passes it via `--session-id`, so the same id can be recorded in the agent metadata. The goal is passed directly as the prompt. `--permission-mode auto` lets the agent act without interactive prompts. The model is optional and read from `$CLAUDE_MODEL`; claude handles its own authentication.
+claude runs as a local headless process (`claude -p`) in the prepared agent worktree. There is no remote server: waap mints the session id itself (a UUID) and passes it via `--session-id`, so the same id can be recorded in the agent metadata. The goal is passed directly as the prompt. `--permission-mode auto` lets the agent act without interactive prompts. The model is optional and read from `$CLAUDE_MODEL`; claude handles its own authentication.
 
 ```
 claude -p \
@@ -308,17 +312,7 @@ After completing your `/goal`, mark your status as 'completed' with `waap agent 
 
 Your role is to implement code for the functionality described in `/.waap/tickets/${ticket_id}/ticket.md`. After implementing the code, write adequate unit tests, and end-to-end tests if appropriate. Once the code is tested, merge it, resolving conflicts as necessary.
 
-Be aware that many agents are editing the code simultaneously. Use git worktree's to isolate your changes before merging.
-
-**git worktree example**
-```
-worktree_dir=worktrees/${agent_id}
-git worktree add -b ${agent_id}/${ticket_id} ${worktree_dir}
-pushd ${worktree_dir}
-# make changes, test, and merge
-popd
-git worktree remove ${worktree_dir}
-```
+Be aware that many agents are editing the code simultaneously. `waap agent run` prepares an isolated git worktree for you and runs you inside it, then removes it after you exit, so you do not need to create or delete a worktree yourself. Make your changes in the current working directory, commit them on your branch, and merge to main.
 
 Before you start, mark your ticket as in-progress with `waap ticket update --ticket-id $ticket_id --set-status in-progress`.
 

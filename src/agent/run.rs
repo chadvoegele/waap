@@ -8,7 +8,7 @@ use crate::agent::{
 };
 use crate::claude::{build_claude_run_command, claude_run_config_from_env, run_claude_attached};
 use crate::cli::OutputFormat;
-use crate::git::commit_paths;
+use crate::git::{commit_paths, create_agent_worktree, remove_agent_worktree};
 use crate::opencode::{
     build_opencode_run_command, create_opencode_session, opencode_run_config_from_env,
     run_opencode_attached,
@@ -52,21 +52,44 @@ pub(crate) fn run_agent(
     }
 }
 
+/// Own the agent worktree lifecycle around a system run.
+///
+/// A fresh worktree is prepared before `run` is invoked and is always removed afterwards, even when
+/// `run` returns an error or the system exits non-zero. The worktree path is passed to `run` so the
+/// selected system is launched inside it. The run result is propagated only after cleanup so a
+/// failing run cannot leave a stale worktree behind.
+fn run_in_agent_worktree<F>(repo_root: &Path, agent_id: &str, run: F) -> io::Result<ExitStatus>
+where
+    F: FnOnce(&Path) -> io::Result<ExitStatus>,
+{
+    let worktree = create_agent_worktree(repo_root, agent_id)?;
+    let run_result = run(&worktree);
+    let cleanup_result = remove_agent_worktree(repo_root, agent_id);
+    let status = run_result?;
+    cleanup_result?;
+    Ok(status)
+}
+
 fn run_agent_opencode(
     repo_root: &Path,
     output_format: &OutputFormat,
     agent_id: &str,
 ) -> io::Result<ExitCode> {
-    let config = opencode_run_config_from_env(repo_root)?;
-    let session_id = create_opencode_session(&config)?;
+    let mut config = opencode_run_config_from_env(repo_root)?;
 
-    let (mut metadata, body) = read_agent_record(repo_root, agent_id)?;
-    metadata.session_id = Some(session_id.clone());
-    metadata.system = Some(AgentSystem::Opencode);
+    let status = run_in_agent_worktree(repo_root, agent_id, |worktree| {
+        // Launch opencode against the prepared worktree rather than the repository root.
+        config.repo_root = worktree.to_path_buf();
+        let session_id = create_opencode_session(&config)?;
 
-    let command = build_opencode_run_command(&config, agent_id, &session_id);
-    let status = run_opencode_attached(&command, || {
-        mark_running(repo_root, output_format, agent_id, &mut metadata, &body)
+        let (mut metadata, body) = read_agent_record(repo_root, agent_id)?;
+        metadata.session_id = Some(session_id.clone());
+        metadata.system = Some(AgentSystem::Opencode);
+
+        let command = build_opencode_run_command(&config, agent_id, &session_id);
+        run_opencode_attached(&command, || {
+            mark_running(repo_root, output_format, agent_id, &mut metadata, &body)
+        })
     })?;
     Ok(exit_code_from_status(status))
 }
@@ -76,16 +99,21 @@ fn run_agent_claude(
     output_format: &OutputFormat,
     agent_id: &str,
 ) -> io::Result<ExitCode> {
-    let config = claude_run_config_from_env(repo_root)?;
+    let mut config = claude_run_config_from_env(repo_root)?;
     let session_id = Uuid::new_v4().to_string();
 
-    let (mut metadata, body) = read_agent_record(repo_root, agent_id)?;
-    metadata.session_id = Some(session_id.clone());
-    metadata.system = Some(AgentSystem::Claude);
+    let status = run_in_agent_worktree(repo_root, agent_id, |worktree| {
+        // Launch claude in the prepared worktree rather than the repository root.
+        config.repo_root = worktree.to_path_buf();
 
-    let command = build_claude_run_command(&config, agent_id, &session_id);
-    let status = run_claude_attached(&command, || {
-        mark_running(repo_root, output_format, agent_id, &mut metadata, &body)
+        let (mut metadata, body) = read_agent_record(repo_root, agent_id)?;
+        metadata.session_id = Some(session_id.clone());
+        metadata.system = Some(AgentSystem::Claude);
+
+        let command = build_claude_run_command(&config, agent_id, &session_id);
+        run_claude_attached(&command, || {
+            mark_running(repo_root, output_format, agent_id, &mut metadata, &body)
+        })
     })?;
     Ok(exit_code_from_status(status))
 }
@@ -116,12 +144,89 @@ fn mark_running(
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
+    use std::os::unix::process::ExitStatusExt;
+    use std::path::{Path, PathBuf};
+    use std::process::ExitStatus;
 
     use serde_json::json;
     use tempfile::tempdir;
 
+    use super::run_in_agent_worktree;
     use crate::agent::{agent_report_json, AgentMetadata, AgentReport};
+
+    fn init_repo_with_commit(root: &Path) {
+        let run = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.name", "Test"]);
+        run(&["config", "user.email", "test@example.com"]);
+        fs::write(root.join("README.md"), "seed\n").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "seed"]);
+    }
+
+    #[test]
+    fn run_in_agent_worktree_launches_in_worktree_and_cleans_up_on_success() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+
+        let mut launch_dir: Option<PathBuf> = None;
+        let status = run_in_agent_worktree(dir.path(), "aa-00000001", |worktree| {
+            // The system is launched in the prepared worktree, which exists during the run.
+            assert!(worktree.is_dir());
+            launch_dir = Some(worktree.to_path_buf());
+            Ok(ExitStatus::from_raw(0))
+        })
+        .unwrap();
+
+        assert_eq!(status.code(), Some(0));
+        // The launch directory is the prepared worktree for this agent.
+        assert!(launch_dir.unwrap().ends_with("worktrees/aa-00000001"));
+        // The worktree is cleaned up after a successful run.
+        assert!(!dir.path().join("worktrees/aa-00000001").exists());
+    }
+
+    #[test]
+    fn run_in_agent_worktree_cleans_up_after_nonzero_exit() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+
+        let status = run_in_agent_worktree(dir.path(), "aa-00000001", |worktree| {
+            assert!(worktree.is_dir());
+            Ok(ExitStatus::from_raw(7 << 8))
+        })
+        .unwrap();
+
+        assert_eq!(status.code(), Some(7));
+        assert!(!dir.path().join("worktrees/aa-00000001").exists());
+    }
+
+    #[test]
+    fn run_in_agent_worktree_cleans_up_after_run_error() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+
+        let error = run_in_agent_worktree(dir.path(), "aa-00000001", |worktree| {
+            // Simulate a failure mid-run (e.g. the system process could not be launched).
+            assert!(worktree.is_dir());
+            Err(std::io::Error::other("boom"))
+        })
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "boom");
+        // Cleanup still runs when the run fails.
+        assert!(!dir.path().join("worktrees/aa-00000001").exists());
+    }
 
     #[test]
     fn run_report_json_includes_running_status_and_session_id() {

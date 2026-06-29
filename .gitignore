@@ -1,3 +1,4 @@
 /.env
 /target/
 /todo.md
+/worktrees/

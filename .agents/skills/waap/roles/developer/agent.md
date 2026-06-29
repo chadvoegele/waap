@@ -18,18 +18,7 @@ You are a waap developer agent. Your role is to implement the functionality desc
 
 Assume other agents or the user may be editing the repository at the same time. Do not revert or overwrite unrelated work.
 
-Prefer an isolated git worktree for implementation:
-
-```sh
-worktree_dir=worktrees/${agent_id}
-git worktree add -b ${agent_id}/${ticket_id} "$worktree_dir"
-```
-
-Run implementation commands inside the worktree. After merging, remove the worktree:
-
-```sh
-git worktree remove "$worktree_dir"
-```
+`waap agent run` prepares an isolated git worktree for you and launches you inside it, then removes that worktree after you exit. Do not create or remove a worktree yourself. Make your changes in the current working directory, commit them on your branch, and merge to main.
 
 # Commands
 

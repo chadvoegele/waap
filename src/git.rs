@@ -1,7 +1,51 @@
 use std::ffi::OsString;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+/// Relative path, under the repository root, of the worktree that `waap agent run`
+/// prepares for an agent.
+pub(crate) fn agent_worktree_dir(agent_id: &str) -> PathBuf {
+    Path::new("worktrees").join(agent_id)
+}
+
+/// Create the git worktree that `waap agent run` runs the agent inside.
+///
+/// A fresh branch named after the agent is created at the current `HEAD` and checked out into
+/// `worktrees/<agent_id>`. Returns the canonical absolute path of the new worktree so callers can
+/// launch the selected system there.
+pub(crate) fn create_agent_worktree(repo_root: &Path, agent_id: &str) -> io::Result<PathBuf> {
+    let relative = agent_worktree_dir(agent_id);
+    run_git(
+        repo_root,
+        &[
+            "worktree".into(),
+            "add".into(),
+            "-b".into(),
+            agent_id.into(),
+            relative.as_os_str().to_os_string(),
+        ],
+    )?;
+    repo_root.join(&relative).canonicalize()
+}
+
+/// Remove the agent worktree created by [`create_agent_worktree`].
+///
+/// `--force` is used so cleanup still succeeds when the agent left uncommitted or untracked changes
+/// behind, which keeps the worktree lifecycle consistent even after an early exit or failure.
+pub(crate) fn remove_agent_worktree(repo_root: &Path, agent_id: &str) -> io::Result<()> {
+    let relative = agent_worktree_dir(agent_id);
+    run_git(
+        repo_root,
+        &[
+            "worktree".into(),
+            "remove".into(),
+            "--force".into(),
+            relative.as_os_str().to_os_string(),
+        ],
+    )?;
+    Ok(())
+}
 
 /// Stage and commit only the given paths under `repo_root`, returning the new commit hash.
 ///
@@ -63,12 +107,19 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::commit_paths;
+    use super::{commit_paths, create_agent_worktree, remove_agent_worktree};
 
     fn init_repo(root: &Path) {
         run(root, &["init", "-q"]);
         run(root, &["config", "user.name", "Test"]);
         run(root, &["config", "user.email", "test@example.com"]);
+    }
+
+    fn init_repo_with_commit(root: &Path) {
+        init_repo(root);
+        write_file(&root.join("README.md"), "seed\n");
+        run(root, &["add", "-A"]);
+        run(root, &["commit", "-q", "-m", "seed"]);
     }
 
     fn run(root: &Path, args: &[&str]) -> String {
@@ -206,5 +257,55 @@ mod tests {
         let error = commit_paths(dir.path(), &[], "waap ticket new tt-x").unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn create_agent_worktree_creates_checkout_and_branch() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+
+        let worktree = create_agent_worktree(dir.path(), "aa-00000001").unwrap();
+
+        assert!(worktree.is_dir());
+        assert_eq!(
+            worktree,
+            dir.path()
+                .join("worktrees/aa-00000001")
+                .canonicalize()
+                .unwrap()
+        );
+        // The seed commit's tree is checked out in the worktree.
+        assert!(worktree.join("README.md").exists());
+        // A branch named after the agent now exists and is checked out in the worktree.
+        let branches = run(dir.path(), &["branch", "--list", "aa-00000001"]);
+        assert!(branches.contains("aa-00000001"));
+        let worktrees = run(dir.path(), &["worktree", "list"]);
+        assert!(worktrees.contains("worktrees/aa-00000001"));
+    }
+
+    #[test]
+    fn remove_agent_worktree_deletes_checkout() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let worktree = create_agent_worktree(dir.path(), "aa-00000001").unwrap();
+
+        remove_agent_worktree(dir.path(), "aa-00000001").unwrap();
+
+        assert!(!worktree.exists());
+        let worktrees = run(dir.path(), &["worktree", "list"]);
+        assert!(!worktrees.contains("worktrees/aa-00000001"));
+    }
+
+    #[test]
+    fn remove_agent_worktree_forces_removal_with_uncommitted_changes() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let worktree = create_agent_worktree(dir.path(), "aa-00000001").unwrap();
+        // Leave dirty state behind, as an agent that exits early or fails would.
+        write_file(&worktree.join("scratch.txt"), "uncommitted work\n");
+
+        remove_agent_worktree(dir.path(), "aa-00000001").unwrap();
+
+        assert!(!worktree.exists());
     }
 }
