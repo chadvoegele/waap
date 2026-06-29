@@ -197,6 +197,7 @@ pub(crate) enum AgentSystem {
     #[default]
     Opencode,
     Claude,
+    Codex,
 }
 
 impl AgentSystem {
@@ -204,6 +205,7 @@ impl AgentSystem {
         match self {
             AgentSystem::Opencode => "opencode",
             AgentSystem::Claude => "claude",
+            AgentSystem::Codex => "codex",
         }
     }
 
@@ -282,7 +284,7 @@ mod tests {
 
     use super::{
         agent_report_json, available_agent_id_with_generator, is_agent_id, AgentMetadata,
-        AgentReport,
+        AgentReport, AgentSystem,
     };
     use crate::ids::random_hex_chars;
 
@@ -326,6 +328,22 @@ mod tests {
         let value: toml::Value = toml.parse().unwrap();
 
         assert!(AgentMetadata::from_frontmatter(&value, &path).is_ok());
+    }
+
+    #[test]
+    fn agent_metadata_system_codex_passes() {
+        let path = PathBuf::from("agent.md");
+        let toml = "creation_date = 2026-06-18T15:00:34Z\nstatus = \"ready\"\nsystem = \"codex\"\n";
+        let value: toml::Value = toml.parse().unwrap();
+
+        assert!(AgentMetadata::from_frontmatter(&value, &path).is_ok());
+    }
+
+    #[test]
+    fn agent_system_codex_round_trips() {
+        assert_eq!(AgentSystem::parse("codex"), Some(AgentSystem::Codex));
+        assert_eq!(AgentSystem::Codex.as_str(), "codex");
+        assert!(AgentSystem::labels().contains(&"codex"));
     }
 
     #[test]

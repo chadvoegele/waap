@@ -50,6 +50,13 @@ pub(crate) fn run_agent(
     match system {
         AgentSystem::Opencode => run_agent_opencode(repo_root, output_format, agent_id),
         AgentSystem::Claude => run_agent_claude(repo_root, output_format, agent_id),
+        // Stub until `tt-driving-a-codex-run` adds `run_agent_codex` (spec
+        // /specs/codex-agent-system.md §3). Keeps this foundation ticket
+        // compilable while `--system codex` parses and frontmatter validates.
+        AgentSystem::Codex => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "system \"codex\" is not yet implemented",
+        )),
     }
 }
 

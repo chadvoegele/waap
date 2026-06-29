@@ -51,6 +51,13 @@ pub(crate) fn stop_agents_with_systems(
             abort_opencode_session(config.as_ref().expect("config initialized"), session_id)
         }
         AgentSystem::Claude => kill_claude_session(session_id),
+        // Stub until `tt-graceful-codex-stop` wires the SIGTERM/turn-interrupt
+        // stop path (spec /specs/codex-agent-system.md §5). No codex run can be
+        // started yet (see `run_agent`), so this is unreachable in practice.
+        AgentSystem::Codex => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "stopping system \"codex\" is not yet implemented",
+        )),
     })
 }
 
@@ -269,6 +276,7 @@ mod tests {
             match system {
                 AgentSystem::Opencode => aborted.push(session_id.to_string()),
                 AgentSystem::Claude => killed.push(session_id.to_string()),
+                AgentSystem::Codex => {}
             }
             Ok(())
         })

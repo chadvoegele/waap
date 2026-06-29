@@ -430,6 +430,30 @@ mod tests {
     }
 
     #[test]
+    fn parses_agent_run_with_codex_system() {
+        let cli = Cli::try_parse_from([
+            "waap",
+            "agent",
+            "run",
+            "--agent-id",
+            "aa-3881fda0",
+            "--system",
+            "codex",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Agent {
+                command: AgentCommand::Run {
+                    agent_id,
+                    system: AgentSystem::Codex,
+                }
+            } if agent_id == "aa-3881fda0"
+        ));
+    }
+
+    #[test]
     fn agent_run_rejects_invalid_system_argument() {
         let error = Cli::try_parse_from([
             "waap",
@@ -438,7 +462,7 @@ mod tests {
             "--agent-id",
             "aa-3881fda0",
             "--system",
-            "codex",
+            "cursor",
         ])
         .unwrap_err();
 
