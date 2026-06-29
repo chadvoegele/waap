@@ -205,6 +205,17 @@ fn mark_running(
     body: &str,
 ) -> io::Result<()> {
     metadata.status = "running".to_string();
+
+    // Read the record on `main` immediately before deciding so a concurrent merge that already set
+    // `running` is observed; an already-`running` record is a no-op write+commit, so skip it (still
+    // report the agent state).
+    let (current, _) = read_agent_record(repo_root, agent_id)?;
+    if current.status == "running" {
+        let report = load_agent_report(repo_root, agent_id)?;
+        print_run_agent_report(output_format, "Running agent", &report, "");
+        return Ok(());
+    }
+
     write_agent_record(repo_root, agent_id, metadata, body)?;
 
     let report = load_agent_report(repo_root, agent_id)?;
@@ -229,6 +240,15 @@ fn update_codex_session(
     thread_id: &str,
 ) -> io::Result<()> {
     let (mut metadata, body) = read_agent_record(repo_root, agent_id)?;
+    // Read from `main` immediately before deciding; if the session id and system already match the
+    // target values the write+commit is a no-op, so skip it (still report the agent state).
+    if metadata.session_id.as_deref() == Some(thread_id)
+        && metadata.system == Some(AgentSystem::Codex)
+    {
+        let report = load_agent_report(repo_root, agent_id)?;
+        print_run_agent_report(output_format, "Codex session", &report, "");
+        return Ok(());
+    }
     metadata.session_id = Some(thread_id.to_string());
     metadata.system = Some(AgentSystem::Codex);
     write_agent_record(repo_root, agent_id, &metadata, &body)?;
@@ -260,6 +280,14 @@ fn mark_completed(
     agent_id: &str,
 ) -> io::Result<()> {
     let (mut metadata, body) = read_agent_record(repo_root, agent_id)?;
+    // Read from `main` immediately before deciding so a concurrent merge that already set `completed`
+    // (e.g. the codex agent self-marked it) is observed; an already-`completed` record is a no-op
+    // write+commit, so skip it (still report the agent state) and avoid a redundant commit.
+    if metadata.status == "completed" {
+        let report = load_agent_report(repo_root, agent_id)?;
+        print_run_agent_report(output_format, "Completed agent", &report, "");
+        return Ok(());
+    }
     metadata.status = "completed".to_string();
     write_agent_record(repo_root, agent_id, &metadata, &body)?;
 
@@ -594,6 +622,32 @@ mod tests {
     }
 
     #[test]
+    fn finalize_agent_run_skips_commit_when_already_completed() {
+        // Acceptance criteria 1: an already-`completed` record is a no-op — no write and no new
+        // commit — yet still completes successfully (e.g. the agent self-marked completed before the
+        // process exit reached here).
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let agent_id = "aa-00000001";
+        let path = seed_agent_record(dir.path(), agent_id, "completed");
+        let head_before = git(dir.path(), &["rev-parse", "HEAD"]);
+
+        finalize_agent_run(
+            dir.path(),
+            &OutputFormat::Json,
+            agent_id,
+            ExitStatus::from_raw(0),
+        )
+        .unwrap();
+
+        // Still completed, but no redundant commit was made.
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("status = \"completed\"\n"));
+        let head_after = git(dir.path(), &["rev-parse", "HEAD"]);
+        assert_eq!(head_before, head_after);
+    }
+
+    #[test]
     fn finalize_agent_run_leaves_running_on_nonzero_exit() {
         // Acceptance criteria 2: a non-zero exit does not mark the agent completed and commits
         // nothing; the agent stays `running` so the failure is visible.
@@ -799,5 +853,25 @@ mod tests {
         assert_eq!(subject, format!("waap agent codex session {agent_id}"));
         let merges = git(dir.path(), &["rev-list", "--merges", "HEAD"]);
         assert!(merges.is_empty(), "unexpected merge commits: {merges}");
+    }
+
+    #[test]
+    fn update_codex_session_skips_commit_when_already_set() {
+        // Acceptance criteria 2: when the session id and system already match the target, the
+        // write+commit is skipped (no new commit) while the call still succeeds.
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let agent_id = "aa-00000001";
+        seed_agent_record(dir.path(), agent_id, "running");
+
+        // First call writes the session id and system and commits once.
+        update_codex_session(dir.path(), &OutputFormat::Json, agent_id, "th_abc123").unwrap();
+        let head_after_first = git(dir.path(), &["rev-parse", "HEAD"]);
+
+        // Second call with the same target is a no-op: no new commit.
+        update_codex_session(dir.path(), &OutputFormat::Json, agent_id, "th_abc123").unwrap();
+        let head_after_second = git(dir.path(), &["rev-parse", "HEAD"]);
+
+        assert_eq!(head_after_first, head_after_second);
     }
 }
