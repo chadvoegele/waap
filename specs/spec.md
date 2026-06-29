@@ -1,10 +1,10 @@
 # waap
 
-Waap Agent Automation Platform
+waap Agent Automation Platform
 
 ## Description
 
-Waap leverages agents to transform specifications into a tested, production-ready application. Waap works by using agents to automate the software development lifecycle:
+waap leverages agents to transform specifications into a tested, production-ready application. waap works by using agents to automate the software development lifecycle:
 
 1. Product specifications
 1. Backlog curation
@@ -13,7 +13,7 @@ Waap leverages agents to transform specifications into a tested, production-read
 1. Testing
 1. Release
 
-Waap is an attempt at building an "AI software factory".
+waap is an attempt at building an "AI software factory".
 
 ## Conventions
 
@@ -31,11 +31,11 @@ Example:
 
 ## Datastore
 
-Waap maintains its own datastore within the application's repository at `/.waap/`.
+waap maintains its own datastore within the application's repository at `/.waap/`.
 
 ## Agent Roles
 
-Waap uses different agent roles to perform each stage of the software development lifecycle.
+waap uses different agent roles to perform each stage of the software development lifecycle.
 
 - Planner
 	- Translates application specifications into an implementation plan via tickets.
@@ -46,7 +46,7 @@ Waap uses different agent roles to perform each stage of the software developmen
 
 ## Agents
 
-Agents do the work in Waap. Agents use the repository source code and specifications primarily as context, and use `.waap/` to track their own state and log partial progress.
+Agents do the work in waap. Agents use the repository source code and specifications primarily as context, and use `.waap/` to track their own state and log partial progress.
 
 Agent state is tracked in the `/.waap/agents/` directory. An agent is identified by a 8 character random hex hash, prefixed by `aa-`.
 
@@ -273,7 +273,7 @@ claude -p \
 claude has no remote session to abort, but the session id is part of the local process's command line (`--session-id <uuid>`), so `waap agent stop` aborts a claude agent by signalling the matching local process (e.g. `pkill -TERM -f <session_id>`) before marking it `aborted`.
 
 
-## Waap Skill
+## waap Skill
 
 In addition to the CLI, waap also includes an agent skill that tells a (non-waap spawned) agent how to interact with waap. The skill includes a CLI reference as well as instructions to be passed to the waap agents.
 
