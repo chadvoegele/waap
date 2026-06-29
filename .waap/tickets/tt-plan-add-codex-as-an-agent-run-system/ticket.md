@@ -1,7 +1,7 @@
 +++
 title = "Plan: add codex as an agent-run system"
 creation_date = 2026-06-29T15:44:51Z
-status = "pending"
+status = "in-progress"
 +++
 
 # Goal
