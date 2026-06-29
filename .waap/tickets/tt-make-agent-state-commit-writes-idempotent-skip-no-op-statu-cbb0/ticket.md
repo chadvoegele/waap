@@ -1,7 +1,7 @@
 +++
 title = "Make agent state-commit writes idempotent (skip no-op status writes)"
 creation_date = 2026-06-29T21:58:50Z
-status = "pending"
+status = "in-progress"
 +++
 
 # Problem
