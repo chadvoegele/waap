@@ -1,7 +1,7 @@
 +++
 title = "Linearize agent-run git history with rebase and fast-forward merge"
 creation_date = 2026-06-29T15:03:53Z
-status = "pending"
+status = "in-progress"
 +++
 
 # Problem
