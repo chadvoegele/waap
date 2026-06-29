@@ -16,7 +16,7 @@ Agents frequently exit without running the final `waap agent update --set-status
 - After the attached system process exits, if it exited with status code 0, `waap agent run` sets the agent's `status = "completed"` and commits that state change on `main`. This happens after the agent has merged its branch, so the completion lands cleanly on `main`.
 - On a non-zero exit, the agent is NOT marked completed. Leave it `running` (or introduce a distinct failed/error status) so the failure is visible. Decide and document the chosen behavior.
 - This sets only the AGENT status. `waap` does not mark the ticket completed, because the agent record carries no ticket reference; ticket completion remains the agent's responsibility.
-- Remove the instruction telling agents to mark their own status completed (the agent still marks its ticket status).
+- Remove ONLY the instruction telling agents to mark their own AGENT status completed (the `waap agent update --agent-id <id> --set-status completed` step). Agents MUST still mark their ticket in-progress at the start and completed at the end (`waap ticket update --ticket-id <tid> --set-status ...`); that responsibility is unchanged.
 
 # Notes / Future Work
 
@@ -27,7 +27,7 @@ Exit code 0 is a coarse proxy for "goal completed". The `claude --output-format 
 1. A successful (exit 0) `waap agent run` leaves the agent `status = "completed"` on `main` without the agent running `waap agent update`.
 2. A non-zero exit does not mark the agent completed; the documented failure behavior is applied.
 3. The completion commit lands on `main` after the agent's merge (visible in main worktree, history stays linear per the dependency ticket).
-4. Agent role/instruction docs no longer ask the agent to self-mark its status completed; ticket-status responsibility is unchanged.
+4. Agent role/instruction docs no longer ask the agent to self-mark its AGENT status completed, but still instruct the agent to mark its TICKET in-progress at the start and completed at the end.
 5. Tests cover completed-on-zero-exit, not-completed-on-nonzero-exit, and that no ticket status is changed by waap.
 
 # Validation
