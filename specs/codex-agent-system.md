@@ -210,34 +210,37 @@ server is up inside the worktree; a second `update_codex_session` commit writes
 `session_id` then. One extra commit per codex run — no schema change
 (`session_id` already exists on `AgentMetadata`).
 
-## 5. `waap agent stop` for codex — the key open design point
+## 5. `waap agent stop` for codex — signal the run process (DECIDED)
 
 Graceful `turn/interrupt` requires the **live JSON-RPC connection**, which is
-held only by the running `waap agent run` process. A separate `waap agent stop`
-invocation has no channel to the per-run stdio child, so it cannot call
-`turn/interrupt` directly. Two viable designs:
+held only by the running `waap agent run` process (R). A separate
+`waap agent stop` invocation has no channel to the per-run stdio child, so it
+cannot call `turn/interrupt` directly. The chosen design is to **signal R and
+let R interrupt gracefully** — this is the only stop mechanism (no PID-kill /
+process-group fallback path).
 
-- **(A) Signal the run process; it interrupts gracefully (recommended).**
-  `waap agent stop` sends `SIGTERM` to the `waap agent run` process for this
-  agent — matchable by its unique argv `agent run --agent-id <agent-id>`
-  (`pkill -TERM -f "agent run --agent-id <agent-id>"`; this pattern matches the
-  run process, not the `codex app-server --stdio` child, which lacks the agent
-  id). `run_agent_codex` installs a SIGTERM handler that calls `turn/interrupt`,
-  closes the connection, and lets `run_in_agent_worktree` clean up the worktree.
-  Gives a graceful stop and needs no new record field. Cost: a signal handler in
-  the run path and passing `agent_id` (not `session_id`) to the codex abort arm.
-- **(B) Kill the child process group.** `waap agent stop` kills the run process
-  (and its `codex app-server` child) via process-group `SIGTERM`. Simpler, no
-  signal handler, but not graceful (the turn is abandoned mid-flight) and risks
-  skipping worktree cleanup unless the run process traps the signal anyway.
+- `waap agent stop` sends `SIGTERM` to R for this agent, matched by R's unique
+  argv `agent run --agent-id <agent-id>`:
+  `pkill -TERM -f "agent run --agent-id <agent-id>"`. This pattern matches R,
+  **not** the `codex app-server --stdio` child (which lacks the agent id), and
+  is independent of whether R was started in the foreground or backgrounded
+  (`nohup`/`setsid`).
+- `run_agent_codex` installs a `SIGTERM` handler that calls
+  `turn/interrupt(thread_id, turn_id)` over its live connection, closes the
+  connection, and returns through `run_in_agent_worktree` so the worktree is
+  cleaned up. The interrupted turn yields a non-`Completed` status, so
+  `finalize_codex_run` leaves the agent `running` (it never marks `completed`),
+  and `waap agent stop`'s own `aborted` write on the record is therefore stable.
+- In `src/agent/stop.rs::stop_agents_with_systems`, add the `AgentSystem::Codex`
+  arm. It needs the **agent id** (available in `stop_agent_if_running`), not the
+  `session_id`, so the abort closure signature changes to pass `agent_id` (or
+  both). This is the one place codex diverges from the claude/opencode
+  `abort(system, session_id)` shape.
 
-**Recommendation: (A).** It is the only option that actually uses
-`turn/interrupt` (the reason to prefer app-server), and it keeps worktree
-cleanup intact. In `src/agent/stop.rs::stop_agents_with_systems`, add the
-`AgentSystem::Codex` arm; note this arm needs the **agent id** (available in
-`stop_agent_if_running`) rather than the `session_id`, so the abort closure
-signature changes to pass `agent_id` (or both). Document this as the one place
-codex diverges from the claude/opencode `abort(system, session_id)` shape.
+Inherent safety property (not a separate fallback code path): because a stdio
+server exits when its stdin EOFs, if R ever dies without running its handler
+(e.g. `SIGKILL`), the child app-server is still torn down automatically. waap
+implements only the signal-R path above.
 
 ## 6. Worktree integration
 
@@ -291,9 +294,11 @@ agent-id-based signal of design (A).
 
 ## 9. Open questions / risks for human review
 
-1. **Stop design (A vs. B), §5.** (A) is recommended (graceful, needs a SIGTERM
-   handler in the run path + an `agent_id`-based abort arm). Confirm before
-   implementing, since it changes the `abort(system, session_id)` closure shape.
+1. **Stop design, §5 — DECIDED.** Signal the run process via
+   `pkill -TERM -f "agent run --agent-id <id>"`; R traps `SIGTERM` and calls
+   `turn/interrupt`. No PID-kill / process-group fallback. This adds a SIGTERM
+   handler in the run path and changes the codex abort arm to take `agent_id`
+   instead of `session_id`.
 2. **Completion-model change, §3.** Codex success comes from `turn/completed`
    status, not a process exit code, so it does not flow through the existing
    `finalize_agent_run` unchanged. Confirm a `finalize_codex_run` (or a
