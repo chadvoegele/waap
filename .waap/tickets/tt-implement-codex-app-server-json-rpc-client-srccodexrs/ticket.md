@@ -1,7 +1,7 @@
 +++
 title = "Implement codex app-server JSON-RPC client (src/codex.rs)"
 creation_date = 2026-06-29T19:06:18Z
-status = "in-progress"
+status = "completed"
 depends_on = ["tt-add-agentsystemcodex-variant-and-cli-wiring"]
 +++
 
