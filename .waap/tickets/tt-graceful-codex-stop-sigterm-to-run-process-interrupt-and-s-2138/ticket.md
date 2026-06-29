@@ -1,7 +1,7 @@
 +++
 title = "Graceful codex stop: SIGTERM-to-run-process interrupt and stop arm"
 creation_date = 2026-06-29T19:07:21Z
-status = "in-progress"
+status = "completed"
 depends_on = ["tt-drive-codex-runs-runagentcodex-dispatch-and-turn-status-co-ce31"]
 +++
 
