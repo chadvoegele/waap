@@ -278,12 +278,12 @@ claude has no remote session to abort, but the session id is part of the local p
 In addition to the CLI, waap also includes an agent skill that tells a (non-waap spawned) agent how to interact with waap. The skill includes a CLI reference as well as instructions to be passed to the waap agents.
 
 ```
-- waap/SKILL.md
-- waap/roles/planner/agent.md
-- waap/roles/developer/agent.md
+- .agents/skills/waap/SKILL.md
+- .agents/skills/waap/roles/planner/agent.md
+- .agents/skills/waap/roles/developer/agent.md
 ```
 
-### waap/roles/planner/agent.md
+### .agents/skills/waap/roles/planner/agent.md
 
 Your role is to develop a plan to implement the application according to its specifications, captured in `/specs`. The plan should be captured as tickets in `/.waap/tickets/` directory.
 
@@ -298,9 +298,9 @@ If the application is fully implemented, consider whether it is also fully teste
 
 If the application is fully implemented and tested, complete your `/goal`.
 
-After completing your `/goal`, mark your status as 'completed' with `waap update --agent-id $agent_id --set-status completed`.
+After completing your `/goal`, mark your status as 'completed' with `waap agent update --agent-id $agent_id --set-status completed`.
 
-### waap/roles/developer/agent.md
+### .agents/skills/waap/roles/developer/agent.md
 
 Your role is to implement code for the functionality described in `/.waap/tickets/${ticket_id}/ticket.md`. After implementing the code, write adequate unit tests, and end-to-end tests if appropriate. Once the code is tested, merge it, resolving conflicts as necessary.
 
@@ -334,14 +334,14 @@ To start the waap software lifecyle, first run a planner agent to create tickets
 
 ```
 cd ${APP_REPO_ROOT}
-planner_id=$(cat waap/roles/planner/agent.md | waap --output-format json agent new --role planner | jq -r '."agent-id"')
+planner_id=$(cat .agents/skills/waap/roles/planner/agent.md | waap --output-format json agent new --role planner | jq -r '."agent-id"')
 waap agent run --agent-id ${planner_id}
 ```
 
 Then select a ticket for an agent, insert it into the developer agent.md template, and create an agent with those instructions,
 ```
 cd ${APP_REPO_ROOT}
-# replace ${ticket_id} in waap/roles/developer/agent.md to create resolved_developer_agent.md
+# replace ${ticket_id} in .agents/skills/waap/roles/developer/agent.md to create resolved_developer_agent.md
 developer_id=$(cat resolved_developer_agent.md | waap --output-format json agent new --role developer | jq -r '."agent-id"')
 waap agent run --agent-id ${developer_id}
 ```
