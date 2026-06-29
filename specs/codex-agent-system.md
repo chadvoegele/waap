@@ -395,6 +395,7 @@ transitions and are system-agnostic, so they need no codex-specific additions.
    isolated worktree, but reviewers should confirm that matches the threat model
    accepted for claude's disabled bash sandbox. A narrower `--sandbox
    workspace-write` is the alternative if full bypass is unacceptable.
+   **DECIDED (operator review): use full bypass to match the claude path.**
 3. **`pkill -f` matching breadth.** The stop pattern is the session UUID, which
    is collision-free against the waap parent and other agents. Confirm no other
    tooling writes that UUID onto an unrelated process's argv. (Same residual
@@ -403,6 +404,7 @@ transitions and are system-agnostic, so they need no codex-specific additions.
    JSONL to the operator's terminal rather than codex's prettier human output.
    Decide whether consistency with claude/opencode (keep `--json`) or
    readability (drop it) wins; behavior is identical either way.
+   **DECIDED (operator review): keep `--json` for consistency.**
 5. **codex CLI version drift.** Flag names/aliases
    (`--json`/`--experimental-json`, `--dangerously-bypass-approvals-and-sandbox`/
    `--yolo`) and the `thread.started` JSONL shape are taken from the pinned
