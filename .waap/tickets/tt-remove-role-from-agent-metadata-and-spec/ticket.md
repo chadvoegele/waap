@@ -1,7 +1,7 @@
 +++
 title = "Remove role from agent metadata and spec"
 creation_date = 2026-06-27T16:41:29Z
-status = "pending"
+status = "completed"
 +++
 
 # Spec Reference

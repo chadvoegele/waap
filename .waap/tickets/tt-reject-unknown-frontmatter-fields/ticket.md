@@ -1,7 +1,7 @@
 +++
 title = "Reject unknown frontmatter fields"
 creation_date = 2026-06-27T02:22:11Z
-status = "pending"
+status = "completed"
 +++
 
 # Problem

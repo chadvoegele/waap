@@ -1,7 +1,7 @@
 +++
 title = "Move agent run to attached mode"
 creation_date = 2026-06-27T02:21:55Z
-status = "pending"
+status = "completed"
 +++
 
 # Problem
