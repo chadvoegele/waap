@@ -1,7 +1,7 @@
 +++
 title = "commit_paths must tolerate no-op commits (nothing staged)"
 creation_date = 2026-06-29T20:07:40Z
-status = "in-progress"
+status = "completed"
 +++
 
 # Problem
