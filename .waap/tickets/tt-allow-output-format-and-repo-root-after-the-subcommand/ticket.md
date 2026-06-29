@@ -1,7 +1,7 @@
 +++
 title = "Allow --output-format and --repo-root after the subcommand"
 creation_date = 2026-06-29T15:47:09Z
-status = "in-progress"
+status = "completed"
 +++
 
 # Problem
