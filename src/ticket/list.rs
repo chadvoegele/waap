@@ -28,26 +28,42 @@ pub(crate) fn print_ticket_list(output_format: &OutputFormat, entries: &[TicketL
     match output_format {
         OutputFormat::Json => println!("{}", ticket_list_json(entries)),
         OutputFormat::HumanReadable => {
-            for entry in entries {
-                if entry.report.depends_on.is_some() {
-                    let state = if entry.blocked {
-                        "[blocked]"
-                    } else {
-                        "[unblocked]"
-                    };
-                    println!("{} {state}", entry.report.ticket_id);
-                } else {
-                    println!("{}", entry.report.ticket_id);
-                }
+            for line in ticket_list_human_lines(entries) {
+                println!("{line}");
             }
         }
     }
 }
 
+fn ticket_list_human_lines(entries: &[TicketListEntry]) -> Vec<String> {
+    let id_width = entries
+        .iter()
+        .map(|entry| entry.report.ticket_id.len())
+        .max()
+        .unwrap_or(0);
+    entries
+        .iter()
+        .map(|entry| {
+            let id = &entry.report.ticket_id;
+            let status = &entry.report.status;
+            if entry.report.depends_on.is_some() {
+                let state = if entry.blocked {
+                    "[blocked]"
+                } else {
+                    "[unblocked]"
+                };
+                format!("{id:id_width$}  {status}  {state}")
+            } else {
+                format!("{id:id_width$}  {status}")
+            }
+        })
+        .collect()
+}
+
 pub(crate) fn ticket_list_json(entries: &[TicketListEntry]) -> serde_json::Value {
     json!(entries
         .iter()
-        .map(|entry| json!({"ticket_id": entry.report.ticket_id, "blocked": entry.blocked}))
+        .map(|entry| json!({"ticket_id": entry.report.ticket_id, "status": entry.report.status, "blocked": entry.blocked}))
         .collect::<Vec<_>>())
 }
 
@@ -90,7 +106,7 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{list_tickets, ticket_list_json, TicketListEntry};
+    use super::{list_tickets, ticket_list_human_lines, ticket_list_json, TicketListEntry};
     use crate::ticket::TicketReport;
     use crate::ticket::TicketStatus;
 
@@ -202,10 +218,64 @@ status = \"ready\"
         assert_eq!(
             ticket_list_json(&entries),
             json!([
-                {"ticket_id": "tt-one", "blocked": false},
-                {"ticket_id": "tt-two", "blocked": false},
+                {"ticket_id": "tt-one", "status": "pending", "blocked": false},
+                {"ticket_id": "tt-two", "status": "completed", "blocked": false},
             ])
         );
+    }
+
+    #[test]
+    fn ticket_list_json_includes_status_field() {
+        let entries = vec![TicketListEntry {
+            report: TicketReport {
+                ticket_id: "tt-one".to_string(),
+                path: PathBuf::from(".waap/tickets/tt-one/ticket.md"),
+                title: "One".to_string(),
+                creation_date: "2026-06-22T12:00:00Z".to_string(),
+                status: "in-progress".to_string(),
+                depends_on: None,
+                file_size: 123,
+            },
+            blocked: false,
+        }];
+
+        let value = ticket_list_json(&entries);
+        assert_eq!(value[0]["status"], json!("in-progress"));
+    }
+
+    #[test]
+    fn ticket_list_human_lines_show_status() {
+        let entries = vec![
+            TicketListEntry {
+                report: TicketReport {
+                    ticket_id: "tt-one".to_string(),
+                    path: PathBuf::from(".waap/tickets/tt-one/ticket.md"),
+                    title: "One".to_string(),
+                    creation_date: "2026-06-22T12:00:00Z".to_string(),
+                    status: "completed".to_string(),
+                    depends_on: None,
+                    file_size: 123,
+                },
+                blocked: false,
+            },
+            TicketListEntry {
+                report: TicketReport {
+                    ticket_id: "tt-feature".to_string(),
+                    path: PathBuf::from(".waap/tickets/tt-feature/ticket.md"),
+                    title: "Feature".to_string(),
+                    creation_date: "2026-06-22T12:00:00Z".to_string(),
+                    status: "pending".to_string(),
+                    depends_on: Some(vec!["tt-one".to_string()]),
+                    file_size: 456,
+                },
+                blocked: true,
+            },
+        ];
+
+        let lines = ticket_list_human_lines(&entries);
+
+        assert_eq!(lines[0], "tt-one      completed");
+        assert_eq!(lines[1], "tt-feature  pending  [blocked]");
     }
 
     #[test]
