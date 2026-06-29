@@ -1,7 +1,7 @@
 +++
 title = "Add AgentSystem::Codex variant and CLI wiring"
 creation_date = 2026-06-29T19:05:14Z
-status = "pending"
+status = "in-progress"
 +++
 
 # Goal
