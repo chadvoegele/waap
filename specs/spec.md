@@ -150,6 +150,7 @@ Missing state is considered valid. Only validate directories and files that alre
     - Creates a new ticket
     - Prepends TOML frontmatter in ticket.md
     - Appends ticket.md contents from stdin
+    - Commits the ticket.md to git
     - Parameters
         - Required
             - `--title`
@@ -159,6 +160,7 @@ Missing state is considered valid. Only validate directories and files that alre
 - update
     - Updates an existing ticket
     - The ticket title cannot be changed since it's also the id.
+    - Commits the ticket.md changes to git
     - Parameters
         - Required
             - `--ticket-id`
@@ -186,6 +188,7 @@ Missing state is considered valid. Only validate directories and files that alre
     - Creates a new agent entry in `/.waap/agents/`
     - Prepends TOML frontmatter in agent.md
     - Appends agent.md contents from stdin
+    - Commits the agent.md to git
     - Parameters
         - Required
             - `--role`
@@ -195,6 +198,7 @@ Missing state is considered valid. Only validate directories and files that alre
 - run
     - Starts the agent harness
     - Updates agent entry to running
+    - Commits the agent.md changes to git
     - Parameters
         - Required
             - `--agent-id`
@@ -205,12 +209,14 @@ Missing state is considered valid. Only validate directories and files that alre
 - stop
     - Stops running agents
     - Marks their statuses as 'aborted'
+    - Commits the agent.md changes to git
     - Parameters
         - Optional
             - `--agent-id`  # if not provided, all agents are stopped
 - update
     - Updates an existing agent
     - The agent id cannot be changed.
+    - Commits the agent.md changes to git
     - Parameters
         - Required
             - `--agent-id`
