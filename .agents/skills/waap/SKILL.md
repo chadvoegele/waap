@@ -139,7 +139,12 @@ Run an agent:
 
 ```sh
 waap agent run --agent-id aa-1234abcd
+```
+
+Run an agent with a different system:
+```sh
 waap agent run --agent-id aa-1234abcd --system claude
+waap agent run --agent-id aa-1234abcd --system codex
 ```
 
 Update agent status:
