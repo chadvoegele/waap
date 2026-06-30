@@ -31,6 +31,13 @@ waap stores state in the application repository under `.waap/`, and tracks it wi
 
 All state is stored as plain text, but should be validated with `waap check` to ensure `waap` commands will work.
 
+### Running Outside the Sandbox
+
+WAAP commands that mutate state (`ticket new/update`, `agent new/run/update`) must run outside the agent sandbox. WAAP writes files before committing them, so a sandbox-blocked Git lock can leave untracked state behind. Disable the sandbox on the first attempt rather than letting the command fail and retrying.
+
+- **Codex:** set `sandbox_permissions: "require_escalated"` on the command call and provide a concise `justification`.
+- **Claude Code:** set `dangerouslyDisableSandbox: true` on the `Bash` tool call.
+
 ## Ticket Dependencies
 
 If a ticket (B) depends on another ticket (A), then ticket (B) is blocked until ticket (A) is completed. This dependency is specified when the ticket is created with `waap ticket new --depends-on tt-A`, where `tt-A` is ticket id of the blocking ticket (A). Multiple blocking tickets can be specified with `--depends-on` multiple times. This can be used to create arbitrary DAGs of work.
