@@ -1,7 +1,7 @@
 +++
 title = "Warn when a nested .waap project exists below the repo root"
 creation_date = 2026-06-30T19:56:36Z
-status = "in-progress"
+status = "completed"
 +++
 
 # Problem
