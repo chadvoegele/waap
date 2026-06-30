@@ -11,34 +11,10 @@ use crate::agent::{
 use crate::check::{check_waap, print_check_result};
 use crate::cli::{AgentCommand, Cli, Command, TicketCommand};
 use crate::git::commit_paths;
-use crate::record::find_nested_waap_projects;
 use crate::ticket::{
     create_ticket, get_ticket, list_tickets, print_ticket_get_report, print_ticket_list,
     print_ticket_report, print_updated_ticket_report, update_ticket,
 };
-
-/// Warn on stderr about any nested `.waap` projects below `repo_root`. Advisory only: never
-/// affects the exit code, and scanning failures are swallowed by `find_nested_waap_projects`.
-fn warn_about_nested_waap_projects(repo_root: &Path) {
-    let nested = find_nested_waap_projects(repo_root);
-    if nested.is_empty() {
-        return;
-    }
-
-    eprintln!(
-        "warning: found nested waap project(s) below the repo root; this command only acts on {}/.waap",
-        repo_root.display()
-    );
-    for path in &nested {
-        let relative = path.strip_prefix(repo_root).unwrap_or(path);
-        let parent = relative.parent().unwrap_or(relative);
-        eprintln!(
-            "  - {} (use --repo-root {} to target it)",
-            relative.display(),
-            parent.display()
-        );
-    }
-}
 
 /// Commit the waap state files changed by a command, then run `print` with the commit hash.
 ///
@@ -65,8 +41,6 @@ fn commit_and_print(
 pub(crate) fn run() -> ExitCode {
     let cli = Cli::parse();
     let repo_root = &cli.repo_root;
-
-    warn_about_nested_waap_projects(repo_root);
 
     match cli.command {
         Command::Check => {
