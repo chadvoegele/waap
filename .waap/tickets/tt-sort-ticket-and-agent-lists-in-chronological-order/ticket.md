@@ -1,7 +1,7 @@
 +++
 title = "Sort ticket and agent lists in chronological order"
 creation_date = 2026-07-01T21:39:36Z
-status = "pending"
+status = "in-progress"
 depends_on = ["tt-add-heading-row-to-ticket-list-human-readable-output", "tt-add-status-column-and-heading-row-to-agent-list-output"]
 +++
 
