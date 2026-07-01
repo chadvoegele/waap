@@ -1,7 +1,7 @@
 +++
 title = "Resolve repo root by walking up to nearest .waap bounded by git root; validate --repo-root"
 creation_date = 2026-07-01T15:26:17Z
-status = "pending"
+status = "in-progress"
 depends_on = ["tt-add-waap-init-command-require-waap-for-mutating-commands"]
 +++
 
