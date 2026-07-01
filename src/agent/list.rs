@@ -67,6 +67,8 @@ pub(crate) fn list_agents(
         }
     }
 
+    reports.sort_by(|a, b| a.metadata.creation_date.cmp(&b.metadata.creation_date));
+
     Ok(reports)
 }
 
@@ -88,6 +90,21 @@ mod tests {
         write_agent(dir.path(), "aa-ffffffff", "completed");
         write_agent(dir.path(), "aa-00000001", "ready");
         write_agent(dir.path(), "aa-10000000", "running");
+
+        let reports = list_agents(dir.path(), None).unwrap();
+
+        assert_eq!(
+            agent_ids(&reports),
+            vec!["aa-00000001", "aa-10000000", "aa-ffffffff"]
+        );
+    }
+
+    #[test]
+    fn agent_list_orders_by_creation_date_not_id() {
+        let dir = tempdir().unwrap();
+        write_agent_with_creation_date(dir.path(), "aa-ffffffff", "ready", "2026-06-20T00:00:00Z");
+        write_agent_with_creation_date(dir.path(), "aa-00000001", "ready", "2026-06-18T00:00:00Z");
+        write_agent_with_creation_date(dir.path(), "aa-10000000", "ready", "2026-06-19T00:00:00Z");
 
         let reports = list_agents(dir.path(), None).unwrap();
 
@@ -257,10 +274,19 @@ status = \"pending\"
     }
 
     fn write_agent(waap_root: &Path, agent_id: &str, status: &str) {
+        write_agent_with_creation_date(waap_root, agent_id, status, "2026-06-18T15:00:34Z");
+    }
+
+    fn write_agent_with_creation_date(
+        waap_root: &Path,
+        agent_id: &str,
+        status: &str,
+        creation_date: &str,
+    ) {
         write_file(
             &waap_root.join(format!(".waap/agents/{agent_id}/agent.md")),
             &format!(
-                "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"{status}\"\n+++\n\n# Purpose\n"
+                "+++\ncreation_date = {creation_date}\nrole = \"developer\"\nstatus = \"{status}\"\n+++\n\n# Purpose\n"
             ),
         );
     }

@@ -112,6 +112,8 @@ pub(crate) fn list_tickets(
         }
     }
 
+    entries.sort_by(|a, b| a.report.creation_date.cmp(&b.report.creation_date));
+
     Ok(entries)
 }
 
@@ -140,6 +142,36 @@ mod tests {
         assert_eq!(
             ticket_ids(&entries),
             vec!["tt-a-ticket", "tt-m-ticket", "tt-z-ticket"]
+        );
+    }
+
+    #[test]
+    fn ticket_list_orders_by_creation_date_not_id() {
+        let dir = tempdir().unwrap();
+        write_ticket_with_creation_date(
+            dir.path(),
+            "tt-a-ticket",
+            "pending",
+            "2026-06-20T00:00:00Z",
+        );
+        write_ticket_with_creation_date(
+            dir.path(),
+            "tt-z-ticket",
+            "pending",
+            "2026-06-18T00:00:00Z",
+        );
+        write_ticket_with_creation_date(
+            dir.path(),
+            "tt-m-ticket",
+            "pending",
+            "2026-06-19T00:00:00Z",
+        );
+
+        let entries = list_tickets(dir.path(), None, None).unwrap();
+
+        assert_eq!(
+            ticket_ids(&entries),
+            vec!["tt-z-ticket", "tt-m-ticket", "tt-a-ticket"]
         );
     }
 
@@ -429,6 +461,31 @@ status = \"ready\"
     }
 
     fn write_ticket(waap_root: &Path, ticket_id: &str, status: &str, depends_on: &[&str]) {
+        write_ticket_full(
+            waap_root,
+            ticket_id,
+            status,
+            depends_on,
+            "2026-06-18T15:00:34Z",
+        );
+    }
+
+    fn write_ticket_with_creation_date(
+        waap_root: &Path,
+        ticket_id: &str,
+        status: &str,
+        creation_date: &str,
+    ) {
+        write_ticket_full(waap_root, ticket_id, status, &[], creation_date);
+    }
+
+    fn write_ticket_full(
+        waap_root: &Path,
+        ticket_id: &str,
+        status: &str,
+        depends_on: &[&str],
+        creation_date: &str,
+    ) {
         let deps_line = if depends_on.is_empty() {
             String::new()
         } else {
@@ -438,7 +495,7 @@ status = \"ready\"
         write_file(
             &waap_root.join(format!(".waap/tickets/{ticket_id}/ticket.md")),
             &format!(
-                "+++\ntitle = \"Test Ticket\"\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"{status}\"\n{deps_line}+++\n\n# Description\n"
+                "+++\ntitle = \"Test Ticket\"\ncreation_date = {creation_date}\nstatus = \"{status}\"\n{deps_line}+++\n\n# Description\n"
             ),
         );
     }
