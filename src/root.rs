@@ -98,9 +98,7 @@ mod tests {
     /// walk in tests that assert "not inside a git repository". `/var/tmp` is a separate,
     /// unrelated temp filesystem.
     fn tempdir_outside_any_git_repo() -> TempDir {
-        tempfile::Builder::new()
-            .tempdir_in("/var/tmp")
-            .unwrap()
+        tempfile::Builder::new().tempdir_in("/var/tmp").unwrap()
     }
 
     fn init_repo(root: &Path) {
