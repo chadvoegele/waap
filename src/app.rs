@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::env;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -12,6 +13,7 @@ use crate::check::{check_waap, print_check_result};
 use crate::cli::{AgentCommand, Cli, Command, TicketCommand};
 use crate::git::commit_paths;
 use crate::init::{init_project, print_init_report};
+use crate::root::resolve_repo_root;
 use crate::ticket::{
     create_ticket, get_ticket, list_tickets, print_ticket_get_report, print_ticket_list,
     print_ticket_report, print_updated_ticket_report, update_ticket,
@@ -41,12 +43,14 @@ fn commit_and_print(
 
 pub(crate) fn run() -> ExitCode {
     let cli = Cli::parse();
-    let repo_root = &cli.repo_root;
 
-    match cli.command {
-        Command::Init => match init_project(repo_root) {
+    // `init` creates `.waap/`, so it operates on `--repo-root` (or the current directory)
+    // directly rather than through `resolve_repo_root`, which requires `.waap/` to already exist.
+    if matches!(cli.command, Command::Init) {
+        let repo_root = cli.repo_root.clone().unwrap_or_else(|| PathBuf::from("."));
+        return match init_project(&repo_root) {
             Ok(report) => commit_and_print(
-                repo_root,
+                &repo_root,
                 &[report.marker.as_path()],
                 "waap init",
                 |commit| print_init_report(&cli.output_format, &report, commit),
@@ -55,7 +59,27 @@ pub(crate) fn run() -> ExitCode {
                 eprintln!("failed to initialize waap project: {error}");
                 ExitCode::from(1)
             }
-        },
+        };
+    }
+
+    let cwd = match env::current_dir() {
+        Ok(dir) => dir,
+        Err(error) => {
+            eprintln!("failed to determine current directory: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let repo_root = match resolve_repo_root(&cwd, cli.repo_root.as_deref()) {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(1);
+        }
+    };
+    let repo_root = &repo_root;
+
+    match cli.command {
+        Command::Init => unreachable!("handled above"),
         Command::Check => {
             let errors = check_waap(repo_root);
             print_check_result(&cli.output_format, &errors);

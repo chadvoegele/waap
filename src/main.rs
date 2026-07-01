@@ -11,6 +11,7 @@ mod init;
 mod opencode;
 mod process;
 mod record;
+mod root;
 mod ticket;
 
 use std::process::ExitCode;

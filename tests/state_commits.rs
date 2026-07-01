@@ -235,12 +235,16 @@ fn respects_repo_root_run_from_elsewhere() {
 #[test]
 fn agent_stop_without_running_agents_creates_no_commit() {
     let dir = tempdir().unwrap();
-    init_repo(dir.path());
+    init_repo_with_waap_project(dir.path());
 
     let before = commit_count(dir.path());
     let output = waap(dir.path(), "", &["agent", "stop"]);
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(commit_count(dir.path()), before);
 }
 

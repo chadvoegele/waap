@@ -12,8 +12,10 @@ pub(crate) struct Cli {
     #[arg(long, value_enum, default_value = "human-readable", global = true)]
     pub(crate) output_format: OutputFormat,
 
-    #[arg(long, default_value = ".", global = true)]
-    pub(crate) repo_root: PathBuf,
+    /// Waap project root. When omitted, the nearest ancestor `.waap/` is used, bounded by the
+    /// git root.
+    #[arg(long, global = true)]
+    pub(crate) repo_root: Option<PathBuf>,
 
     #[command(subcommand)]
     pub(crate) command: Command,
@@ -136,20 +138,20 @@ mod tests {
     fn parses_init_command() {
         let cli = Cli::try_parse_from(["waap", "--repo-root", "/some/path", "init"]).unwrap();
 
-        assert_eq!(cli.repo_root, PathBuf::from("/some/path"));
+        assert_eq!(cli.repo_root, Some(PathBuf::from("/some/path")));
         assert!(matches!(cli.command, Command::Init));
     }
 
     #[test]
     fn parses_repo_root_argument() {
         let cli = Cli::try_parse_from(["waap", "--repo-root", "/some/path", "check"]).unwrap();
-        assert_eq!(cli.repo_root, PathBuf::from("/some/path"));
+        assert_eq!(cli.repo_root, Some(PathBuf::from("/some/path")));
     }
 
     #[test]
-    fn repo_root_defaults_to_current_directory() {
+    fn repo_root_defaults_to_none() {
         let cli = Cli::try_parse_from(["waap", "check"]).unwrap();
-        assert_eq!(cli.repo_root, PathBuf::from("."));
+        assert_eq!(cli.repo_root, None);
     }
 
     #[test]
@@ -647,7 +649,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(cli.repo_root, PathBuf::from("/some/path"));
+        assert_eq!(cli.repo_root, Some(PathBuf::from("/some/path")));
         assert!(matches!(
             cli.command,
             Command::Ticket {
@@ -697,7 +699,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(cli.repo_root, PathBuf::from("/some/path"));
+        assert_eq!(cli.repo_root, Some(PathBuf::from("/some/path")));
         assert!(matches!(
             cli.command,
             Command::Agent {
