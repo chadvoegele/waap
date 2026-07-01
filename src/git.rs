@@ -95,6 +95,16 @@ pub(crate) fn commit_paths(repo_root: &Path, paths: &[&Path], message: &str) -> 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Whether `path` is inside a git working tree.
+pub(crate) fn is_inside_git_work_tree(path: &Path) -> io::Result<bool> {
+    let output = Command::new("git")
+        .current_dir(path)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .map_err(|error| io::Error::new(error.kind(), format!("failed to run git: {error}")))?;
+    Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true")
+}
+
 /// Run `git` in `repo_root` and return its raw [`Output`] without treating a non-zero exit as an
 /// error, so callers can inspect the exit code themselves.
 fn git_command(repo_root: &Path, args: &[OsString]) -> io::Result<Output> {
@@ -139,7 +149,9 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{commit_paths, create_agent_worktree, remove_agent_worktree};
+    use super::{
+        commit_paths, create_agent_worktree, is_inside_git_work_tree, remove_agent_worktree,
+    };
 
     fn init_repo(root: &Path) {
         run(root, &["init", "-q"]);
@@ -313,6 +325,21 @@ mod tests {
         let error = commit_paths(dir.path(), &[], "waap ticket new tt-x").unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn is_inside_git_work_tree_true_for_git_repo() {
+        let dir = tempdir().unwrap();
+        init_repo(dir.path());
+
+        assert!(is_inside_git_work_tree(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn is_inside_git_work_tree_false_outside_git_repo() {
+        let dir = tempdir().unwrap();
+
+        assert!(!is_inside_git_work_tree(dir.path()).unwrap());
     }
 
     #[test]

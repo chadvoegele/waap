@@ -27,6 +27,8 @@ pub(crate) enum OutputFormat {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Initialize a new waap project.
+    Init,
     /// Validate .waap state.
     Check,
     /// Manage agents.
@@ -129,6 +131,14 @@ mod tests {
     use crate::agent::{AgentStatus, AgentSystem};
     use crate::cli::OutputFormat;
     use crate::ticket::TicketStatus;
+
+    #[test]
+    fn parses_init_command() {
+        let cli = Cli::try_parse_from(["waap", "--repo-root", "/some/path", "init"]).unwrap();
+
+        assert_eq!(cli.repo_root, PathBuf::from("/some/path"));
+        assert!(matches!(cli.command, Command::Init));
+    }
 
     #[test]
     fn parses_repo_root_argument() {

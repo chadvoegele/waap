@@ -7,6 +7,7 @@ mod codex;
 mod frontmatter;
 mod git;
 mod ids;
+mod init;
 mod opencode;
 mod process;
 mod record;

@@ -56,6 +56,22 @@ impl WaapRecordKind {
     }
 }
 
+/// Require that `repo_root` already has an initialized `.waap/` project.
+///
+/// Mutating commands (`ticket new`, `agent new`) call this so they no longer implicitly create
+/// `.waap/`; the error message is kept stable so a follow-up ticket that changes root resolution
+/// can rely on it.
+pub(crate) fn require_initialized_project(repo_root: &Path) -> io::Result<()> {
+    if repo_root.join(".waap").is_dir() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "no waap project found; run 'waap init'",
+        ))
+    }
+}
+
 pub(crate) fn list_record_ids(repo_root: &Path, kind: WaapRecordKind) -> io::Result<Vec<String>> {
     let records_dir = kind.root_path(repo_root);
     let records_label = kind.root_label();

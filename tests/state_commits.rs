@@ -29,6 +29,17 @@ fn init_repo(repo_root: &Path) {
     git(repo_root, &["commit", "-q", "-m", "seed"]);
 }
 
+/// Initialize a git repo and an already-initialized waap project inside it.
+fn init_repo_with_waap_project(repo_root: &Path) {
+    init_repo(repo_root);
+    let output = waap(repo_root, "", &["init"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn waap(repo_root: &Path, stdin: &str, args: &[&str]) -> Output {
     use std::io::Write;
 
@@ -69,7 +80,7 @@ fn last_commit_files(repo_root: &Path) -> String {
 #[test]
 fn ticket_new_then_update_each_create_one_commit() {
     let dir = tempdir().unwrap();
-    init_repo(dir.path());
+    init_repo_with_waap_project(dir.path());
 
     let before = commit_count(dir.path());
     let output = waap(
@@ -102,7 +113,7 @@ fn ticket_new_then_update_each_create_one_commit() {
 #[test]
 fn agent_new_then_update_each_create_one_commit() {
     let dir = tempdir().unwrap();
-    init_repo(dir.path());
+    init_repo_with_waap_project(dir.path());
 
     let before = commit_count(dir.path());
     let output = waap(
@@ -147,7 +158,7 @@ fn agent_new_then_update_each_create_one_commit() {
 #[test]
 fn commit_excludes_unrelated_working_tree_changes() {
     let dir = tempdir().unwrap();
-    init_repo(dir.path());
+    init_repo_with_waap_project(dir.path());
 
     // An unrelated, already-staged user change must not be swept into the waap commit.
     std::fs::write(dir.path().join("user.txt"), "wip\n").unwrap();
@@ -169,8 +180,10 @@ fn commit_excludes_unrelated_working_tree_changes() {
 
 #[test]
 fn failed_commit_returns_error_but_keeps_state() {
-    // No git repo: commit must fail, but the state file must still be written.
+    // No git repo: commit must fail, but the state file must still be written. `.waap` is created
+    // directly since `waap init` itself requires a git repo.
     let dir = tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".waap")).unwrap();
 
     let output = waap(
         dir.path(),
@@ -193,7 +206,7 @@ fn respects_repo_root_run_from_elsewhere() {
     let dir = tempdir().unwrap();
     let repo_root = dir.path().join("project");
     std::fs::create_dir_all(&repo_root).unwrap();
-    init_repo(&repo_root);
+    init_repo_with_waap_project(&repo_root);
 
     // Run the binary with cwd somewhere else; --repo-root must drive git.
     use std::io::Write;
@@ -229,4 +242,80 @@ fn agent_stop_without_running_agents_creates_no_commit() {
 
     assert!(output.status.success());
     assert_eq!(commit_count(dir.path()), before);
+}
+
+#[test]
+fn init_creates_and_commits_waap_skeleton() {
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+
+    let before = commit_count(dir.path());
+    let output = waap(dir.path(), "", &["--output-format", "json", "init"]);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    let commit = value["commit"].as_str().unwrap();
+    assert_eq!(commit, git(dir.path(), &["rev-parse", "HEAD"]));
+
+    assert_eq!(commit_count(dir.path()), before + 1);
+    assert_eq!(last_subject(dir.path()), "waap init");
+    assert!(dir.path().join(".waap/agents").is_dir());
+    assert!(dir.path().join(".waap/tickets").is_dir());
+}
+
+#[test]
+fn init_errors_when_waap_already_exists() {
+    let dir = tempdir().unwrap();
+    init_repo_with_waap_project(dir.path());
+
+    let output = waap(dir.path(), "", &["init"]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(".waap"), "{stderr}");
+}
+
+#[test]
+fn init_errors_outside_git_repository() {
+    let dir = tempdir().unwrap();
+
+    let output = waap(dir.path(), "", &["init"]);
+
+    assert!(!output.status.success());
+    assert!(!dir.path().join(".waap").exists());
+}
+
+#[test]
+fn ticket_new_errors_when_project_not_initialized() {
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+
+    let output = waap(
+        dir.path(),
+        "# Body\n",
+        &["ticket", "new", "--title", "Task"],
+    );
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("waap init"), "{stderr}");
+    assert!(!dir.path().join(".waap").exists());
+}
+
+#[test]
+fn agent_new_errors_when_project_not_initialized() {
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+
+    let output = waap(dir.path(), "# Purpose\n", &["agent", "new"]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("waap init"), "{stderr}");
+    assert!(!dir.path().join(".waap").exists());
 }

@@ -11,6 +11,7 @@ use crate::agent::{
 use crate::check::{check_waap, print_check_result};
 use crate::cli::{AgentCommand, Cli, Command, TicketCommand};
 use crate::git::commit_paths;
+use crate::init::{init_project, print_init_report};
 use crate::ticket::{
     create_ticket, get_ticket, list_tickets, print_ticket_get_report, print_ticket_list,
     print_ticket_report, print_updated_ticket_report, update_ticket,
@@ -43,6 +44,18 @@ pub(crate) fn run() -> ExitCode {
     let repo_root = &cli.repo_root;
 
     match cli.command {
+        Command::Init => match init_project(repo_root) {
+            Ok(report) => commit_and_print(
+                repo_root,
+                &[report.marker.as_path()],
+                "waap init",
+                |commit| print_init_report(&cli.output_format, &report, commit),
+            ),
+            Err(error) => {
+                eprintln!("failed to initialize waap project: {error}");
+                ExitCode::from(1)
+            }
+        },
         Command::Check => {
             let errors = check_waap(repo_root);
             print_check_result(&cli.output_format, &errors);

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::cli::OutputFormat;
 use crate::ids::current_toml_datetime;
-use crate::record::WaapRecordKind;
+use crate::record::{require_initialized_project, WaapRecordKind};
 use crate::ticket::{
     available_ticket_id, is_ticket_id, print_ticket_report_human, ticket_path, ticket_report_json,
     write_ticket_record, TicketMetadata, TicketReport,
@@ -47,6 +47,8 @@ pub(crate) fn create_ticket_with_markdown(
     depends_on: &[String],
     markdown: &str,
 ) -> io::Result<TicketReport> {
+    require_initialized_project(repo_root)?;
+
     for id in depends_on {
         if !is_ticket_id(id) {
             return Err(io::Error::new(
@@ -99,6 +101,7 @@ mod tests {
     #[test]
     fn create_ticket_writes_frontmatter_and_stdin_content() {
         let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".waap")).unwrap();
 
         let report =
             create_ticket_with_markdown(dir.path(), "New Ticket", &[], "# Body\nDetails\n")
@@ -117,6 +120,7 @@ mod tests {
     #[test]
     fn create_ticket_with_depends_on_round_trips() {
         let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".waap")).unwrap();
 
         let deps = vec!["tt-dep-one".to_string(), "tt-dep-two".to_string()];
         let report =
@@ -130,11 +134,22 @@ mod tests {
     #[test]
     fn create_ticket_rejects_invalid_depends_on_id() {
         let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".waap")).unwrap();
 
         let deps = vec!["not-a-ticket-id".to_string()];
         let err = create_ticket_with_markdown(dir.path(), "Bad Deps", &deps, "").unwrap_err();
 
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("not-a-ticket-id"));
+    }
+
+    #[test]
+    fn create_ticket_errors_when_project_not_initialized() {
+        let dir = tempdir().unwrap();
+
+        let err = create_ticket_with_markdown(dir.path(), "New Ticket", &[], "").unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(err.to_string().contains("waap init"));
     }
 }
