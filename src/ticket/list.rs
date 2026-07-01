@@ -68,15 +68,15 @@ pub(crate) fn ticket_list_json(entries: &[TicketListEntry]) -> serde_json::Value
 }
 
 pub(crate) fn list_tickets(
-    repo_root: &Path,
+    waap_root: &Path,
     status: Option<&TicketStatus>,
     blocked_filter: Option<bool>,
 ) -> io::Result<Vec<TicketListEntry>> {
-    let all_ids = list_record_ids(repo_root, WaapRecordKind::Ticket)?;
+    let all_ids = list_record_ids(waap_root, WaapRecordKind::Ticket)?;
 
     let mut all_reports: Vec<TicketReport> = Vec::new();
     for ticket_id in &all_ids {
-        all_reports.push(load_ticket_report(repo_root, ticket_id)?);
+        all_reports.push(load_ticket_report(waap_root, ticket_id)?);
     }
 
     let status_map: HashMap<String, String> = all_reports
@@ -358,7 +358,7 @@ status = \"ready\"
             .collect()
     }
 
-    fn write_ticket(repo_root: &Path, ticket_id: &str, status: &str, depends_on: &[&str]) {
+    fn write_ticket(waap_root: &Path, ticket_id: &str, status: &str, depends_on: &[&str]) {
         let deps_line = if depends_on.is_empty() {
             String::new()
         } else {
@@ -366,7 +366,7 @@ status = \"ready\"
             format!("depends_on = [{}]\n", items.join(", "))
         };
         write_file(
-            &repo_root.join(format!(".waap/tickets/{ticket_id}/ticket.md")),
+            &waap_root.join(format!(".waap/tickets/{ticket_id}/ticket.md")),
             &format!(
                 "+++\ntitle = \"Test Ticket\"\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"{status}\"\n{deps_line}+++\n\n# Description\n"
             ),

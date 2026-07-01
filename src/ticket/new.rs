@@ -29,7 +29,7 @@ pub(crate) fn print_ticket_report(
 }
 
 pub(crate) fn create_ticket(
-    repo_root: &Path,
+    waap_root: &Path,
     title: &str,
     depends_on: &[String],
 ) -> io::Result<TicketReport> {
@@ -38,16 +38,16 @@ pub(crate) fn create_ticket(
         .read_to_string(&mut markdown)
         .map_err(|error| io::Error::new(error.kind(), format!("failed to read stdin: {error}")))?;
 
-    create_ticket_with_markdown(repo_root, title, depends_on, &markdown)
+    create_ticket_with_markdown(waap_root, title, depends_on, &markdown)
 }
 
 pub(crate) fn create_ticket_with_markdown(
-    repo_root: &Path,
+    waap_root: &Path,
     title: &str,
     depends_on: &[String],
     markdown: &str,
 ) -> io::Result<TicketReport> {
-    require_initialized_project(repo_root)?;
+    require_initialized_project(waap_root)?;
 
     for id in depends_on {
         if !is_ticket_id(id) {
@@ -58,7 +58,7 @@ pub(crate) fn create_ticket_with_markdown(
         }
     }
 
-    let tickets_dir = WaapRecordKind::Ticket.root_path(repo_root);
+    let tickets_dir = WaapRecordKind::Ticket.root_path(waap_root);
     let ticket_id = available_ticket_id(&tickets_dir, title)?;
 
     let depends_on_opt = if depends_on.is_empty() {
@@ -74,8 +74,8 @@ pub(crate) fn create_ticket_with_markdown(
         status: "pending".to_string(),
         depends_on: depends_on_opt,
     };
-    write_ticket_record(repo_root, &ticket_id, &metadata, &format!("\n{markdown}"))?;
-    let path = ticket_path(repo_root, &ticket_id);
+    write_ticket_record(waap_root, &ticket_id, &metadata, &format!("\n{markdown}"))?;
+    let path = ticket_path(waap_root, &ticket_id);
     let file_size = fs::metadata(&path)?.len();
 
     Ok(TicketReport {

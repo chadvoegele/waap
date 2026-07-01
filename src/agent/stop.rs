@@ -40,7 +40,7 @@ pub(crate) fn agent_stop_json(reports: &[AgentReport], commit: Option<&str>) -> 
 }
 
 pub(crate) fn stop_agents_with_systems(
-    repo_root: &Path,
+    waap_root: &Path,
     agent_id: Option<&str>,
 ) -> io::Result<Vec<AgentReport>> {
     let mut config = None;
@@ -49,12 +49,12 @@ pub(crate) fn stop_agents_with_systems(
     // JSON-RPC connection held only by the running `waap agent run` process, which is signalled by its
     // unique argv (see /specs/codex-agent-system.md §5).
     stop_agents(
-        repo_root,
+        waap_root,
         agent_id,
         |system, agent_id, session_id| match system {
             AgentSystem::Opencode => {
                 if config.is_none() {
-                    config = Some(opencode_run_config_from_env(repo_root)?);
+                    config = Some(opencode_run_config_from_env(waap_root)?);
                 }
                 abort_opencode_session(config.as_ref().expect("config initialized"), session_id)
             }
@@ -65,17 +65,17 @@ pub(crate) fn stop_agents_with_systems(
 }
 
 pub(crate) fn stop_agents(
-    repo_root: &Path,
+    waap_root: &Path,
     agent_id: Option<&str>,
     mut abort: impl FnMut(&AgentSystem, &str, &str) -> io::Result<()>,
 ) -> io::Result<Vec<AgentReport>> {
     match agent_id {
-        Some(agent_id) => stop_agent_if_running(repo_root, agent_id, &mut abort)
+        Some(agent_id) => stop_agent_if_running(waap_root, agent_id, &mut abort)
             .map(|report| report.into_iter().collect::<Vec<AgentReport>>()),
         None => {
             let mut reports = Vec::new();
-            for agent_id in list_record_ids(repo_root, WaapRecordKind::Agent)? {
-                if let Some(report) = stop_agent_if_running(repo_root, &agent_id, &mut abort)? {
+            for agent_id in list_record_ids(waap_root, WaapRecordKind::Agent)? {
+                if let Some(report) = stop_agent_if_running(waap_root, &agent_id, &mut abort)? {
                     reports.push(report);
                 }
             }
@@ -85,25 +85,25 @@ pub(crate) fn stop_agents(
 }
 
 fn stop_agent_if_running(
-    repo_root: &Path,
+    waap_root: &Path,
     agent_id: &str,
     abort: &mut impl FnMut(&AgentSystem, &str, &str) -> io::Result<()>,
 ) -> io::Result<Option<AgentReport>> {
-    let report = load_agent_report(repo_root, agent_id)?;
+    let report = load_agent_report(waap_root, agent_id)?;
     if report.metadata.status != AgentStatus::Running.as_str() {
         return Ok(None);
     }
 
-    let (mut metadata, body) = read_agent_record(repo_root, agent_id)?;
+    let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
     if let Some(session_id) = &report.metadata.session_id {
         let system = metadata.system.as_ref().unwrap_or(&AgentSystem::Opencode);
         abort(system, agent_id, session_id)?;
     }
 
     metadata.status = AgentStatus::Aborted.as_str().to_string();
-    write_agent_record(repo_root, agent_id, &metadata, &body)?;
+    write_agent_record(waap_root, agent_id, &metadata, &body)?;
 
-    load_agent_report(repo_root, agent_id).map(Some)
+    load_agent_report(waap_root, agent_id).map(Some)
 }
 
 #[cfg(test)]
@@ -433,12 +433,12 @@ mod tests {
             .collect()
     }
 
-    fn write_agent(repo_root: &Path, agent_id: &str, status: &str) {
-        write_agent_with_session(repo_root, agent_id, status, None);
+    fn write_agent(waap_root: &Path, agent_id: &str, status: &str) {
+        write_agent_with_session(waap_root, agent_id, status, None);
     }
 
     fn write_agent_with_session(
-        repo_root: &Path,
+        waap_root: &Path,
         agent_id: &str,
         status: &str,
         session_id: Option<&str>,
@@ -447,7 +447,7 @@ mod tests {
             .map(|session_id| format!("session_id = \"{session_id}\"\n"))
             .unwrap_or_default();
         write_file(
-            &repo_root.join(format!(".waap/agents/{agent_id}/agent.md")),
+            &waap_root.join(format!(".waap/agents/{agent_id}/agent.md")),
             &format!(
                 "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"{status}\"\n{session_id}+++\n\n# Purpose\n"
             ),
@@ -455,13 +455,13 @@ mod tests {
     }
 
     fn write_claude_agent_with_session(
-        repo_root: &Path,
+        waap_root: &Path,
         agent_id: &str,
         status: &str,
         session_id: &str,
     ) {
         write_file(
-            &repo_root.join(format!(".waap/agents/{agent_id}/agent.md")),
+            &waap_root.join(format!(".waap/agents/{agent_id}/agent.md")),
             &format!(
                 "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"{status}\"\nsession_id = \"{session_id}\"\nsystem = \"claude\"\n+++\n\n# Purpose\n"
             ),
@@ -469,13 +469,13 @@ mod tests {
     }
 
     fn write_codex_agent_with_session(
-        repo_root: &Path,
+        waap_root: &Path,
         agent_id: &str,
         status: &str,
         session_id: &str,
     ) {
         write_file(
-            &repo_root.join(format!(".waap/agents/{agent_id}/agent.md")),
+            &waap_root.join(format!(".waap/agents/{agent_id}/agent.md")),
             &format!(
                 "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"{status}\"\nsession_id = \"{session_id}\"\nsystem = \"codex\"\n+++\n\n# Purpose\n"
             ),

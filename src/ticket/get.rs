@@ -27,9 +27,9 @@ pub(crate) fn ticket_get_report_json(report: &TicketGetReport) -> serde_json::Va
     value
 }
 
-pub(crate) fn load_ticket_report(repo_root: &Path, ticket_id: &str) -> io::Result<TicketReport> {
-    let path = ticket_path(repo_root, ticket_id);
-    let metadata = load_ticket_metadata(repo_root, ticket_id)?;
+pub(crate) fn load_ticket_report(waap_root: &Path, ticket_id: &str) -> io::Result<TicketReport> {
+    let path = ticket_path(waap_root, ticket_id);
+    let metadata = load_ticket_metadata(waap_root, ticket_id)?;
 
     Ok(TicketReport {
         ticket_id: ticket_id.to_string(),
@@ -42,9 +42,9 @@ pub(crate) fn load_ticket_report(repo_root: &Path, ticket_id: &str) -> io::Resul
     })
 }
 
-pub(crate) fn get_ticket(repo_root: &Path, ticket_id: &str) -> io::Result<TicketGetReport> {
-    let ticket = load_ticket_report(repo_root, ticket_id)?;
-    let (_, body) = read_ticket_record(repo_root, ticket_id)?;
+pub(crate) fn get_ticket(waap_root: &Path, ticket_id: &str) -> io::Result<TicketGetReport> {
+    let ticket = load_ticket_report(waap_root, ticket_id)?;
+    let (_, body) = read_ticket_record(waap_root, ticket_id)?;
     let content = body.strip_prefix('\n').unwrap_or(&body).to_string();
 
     Ok(TicketGetReport { ticket, content })

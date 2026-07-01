@@ -123,7 +123,7 @@ The `waap` CLI is the primary interface for interacting with waap state, though 
 
 - Global Parameters
     - `--output-format`  # Choices: json, human-readable
-    - `--repo-root`  # Path to the application repository root that contains `.waap/`; defaults to current directory
+    - `--waap-root`  # Path to the waap project root that contains `.waap/`; defaults to current directory
 
 The default format is human-readable.
 

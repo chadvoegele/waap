@@ -51,18 +51,18 @@ impl WaapRecordKind {
         format!(".waap/{}", self.directory_name())
     }
 
-    pub(crate) fn root_path(self, repo_root: &Path) -> PathBuf {
-        repo_root.join(".waap").join(self.directory_name())
+    pub(crate) fn root_path(self, waap_root: &Path) -> PathBuf {
+        waap_root.join(".waap").join(self.directory_name())
     }
 }
 
-/// Require that `repo_root` already has an initialized `.waap/` project.
+/// Require that `waap_root` already has an initialized `.waap/` project.
 ///
 /// Mutating commands (`ticket new`, `agent new`) call this so they no longer implicitly create
 /// `.waap/`; the error message is kept stable so a follow-up ticket that changes root resolution
 /// can rely on it.
-pub(crate) fn require_initialized_project(repo_root: &Path) -> io::Result<()> {
-    if repo_root.join(".waap").is_dir() {
+pub(crate) fn require_initialized_project(waap_root: &Path) -> io::Result<()> {
+    if waap_root.join(".waap").is_dir() {
         Ok(())
     } else {
         Err(io::Error::new(
@@ -72,8 +72,8 @@ pub(crate) fn require_initialized_project(repo_root: &Path) -> io::Result<()> {
     }
 }
 
-pub(crate) fn list_record_ids(repo_root: &Path, kind: WaapRecordKind) -> io::Result<Vec<String>> {
-    let records_dir = kind.root_path(repo_root);
+pub(crate) fn list_record_ids(waap_root: &Path, kind: WaapRecordKind) -> io::Result<Vec<String>> {
+    let records_dir = kind.root_path(waap_root);
     let records_label = kind.root_label();
     if !records_dir.exists() {
         return Ok(Vec::new());

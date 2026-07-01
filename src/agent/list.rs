@@ -31,12 +31,12 @@ pub(crate) fn agent_list_json(reports: &[AgentReport]) -> serde_json::Value {
 }
 
 pub(crate) fn list_agents(
-    repo_root: &Path,
+    waap_root: &Path,
     status: Option<&AgentStatus>,
 ) -> io::Result<Vec<AgentReport>> {
     let mut reports = Vec::new();
-    for agent_id in list_record_ids(repo_root, WaapRecordKind::Agent)? {
-        let report = load_agent_report(repo_root, &agent_id)?;
+    for agent_id in list_record_ids(waap_root, WaapRecordKind::Agent)? {
+        let report = load_agent_report(waap_root, &agent_id)?;
         if status.is_none_or(|status| report.metadata.status == status.as_str()) {
             reports.push(report);
         }
@@ -173,9 +173,9 @@ status = \"pending\"
             .collect()
     }
 
-    fn write_agent(repo_root: &Path, agent_id: &str, status: &str) {
+    fn write_agent(waap_root: &Path, agent_id: &str, status: &str) {
         write_file(
-            &repo_root.join(format!(".waap/agents/{agent_id}/agent.md")),
+            &waap_root.join(format!(".waap/agents/{agent_id}/agent.md")),
             &format!(
                 "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"{status}\"\n+++\n\n# Purpose\n"
             ),

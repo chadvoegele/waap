@@ -27,7 +27,7 @@ pub(crate) fn print_updated_agent_report(
 }
 
 pub(crate) fn update_agent(
-    repo_root: &Path,
+    waap_root: &Path,
     agent_id: &str,
     set_status: Option<&AgentStatus>,
     set_session_id: Option<&str>,
@@ -39,16 +39,16 @@ pub(crate) fn update_agent(
         ));
     }
 
-    let (mut metadata, body) = read_agent_record(repo_root, agent_id)?;
+    let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
     if let Some(status) = set_status {
         metadata.status = status.as_str().to_string();
     }
     if let Some(session_id) = set_session_id {
         metadata.session_id = Some(session_id.to_string());
     }
-    write_agent_record(repo_root, agent_id, &metadata, &body)?;
+    write_agent_record(waap_root, agent_id, &metadata, &body)?;
 
-    load_agent_report(repo_root, agent_id)
+    load_agent_report(waap_root, agent_id)
 }
 
 #[cfg(test)]

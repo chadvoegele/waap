@@ -13,13 +13,13 @@ pub(crate) struct InitReport {
     pub(crate) marker: PathBuf,
 }
 
-/// Create the `.waap/` project skeleton at `repo_root`.
+/// Create the `.waap/` project skeleton at `waap_root`.
 ///
 /// `agents/` and `tickets/` start out empty, so a marker file is written directly under `.waap/`
 /// to give the initial commit something to track — `check_waap` only inspects the `agents` and
 /// `tickets` subdirectories, so the marker doesn't trip its validation.
-pub(crate) fn init_project(repo_root: &Path) -> io::Result<InitReport> {
-    let waap_dir = repo_root.join(".waap");
+pub(crate) fn init_project(waap_root: &Path) -> io::Result<InitReport> {
+    let waap_dir = waap_root.join(".waap");
     if waap_dir.exists() {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
@@ -27,12 +27,12 @@ pub(crate) fn init_project(repo_root: &Path) -> io::Result<InitReport> {
         ));
     }
 
-    if !is_inside_git_work_tree(repo_root)? {
+    if !is_inside_git_work_tree(waap_root)? {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
                 "{} is not inside a git repository; waap projects must be inside git",
-                repo_root.display()
+                waap_root.display()
             ),
         ));
     }
@@ -42,9 +42,9 @@ pub(crate) fn init_project(repo_root: &Path) -> io::Result<InitReport> {
     let marker = waap_dir.join(".gitkeep");
     fs::write(&marker, "")?;
 
-    let path = repo_root
+    let path = waap_root
         .canonicalize()
-        .unwrap_or_else(|_| repo_root.to_path_buf());
+        .unwrap_or_else(|_| waap_root.to_path_buf());
 
     Ok(InitReport { path, marker })
 }

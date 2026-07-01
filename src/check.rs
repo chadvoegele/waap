@@ -10,9 +10,9 @@ use crate::cli::OutputFormat;
 use crate::frontmatter::parse_frontmatter;
 use crate::ticket::{is_ticket_id, TicketMetadata};
 
-pub(crate) fn check_waap(repo_root: &Path) -> Vec<String> {
+pub(crate) fn check_waap(waap_root: &Path) -> Vec<String> {
     let mut errors = Vec::new();
-    let waap_dir = repo_root.join(".waap");
+    let waap_dir = waap_root.join(".waap");
     let agents_dir = waap_dir.join("agents");
     let tickets_dir = waap_dir.join("tickets");
 

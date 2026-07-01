@@ -27,7 +27,7 @@ pub(crate) fn print_updated_ticket_report(
 }
 
 pub(crate) fn update_ticket(
-    repo_root: &Path,
+    waap_root: &Path,
     ticket_id: &str,
     set_status: Option<&TicketStatus>,
     add_depends_on: &[String],
@@ -42,7 +42,7 @@ pub(crate) fn update_ticket(
         }
     }
 
-    let (mut metadata, body) = read_ticket_record(repo_root, ticket_id)?;
+    let (mut metadata, body) = read_ticket_record(waap_root, ticket_id)?;
 
     if let Some(status) = set_status {
         metadata.status = status.as_str().to_string();
@@ -59,9 +59,9 @@ pub(crate) fn update_ticket(
     }
     metadata.depends_on = if deps.is_empty() { None } else { Some(deps) };
 
-    write_ticket_record(repo_root, ticket_id, &metadata, &body)?;
+    write_ticket_record(waap_root, ticket_id, &metadata, &body)?;
 
-    let path = ticket_path(repo_root, ticket_id);
+    let path = ticket_path(waap_root, ticket_id);
     Ok(TicketReport {
         ticket_id: ticket_id.to_string(),
         path: path.clone(),

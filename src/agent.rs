@@ -92,15 +92,15 @@ impl AgentMetadata {
     }
 }
 
-pub(crate) fn agent_path(repo_root: &Path, agent_id: &str) -> PathBuf {
+pub(crate) fn agent_path(waap_root: &Path, agent_id: &str) -> PathBuf {
     WaapRecordKind::Agent
-        .root_path(repo_root)
+        .root_path(waap_root)
         .join(agent_id)
         .join("agent.md")
 }
 
-pub(crate) fn load_agent_metadata(repo_root: &Path, agent_id: &str) -> io::Result<AgentMetadata> {
-    let path = validate_agent_path(repo_root, agent_id)?;
+pub(crate) fn load_agent_metadata(waap_root: &Path, agent_id: &str) -> io::Result<AgentMetadata> {
+    let path = validate_agent_path(waap_root, agent_id)?;
     let contents = fs::read_to_string(&path)?;
     let mut errors = Vec::new();
     let Some(value) = parse_frontmatter_from_contents(&contents, &path, &mut errors) else {
@@ -110,10 +110,10 @@ pub(crate) fn load_agent_metadata(repo_root: &Path, agent_id: &str) -> io::Resul
 }
 
 pub(crate) fn read_agent_record(
-    repo_root: &Path,
+    waap_root: &Path,
     agent_id: &str,
 ) -> io::Result<(AgentMetadata, String)> {
-    let path = validate_agent_path(repo_root, agent_id)?;
+    let path = validate_agent_path(waap_root, agent_id)?;
     let contents = fs::read_to_string(&path)?;
     let mut errors = Vec::new();
     let Some(value) = parse_frontmatter_from_contents(&contents, &path, &mut errors) else {
@@ -125,14 +125,14 @@ pub(crate) fn read_agent_record(
     Ok((metadata, body))
 }
 
-fn validate_agent_path(repo_root: &Path, agent_id: &str) -> io::Result<PathBuf> {
+fn validate_agent_path(waap_root: &Path, agent_id: &str) -> io::Result<PathBuf> {
     if !is_agent_id(agent_id) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("{agent_id:?} is not a valid agent id"),
         ));
     }
-    let path = agent_path(repo_root, agent_id);
+    let path = agent_path(waap_root, agent_id);
     if !path.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -143,12 +143,12 @@ fn validate_agent_path(repo_root: &Path, agent_id: &str) -> io::Result<PathBuf> 
 }
 
 pub(crate) fn write_agent_record(
-    repo_root: &Path,
+    waap_root: &Path,
     agent_id: &str,
     metadata: &AgentMetadata,
     body: &str,
 ) -> io::Result<()> {
-    let path = agent_path(repo_root, agent_id);
+    let path = agent_path(waap_root, agent_id);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }

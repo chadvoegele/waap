@@ -36,17 +36,17 @@ const SANDBOX_DANGER_FULL_ACCESS: &str = "danger-full-access";
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct CodexRunConfig {
     pub(crate) model: Option<String>,
-    pub(crate) repo_root: PathBuf,
+    pub(crate) waap_root: PathBuf,
 }
 
 /// Read codex run configuration from the environment. Has no required vars, so
 /// it never fails for missing config (mirrors /specs/codex-agent-system.md §7).
-pub(crate) fn codex_run_config_from_env(repo_root: &Path) -> io::Result<CodexRunConfig> {
+pub(crate) fn codex_run_config_from_env(waap_root: &Path) -> io::Result<CodexRunConfig> {
     Ok(CodexRunConfig {
         model: env::var("CODEX_MODEL")
             .ok()
             .filter(|model| !model.is_empty()),
-        repo_root: repo_root.canonicalize()?,
+        waap_root: waap_root.canonicalize()?,
     })
 }
 
@@ -232,7 +232,7 @@ pub(crate) struct CodexClient<R, W, O> {
 }
 
 /// Spawn `codex app-server --stdio` with piped stdin+stdout and a JSON-RPC
-/// client over it, running in `config.repo_root` (the worktree). No prompt on
+/// client over it, running in `config.waap_root` (the worktree). No prompt on
 /// the argv — the prompt is sent as turn input.
 pub(crate) fn spawn_codex_app_server(
     config: &CodexRunConfig,
@@ -240,7 +240,7 @@ pub(crate) fn spawn_codex_app_server(
     let mut child = ProcessCommand::new("codex")
         .arg("app-server")
         .arg("--stdio")
-        .current_dir(&config.repo_root)
+        .current_dir(&config.waap_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())

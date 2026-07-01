@@ -8,7 +8,7 @@ use crate::process::run_forwarding;
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ClaudeRunConfig {
     pub(crate) model: Option<String>,
-    pub(crate) repo_root: PathBuf,
+    pub(crate) waap_root: PathBuf,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -18,12 +18,12 @@ pub(crate) struct ClaudeRunCommand {
     pub(crate) working_dir: PathBuf,
 }
 
-pub(crate) fn claude_run_config_from_env(repo_root: &Path) -> io::Result<ClaudeRunConfig> {
+pub(crate) fn claude_run_config_from_env(waap_root: &Path) -> io::Result<ClaudeRunConfig> {
     Ok(ClaudeRunConfig {
         model: env::var("CLAUDE_MODEL")
             .ok()
             .filter(|model| !model.is_empty()),
-        repo_root: repo_root.canonicalize()?,
+        waap_root: waap_root.canonicalize()?,
     })
 }
 
@@ -86,7 +86,7 @@ pub(crate) fn build_claude_run_command(
     ClaudeRunCommand {
         program: "claude".to_string(),
         args,
-        working_dir: config.repo_root.clone(),
+        working_dir: config.waap_root.clone(),
     }
 }
 
@@ -165,7 +165,7 @@ mod tests {
     fn test_claude_config(model: Option<&str>) -> ClaudeRunConfig {
         ClaudeRunConfig {
             model: model.map(str::to_string),
-            repo_root: PathBuf::from("/repo/with space"),
+            waap_root: PathBuf::from("/repo/with space"),
         }
     }
 }

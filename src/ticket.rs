@@ -104,18 +104,18 @@ impl TicketMetadata {
     }
 }
 
-pub(crate) fn ticket_path(repo_root: &Path, ticket_id: &str) -> PathBuf {
+pub(crate) fn ticket_path(waap_root: &Path, ticket_id: &str) -> PathBuf {
     WaapRecordKind::Ticket
-        .root_path(repo_root)
+        .root_path(waap_root)
         .join(ticket_id)
         .join("ticket.md")
 }
 
 pub(crate) fn load_ticket_metadata(
-    repo_root: &Path,
+    waap_root: &Path,
     ticket_id: &str,
 ) -> io::Result<TicketMetadata> {
-    let path = validate_ticket_path(repo_root, ticket_id)?;
+    let path = validate_ticket_path(waap_root, ticket_id)?;
     let contents = fs::read_to_string(&path)?;
     let mut errors = Vec::new();
     let Some(value) = parse_frontmatter_from_contents(&contents, &path, &mut errors) else {
@@ -125,10 +125,10 @@ pub(crate) fn load_ticket_metadata(
 }
 
 pub(crate) fn read_ticket_record(
-    repo_root: &Path,
+    waap_root: &Path,
     ticket_id: &str,
 ) -> io::Result<(TicketMetadata, String)> {
-    let path = validate_ticket_path(repo_root, ticket_id)?;
+    let path = validate_ticket_path(waap_root, ticket_id)?;
     let contents = fs::read_to_string(&path)?;
     let mut errors = Vec::new();
     let Some(value) = parse_frontmatter_from_contents(&contents, &path, &mut errors) else {
@@ -140,14 +140,14 @@ pub(crate) fn read_ticket_record(
     Ok((metadata, body))
 }
 
-fn validate_ticket_path(repo_root: &Path, ticket_id: &str) -> io::Result<PathBuf> {
+fn validate_ticket_path(waap_root: &Path, ticket_id: &str) -> io::Result<PathBuf> {
     if !is_ticket_id(ticket_id) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("{ticket_id:?} is not a valid ticket id"),
         ));
     }
-    let path = ticket_path(repo_root, ticket_id);
+    let path = ticket_path(waap_root, ticket_id);
     if !path.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -158,12 +158,12 @@ fn validate_ticket_path(repo_root: &Path, ticket_id: &str) -> io::Result<PathBuf
 }
 
 pub(crate) fn write_ticket_record(
-    repo_root: &Path,
+    waap_root: &Path,
     ticket_id: &str,
     metadata: &TicketMetadata,
     body: &str,
 ) -> io::Result<()> {
-    let path = ticket_path(repo_root, ticket_id);
+    let path = ticket_path(waap_root, ticket_id);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }

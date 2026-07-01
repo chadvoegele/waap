@@ -28,22 +28,22 @@ pub(crate) fn print_created_agent_report(
     }
 }
 
-pub(crate) fn create_agent(repo_root: &Path) -> io::Result<AgentReport> {
+pub(crate) fn create_agent(waap_root: &Path) -> io::Result<AgentReport> {
     let mut markdown = String::new();
     io::stdin()
         .read_to_string(&mut markdown)
         .map_err(|error| io::Error::new(error.kind(), format!("failed to read stdin: {error}")))?;
 
-    create_agent_with_markdown(repo_root, &markdown)
+    create_agent_with_markdown(waap_root, &markdown)
 }
 
 pub(crate) fn create_agent_with_markdown(
-    repo_root: &Path,
+    waap_root: &Path,
     markdown: &str,
 ) -> io::Result<AgentReport> {
-    require_initialized_project(repo_root)?;
+    require_initialized_project(waap_root)?;
 
-    let agents_dir = WaapRecordKind::Agent.root_path(repo_root);
+    let agents_dir = WaapRecordKind::Agent.root_path(waap_root);
     let agent_id = available_agent_id(&agents_dir)?;
 
     let metadata = AgentMetadata {
@@ -52,8 +52,8 @@ pub(crate) fn create_agent_with_markdown(
         session_id: None,
         system: None,
     };
-    write_agent_record(repo_root, &agent_id, &metadata, &format!("\n{markdown}"))?;
-    let path = agent_path(repo_root, &agent_id);
+    write_agent_record(waap_root, &agent_id, &metadata, &format!("\n{markdown}"))?;
+    let path = agent_path(waap_root, &agent_id);
     let file_size = fs::metadata(&path)?.len();
 
     Ok(AgentReport {

@@ -14,10 +14,10 @@ pub(crate) fn agent_worktree_dir(agent_id: &str) -> PathBuf {
 /// A fresh branch named after the agent is created at the current `HEAD` and checked out into
 /// `worktrees/<agent_id>`. Returns the canonical absolute path of the new worktree so callers can
 /// launch the selected system there.
-pub(crate) fn create_agent_worktree(repo_root: &Path, agent_id: &str) -> io::Result<PathBuf> {
+pub(crate) fn create_agent_worktree(waap_root: &Path, agent_id: &str) -> io::Result<PathBuf> {
     let relative = agent_worktree_dir(agent_id);
     run_git(
-        repo_root,
+        waap_root,
         &[
             "worktree".into(),
             "add".into(),
@@ -26,17 +26,17 @@ pub(crate) fn create_agent_worktree(repo_root: &Path, agent_id: &str) -> io::Res
             relative.as_os_str().to_os_string(),
         ],
     )?;
-    repo_root.join(&relative).canonicalize()
+    waap_root.join(&relative).canonicalize()
 }
 
 /// Remove the agent worktree created by [`create_agent_worktree`].
 ///
 /// `--force` is used so cleanup still succeeds when the agent left uncommitted or untracked changes
 /// behind, which keeps the worktree lifecycle consistent even after an early exit or failure.
-pub(crate) fn remove_agent_worktree(repo_root: &Path, agent_id: &str) -> io::Result<()> {
+pub(crate) fn remove_agent_worktree(waap_root: &Path, agent_id: &str) -> io::Result<()> {
     let relative = agent_worktree_dir(agent_id);
     run_git(
-        repo_root,
+        waap_root,
         &[
             "worktree".into(),
             "remove".into(),
@@ -47,13 +47,13 @@ pub(crate) fn remove_agent_worktree(repo_root: &Path, agent_id: &str) -> io::Res
     Ok(())
 }
 
-/// Stage and commit only the given paths under `repo_root`, returning the new commit hash.
+/// Stage and commit only the given paths under `waap_root`, returning the new commit hash.
 ///
 /// A pathspec is passed to both `git add` and `git commit` so that unrelated changes already
 /// present in the working tree or index are left untouched: the commit records the working-tree
-/// contents of `paths` and nothing else. All git invocations run with `repo_root` as their working
-/// directory so `--repo-root` is respected.
-pub(crate) fn commit_paths(repo_root: &Path, paths: &[&Path], message: &str) -> io::Result<String> {
+/// contents of `paths` and nothing else. All git invocations run with `waap_root` as their working
+/// directory so `--waap-root` is respected.
+pub(crate) fn commit_paths(waap_root: &Path, paths: &[&Path], message: &str) -> io::Result<String> {
     if paths.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -63,7 +63,7 @@ pub(crate) fn commit_paths(repo_root: &Path, paths: &[&Path], message: &str) -> 
 
     let mut add_args: Vec<OsString> = vec!["add".into(), "--".into()];
     add_args.extend(paths.iter().map(|path| path.as_os_str().to_os_string()));
-    run_git(repo_root, &add_args)?;
+    run_git(waap_root, &add_args)?;
 
     // A no-op state write (the paths have no staged diff) is a successful no-op: skip the commit so
     // idempotent state writes don't abort on git's "nothing to commit" non-zero exit. `git diff
@@ -76,7 +76,7 @@ pub(crate) fn commit_paths(repo_root: &Path, paths: &[&Path], message: &str) -> 
         "--".into(),
     ];
     diff_args.extend(paths.iter().map(|path| path.as_os_str().to_os_string()));
-    let diff = git_command(repo_root, &diff_args)?;
+    let diff = git_command(waap_root, &diff_args)?;
     let has_staged_changes = match diff.status.code() {
         Some(0) => false,
         Some(1) => true,
@@ -88,10 +88,10 @@ pub(crate) fn commit_paths(repo_root: &Path, paths: &[&Path], message: &str) -> 
         let mut commit_args: Vec<OsString> =
             vec!["commit".into(), "-m".into(), message.into(), "--".into()];
         commit_args.extend(paths.iter().map(|path| path.as_os_str().to_os_string()));
-        run_git(repo_root, &commit_args)?;
+        run_git(waap_root, &commit_args)?;
     }
 
-    let output = run_git(repo_root, &["rev-parse".into(), "HEAD".into()])?;
+    let output = run_git(waap_root, &["rev-parse".into(), "HEAD".into()])?;
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
@@ -105,11 +105,11 @@ pub(crate) fn is_inside_git_work_tree(path: &Path) -> io::Result<bool> {
     Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true")
 }
 
-/// Run `git` in `repo_root` and return its raw [`Output`] without treating a non-zero exit as an
+/// Run `git` in `waap_root` and return its raw [`Output`] without treating a non-zero exit as an
 /// error, so callers can inspect the exit code themselves.
-fn git_command(repo_root: &Path, args: &[OsString]) -> io::Result<Output> {
+fn git_command(waap_root: &Path, args: &[OsString]) -> io::Result<Output> {
     Command::new("git")
-        .current_dir(repo_root)
+        .current_dir(waap_root)
         .args(args)
         .output()
         .map_err(|error| io::Error::new(error.kind(), format!("failed to run git: {error}")))
@@ -131,8 +131,8 @@ fn run_git_error(args: &[OsString], output: &Output) -> io::Error {
     io::Error::other(detail)
 }
 
-fn run_git(repo_root: &Path, args: &[OsString]) -> io::Result<Output> {
-    let output = git_command(repo_root, args)?;
+fn run_git(waap_root: &Path, args: &[OsString]) -> io::Result<Output> {
+    let output = git_command(waap_root, args)?;
 
     if !output.status.success() {
         return Err(run_git_error(args, &output));
@@ -300,19 +300,19 @@ mod tests {
     }
 
     #[test]
-    fn commit_paths_respects_repo_root() {
+    fn commit_paths_respects_waap_root() {
         let dir = tempdir().unwrap();
-        let repo_root = dir.path().join("nested/repo");
-        fs::create_dir_all(&repo_root).unwrap();
-        init_repo(&repo_root);
-        let file = repo_root.join(".waap/tickets/tt-x/ticket.md");
+        let waap_root = dir.path().join("nested/repo");
+        fs::create_dir_all(&waap_root).unwrap();
+        init_repo(&waap_root);
+        let file = waap_root.join(".waap/tickets/tt-x/ticket.md");
         write_file(&file, "+++\n+++\n");
 
-        let hash = commit_paths(&repo_root, &[file.as_path()], "waap ticket new tt-x").unwrap();
+        let hash = commit_paths(&waap_root, &[file.as_path()], "waap ticket new tt-x").unwrap();
 
-        assert_eq!(run(&repo_root, &["rev-parse", "HEAD"]), hash);
+        assert_eq!(run(&waap_root, &["rev-parse", "HEAD"]), hash);
         assert_eq!(
-            run(&repo_root, &["log", "-1", "--pretty=%s"]),
+            run(&waap_root, &["log", "-1", "--pretty=%s"]),
             "waap ticket new tt-x"
         );
     }

@@ -31,9 +31,9 @@ pub(crate) fn agent_content_report_json(report: &AgentReport, content: &str) -> 
     value
 }
 
-pub(crate) fn load_agent_report(repo_root: &Path, agent_id: &str) -> io::Result<AgentReport> {
-    let path = agent_path(repo_root, agent_id);
-    let metadata = load_agent_metadata(repo_root, agent_id)?;
+pub(crate) fn load_agent_report(waap_root: &Path, agent_id: &str) -> io::Result<AgentReport> {
+    let path = agent_path(waap_root, agent_id);
+    let metadata = load_agent_metadata(waap_root, agent_id)?;
     let file_size = fs::metadata(&path)?.len();
 
     Ok(AgentReport {
@@ -45,11 +45,11 @@ pub(crate) fn load_agent_report(repo_root: &Path, agent_id: &str) -> io::Result<
 }
 
 pub(crate) fn load_agent_content(
-    repo_root: &Path,
+    waap_root: &Path,
     agent_id: &str,
 ) -> io::Result<(AgentReport, String)> {
-    let report = load_agent_report(repo_root, agent_id)?;
-    let (_, body) = read_agent_record(repo_root, agent_id)?;
+    let report = load_agent_report(waap_root, agent_id)?;
+    let (_, body) = read_agent_record(waap_root, agent_id)?;
 
     Ok((report, body))
 }

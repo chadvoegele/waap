@@ -5,9 +5,9 @@ use std::process::{Command, Output, Stdio};
 
 use tempfile::tempdir;
 
-fn git(repo_root: &Path, args: &[&str]) -> String {
+fn git(waap_root: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
-        .current_dir(repo_root)
+        .current_dir(waap_root)
         .args(args)
         .output()
         .unwrap();
@@ -19,20 +19,20 @@ fn git(repo_root: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-fn init_repo(repo_root: &Path) {
-    git(repo_root, &["init", "-q"]);
-    git(repo_root, &["config", "user.name", "Test"]);
-    git(repo_root, &["config", "user.email", "test@example.com"]);
+fn init_repo(waap_root: &Path) {
+    git(waap_root, &["init", "-q"]);
+    git(waap_root, &["config", "user.name", "Test"]);
+    git(waap_root, &["config", "user.email", "test@example.com"]);
     // An initial commit so HEAD exists and unrelated history is present.
-    std::fs::write(repo_root.join("README.md"), "seed\n").unwrap();
-    git(repo_root, &["add", "README.md"]);
-    git(repo_root, &["commit", "-q", "-m", "seed"]);
+    std::fs::write(waap_root.join("README.md"), "seed\n").unwrap();
+    git(waap_root, &["add", "README.md"]);
+    git(waap_root, &["commit", "-q", "-m", "seed"]);
 }
 
 /// Initialize a git repo and an already-initialized waap project inside it.
-fn init_repo_with_waap_project(repo_root: &Path) {
-    init_repo(repo_root);
-    let output = waap(repo_root, "", &["init"]);
+fn init_repo_with_waap_project(waap_root: &Path) {
+    init_repo(waap_root);
+    let output = waap(waap_root, "", &["init"]);
     assert!(
         output.status.success(),
         "{}",
@@ -40,11 +40,11 @@ fn init_repo_with_waap_project(repo_root: &Path) {
     );
 }
 
-fn waap(repo_root: &Path, stdin: &str, args: &[&str]) -> Output {
+fn waap(waap_root: &Path, stdin: &str, args: &[&str]) -> Output {
     use std::io::Write;
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_waap"))
-        .args(["--repo-root", repo_root.to_str().unwrap()])
+        .args(["--waap-root", waap_root.to_str().unwrap()])
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -60,19 +60,19 @@ fn waap(repo_root: &Path, stdin: &str, args: &[&str]) -> Output {
     child.wait_with_output().unwrap()
 }
 
-fn commit_count(repo_root: &Path) -> u32 {
-    git(repo_root, &["rev-list", "--count", "HEAD"])
+fn commit_count(waap_root: &Path) -> u32 {
+    git(waap_root, &["rev-list", "--count", "HEAD"])
         .parse()
         .unwrap()
 }
 
-fn last_subject(repo_root: &Path) -> String {
-    git(repo_root, &["log", "-1", "--pretty=%s"])
+fn last_subject(waap_root: &Path) -> String {
+    git(waap_root, &["log", "-1", "--pretty=%s"])
 }
 
-fn last_commit_files(repo_root: &Path) -> String {
+fn last_commit_files(waap_root: &Path) -> String {
     git(
-        repo_root,
+        waap_root,
         &["show", "--name-only", "--pretty=format:", "HEAD"],
     )
 }
@@ -202,18 +202,18 @@ fn failed_commit_returns_error_but_keeps_state() {
 }
 
 #[test]
-fn respects_repo_root_run_from_elsewhere() {
+fn respects_waap_root_run_from_elsewhere() {
     let dir = tempdir().unwrap();
-    let repo_root = dir.path().join("project");
-    std::fs::create_dir_all(&repo_root).unwrap();
-    init_repo_with_waap_project(&repo_root);
+    let waap_root = dir.path().join("project");
+    std::fs::create_dir_all(&waap_root).unwrap();
+    init_repo_with_waap_project(&waap_root);
 
-    // Run the binary with cwd somewhere else; --repo-root must drive git.
+    // Run the binary with cwd somewhere else; --waap-root must drive git.
     use std::io::Write;
     let other = tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_waap"))
         .current_dir(other.path())
-        .args(["--repo-root", repo_root.to_str().unwrap()])
+        .args(["--waap-root", waap_root.to_str().unwrap()])
         .args(["ticket", "new", "--title", "Task"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -228,8 +228,8 @@ fn respects_repo_root_run_from_elsewhere() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(last_subject(&repo_root), "waap ticket new tt-task");
-    assert!(last_commit_files(&repo_root).contains(".waap/tickets/tt-task/ticket.md"));
+    assert_eq!(last_subject(&waap_root), "waap ticket new tt-task");
+    assert!(last_commit_files(&waap_root).contains(".waap/tickets/tt-task/ticket.md"));
 }
 
 #[test]

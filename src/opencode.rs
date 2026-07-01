@@ -13,7 +13,7 @@ pub(crate) struct OpencodeRunConfig {
     pub(crate) username: String,
     pub(crate) password: String,
     pub(crate) model: String,
-    pub(crate) repo_root: PathBuf,
+    pub(crate) waap_root: PathBuf,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -22,13 +22,13 @@ pub(crate) struct OpencodeRunCommand {
     pub(crate) args: Vec<String>,
 }
 
-pub(crate) fn opencode_run_config_from_env(repo_root: &Path) -> io::Result<OpencodeRunConfig> {
+pub(crate) fn opencode_run_config_from_env(waap_root: &Path) -> io::Result<OpencodeRunConfig> {
     Ok(OpencodeRunConfig {
         server_url: required_env("OPENCODE_SERVER_URL")?,
         username: required_env("OPENCODE_SERVER_USERNAME")?,
         password: required_env("OPENCODE_SERVER_PASSWORD")?,
         model: required_env("OPENCODE_SERVER_MODEL")?,
-        repo_root: repo_root.canonicalize()?,
+        waap_root: waap_root.canonicalize()?,
     })
 }
 
@@ -60,7 +60,7 @@ pub(crate) fn create_opencode_session(config: &OpencodeRunConfig) -> io::Result<
     let response: JsonValue = reqwest::blocking::Client::new()
         .post(opencode_url(config, "/session"))
         .basic_auth(&config.username, Some(&config.password))
-        .query(&[("directory", config.repo_root.display().to_string())])
+        .query(&[("directory", config.waap_root.display().to_string())])
         .json(&create_session_payload())
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
@@ -90,7 +90,7 @@ pub(crate) fn abort_opencode_session(
             &format!("/session/{session_id}/abort"),
         ))
         .basic_auth(&config.username, Some(&config.password))
-        .query(&[("directory", config.repo_root.display().to_string())])
+        .query(&[("directory", config.waap_root.display().to_string())])
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
         .map_err(opencode_http_error)?;
@@ -131,7 +131,7 @@ pub(crate) fn build_opencode_run_command(
             "--model".to_string(),
             config.model.clone(),
             "--dir".to_string(),
-            config.repo_root.display().to_string(),
+            config.waap_root.display().to_string(),
             "--agent".to_string(),
             "build".to_string(),
             "--command".to_string(),
@@ -236,7 +236,7 @@ mod tests {
             username: "runner".to_string(),
             password: "secret".to_string(),
             model: "openai/gpt-5.5".to_string(),
-            repo_root: PathBuf::from("/repo/with space"),
+            waap_root: PathBuf::from("/repo/with space"),
         }
     }
 }
