@@ -1,7 +1,7 @@
 +++
 title = "Add status column and heading row to agent list output"
 creation_date = 2026-07-01T21:35:59Z
-status = "pending"
+status = "in-progress"
 +++
 
 # Add agent status to `waap agent list` human-readable output
