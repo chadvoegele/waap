@@ -8,25 +8,50 @@ use crate::agent::{AgentReport, AgentStatus};
 use crate::cli::OutputFormat;
 use crate::record::{list_record_ids, WaapRecordKind};
 
+const AGENT_ID_HEADER: &str = "AGENT ID";
+const STATUS_HEADER: &str = "STATUS";
+
 pub(crate) fn print_agent_list(output_format: &OutputFormat, reports: &[AgentReport]) {
-    let agent_ids: Vec<&str> = reports
-        .iter()
-        .map(|report| report.agent_id.as_str())
-        .collect();
     match output_format {
         OutputFormat::Json => println!("{}", agent_list_json(reports)),
         OutputFormat::HumanReadable => {
-            for agent_id in agent_ids {
-                println!("{agent_id}");
+            for line in agent_list_human_lines(reports) {
+                println!("{line}");
             }
         }
     }
 }
 
+fn agent_list_human_lines(reports: &[AgentReport]) -> Vec<String> {
+    if reports.is_empty() {
+        return Vec::new();
+    }
+
+    let id_width = reports
+        .iter()
+        .map(|report| report.agent_id.len())
+        .max()
+        .unwrap_or(0)
+        .max(AGENT_ID_HEADER.len());
+
+    let mut lines = Vec::with_capacity(reports.len() + 1);
+    lines.push(format!("{AGENT_ID_HEADER:id_width$}  {STATUS_HEADER}"));
+    lines.extend(reports.iter().map(|report| {
+        let id = &report.agent_id;
+        let status = &report.metadata.status;
+        format!("{id:id_width$}  {status}")
+    }));
+
+    lines
+}
+
 pub(crate) fn agent_list_json(reports: &[AgentReport]) -> serde_json::Value {
     json!(reports
         .iter()
-        .map(|report| report.agent_id.as_str())
+        .map(|report| json!({
+            "agent_id": report.agent_id.as_str(),
+            "status": report.metadata.status.as_str(),
+        }))
         .collect::<Vec<_>>())
 }
 
@@ -54,7 +79,7 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{agent_list_json, list_agents};
+    use super::{agent_list_human_lines, agent_list_json, list_agents};
     use crate::agent::{AgentMetadata, AgentReport, AgentStatus};
 
     #[test]
@@ -162,8 +187,66 @@ status = \"pending\"
 
         assert_eq!(
             agent_list_json(&reports),
-            json!(["aa-00000001", "aa-00000002"])
+            json!([
+                {"agent_id": "aa-00000001", "status": "ready"},
+                {"agent_id": "aa-00000002", "status": "completed"},
+            ])
         );
+    }
+
+    #[test]
+    fn agent_list_human_lines_includes_heading_and_status() {
+        let reports = vec![
+            report("aa-00000001", "ready"),
+            report("aa-000000002", "completed"),
+        ];
+
+        let lines = agent_list_human_lines(&reports);
+
+        assert_eq!(
+            lines,
+            vec![
+                "AGENT ID      STATUS".to_string(),
+                "aa-00000001   ready".to_string(),
+                "aa-000000002  completed".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_list_human_lines_aligns_using_header_width_when_ids_are_short() {
+        let reports = vec![report("aa-1", "ready")];
+
+        let lines = agent_list_human_lines(&reports);
+
+        assert_eq!(
+            lines,
+            vec![
+                "AGENT ID  STATUS".to_string(),
+                "aa-1      ready".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_list_human_lines_empty_when_no_entries() {
+        let lines = agent_list_human_lines(&[]);
+
+        assert!(lines.is_empty());
+    }
+
+    fn report(agent_id: &str, status: &str) -> AgentReport {
+        AgentReport {
+            agent_id: agent_id.to_string(),
+            path: PathBuf::from(format!(".waap/agents/{agent_id}/agent.md")),
+            metadata: AgentMetadata {
+                creation_date: "2026-06-18T15:00:34Z".to_string(),
+                status: status.to_string(),
+                session_id: None,
+                system: None,
+            },
+            file_size: 0,
+        }
     }
 
     fn agent_ids(reports: &[AgentReport]) -> Vec<&str> {
