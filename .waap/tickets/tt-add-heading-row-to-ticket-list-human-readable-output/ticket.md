@@ -1,7 +1,7 @@
 +++
 title = "Add heading row to ticket list human-readable output"
 creation_date = 2026-07-01T21:35:53Z
-status = "in-progress"
+status = "completed"
 +++
 
 # Add heading row to `waap ticket list` human-readable output
