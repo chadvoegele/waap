@@ -35,29 +35,47 @@ pub(crate) fn print_ticket_list(output_format: &OutputFormat, entries: &[TicketL
     }
 }
 
+const TICKET_ID_HEADER: &str = "TICKET ID";
+const STATUS_HEADER: &str = "STATUS";
+const STATE_HEADER: &str = "STATE";
+
 fn ticket_list_human_lines(entries: &[TicketListEntry]) -> Vec<String> {
+    if entries.is_empty() {
+        return Vec::new();
+    }
+
+    let has_state_column = entries
+        .iter()
+        .any(|entry| entry.report.depends_on.is_some());
     let id_width = entries
         .iter()
         .map(|entry| entry.report.ticket_id.len())
         .max()
-        .unwrap_or(0);
-    entries
-        .iter()
-        .map(|entry| {
-            let id = &entry.report.ticket_id;
-            let status = &entry.report.status;
-            if entry.report.depends_on.is_some() {
-                let state = if entry.blocked {
-                    "[blocked]"
-                } else {
-                    "[unblocked]"
-                };
-                format!("{id:id_width$}  {status}  {state}")
+        .unwrap_or(0)
+        .max(TICKET_ID_HEADER.len());
+
+    let header = if has_state_column {
+        format!("{TICKET_ID_HEADER:id_width$}  {STATUS_HEADER}  {STATE_HEADER}")
+    } else {
+        format!("{TICKET_ID_HEADER:id_width$}  {STATUS_HEADER}")
+    };
+
+    let mut lines = vec![header];
+    lines.extend(entries.iter().map(|entry| {
+        let id = &entry.report.ticket_id;
+        let status = &entry.report.status;
+        if entry.report.depends_on.is_some() {
+            let state = if entry.blocked {
+                "[blocked]"
             } else {
-                format!("{id:id_width$}  {status}")
-            }
-        })
-        .collect()
+                "[unblocked]"
+            };
+            format!("{id:id_width$}  {status}  {state}")
+        } else {
+            format!("{id:id_width$}  {status}")
+        }
+    }));
+    lines
 }
 
 pub(crate) fn ticket_list_json(entries: &[TicketListEntry]) -> serde_json::Value {
@@ -274,8 +292,60 @@ status = \"ready\"
 
         let lines = ticket_list_human_lines(&entries);
 
-        assert_eq!(lines[0], "tt-one      completed");
-        assert_eq!(lines[1], "tt-feature  pending  [blocked]");
+        assert_eq!(lines[0], "TICKET ID   STATUS  STATE");
+        assert_eq!(lines[1], "tt-one      completed");
+        assert_eq!(lines[2], "tt-feature  pending  [blocked]");
+    }
+
+    #[test]
+    fn ticket_list_human_lines_header_without_state_column() {
+        let entries = vec![TicketListEntry {
+            report: TicketReport {
+                ticket_id: "tt-one".to_string(),
+                path: PathBuf::from(".waap/tickets/tt-one/ticket.md"),
+                title: "One".to_string(),
+                creation_date: "2026-06-22T12:00:00Z".to_string(),
+                status: "completed".to_string(),
+                depends_on: None,
+                file_size: 123,
+            },
+            blocked: false,
+        }];
+
+        let lines = ticket_list_human_lines(&entries);
+
+        assert_eq!(lines[0], "TICKET ID  STATUS");
+        assert_eq!(lines[1], "tt-one     completed");
+    }
+
+    #[test]
+    fn ticket_list_human_lines_header_widens_for_short_ticket_ids() {
+        let entries = vec![TicketListEntry {
+            report: TicketReport {
+                ticket_id: "tt".to_string(),
+                path: PathBuf::from(".waap/tickets/tt/ticket.md"),
+                title: "Short".to_string(),
+                creation_date: "2026-06-22T12:00:00Z".to_string(),
+                status: "pending".to_string(),
+                depends_on: None,
+                file_size: 1,
+            },
+            blocked: false,
+        }];
+
+        let lines = ticket_list_human_lines(&entries);
+
+        assert_eq!(lines[0], "TICKET ID  STATUS");
+        assert_eq!(lines[1], "tt         pending");
+    }
+
+    #[test]
+    fn ticket_list_human_lines_empty_has_no_header() {
+        let entries: Vec<TicketListEntry> = Vec::new();
+
+        let lines = ticket_list_human_lines(&entries);
+
+        assert!(lines.is_empty());
     }
 
     #[test]
