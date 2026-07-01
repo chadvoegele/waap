@@ -1,7 +1,7 @@
 +++
 title = "Add waap init command; require .waap for mutating commands"
 creation_date = 2026-07-01T15:18:18Z
-status = "in-progress"
+status = "completed"
 +++
 
 # Problem
