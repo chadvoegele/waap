@@ -69,8 +69,9 @@ pub(crate) fn build_claude_run_command(
         session_id.to_string(),
         "--output-format".to_string(),
         "json".to_string(),
+        // allow git merge ff
         "--permission-mode".to_string(),
-        "auto".to_string(),
+        "bypassPermissions".to_string(),
         // Disable the bash sandbox; its /dev/null dotfile mounts break the agent's `git worktree remove`.
         "--settings".to_string(),
         "{\"sandbox\":{\"enabled\":false}}".to_string(),
@@ -136,7 +137,7 @@ mod tests {
                     "--output-format".to_string(),
                     "json".to_string(),
                     "--permission-mode".to_string(),
-                    "auto".to_string(),
+                    "bypassPermissions".to_string(),
                     "--settings".to_string(),
                     "{\"sandbox\":{\"enabled\":false}}".to_string(),
                     "--model".to_string(),
