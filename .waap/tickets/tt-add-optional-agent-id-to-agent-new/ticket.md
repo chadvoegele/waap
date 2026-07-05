@@ -1,7 +1,7 @@
 +++
 title = "Add optional agent id to agent new"
 creation_date = 2026-07-05T12:31:54Z
-status = "pending"
+status = "in-progress"
 +++
 
 # Goal
