@@ -90,7 +90,7 @@ pub(crate) fn run() -> ExitCode {
             }
         }
         Command::Agent { command } => match command {
-            AgentCommand::New => match create_agent(waap_root) {
+            AgentCommand::New { agent_id } => match create_agent(waap_root, agent_id.as_deref()) {
                 Ok(report) => commit_and_print(
                     waap_root,
                     &[report.path.as_path()],

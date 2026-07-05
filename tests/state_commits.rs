@@ -156,6 +156,39 @@ fn agent_new_then_update_each_create_one_commit() {
 }
 
 #[test]
+fn agent_new_with_custom_agent_id_creates_exact_id() {
+    let dir = tempdir().unwrap();
+    init_repo_with_waap_project(dir.path());
+
+    let output = waap(
+        dir.path(),
+        "# Purpose\n",
+        &[
+            "--output-format",
+            "json",
+            "agent",
+            "new",
+            "--agent-id",
+            "custom-agent_123",
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(value["agent_id"], "custom-agent_123");
+    assert!(dir
+        .path()
+        .join(".waap/agents/custom-agent_123/agent.md")
+        .is_file());
+    assert_eq!(last_subject(dir.path()), "waap agent new custom-agent_123");
+}
+
+#[test]
 fn commit_excludes_unrelated_working_tree_changes() {
     let dir = tempdir().unwrap();
     init_repo_with_waap_project(dir.path());
@@ -180,10 +213,11 @@ fn commit_excludes_unrelated_working_tree_changes() {
 
 #[test]
 fn failed_commit_returns_error_but_keeps_state() {
-    // No git repo: commit must fail, but the state file must still be written. `.waap` is created
-    // directly since `waap init` itself requires a git repo.
+    // Force git's index to be locked: commit must fail, but the state file must still be written.
     let dir = tempdir().unwrap();
+    init_repo(dir.path());
     std::fs::create_dir_all(dir.path().join(".waap")).unwrap();
+    std::fs::File::create(dir.path().join(".git/index.lock")).unwrap();
 
     let output = waap(
         dir.path(),

@@ -241,13 +241,11 @@ pub(crate) fn available_agent_id_with_generator(
 }
 
 pub(crate) fn is_agent_id(value: &str) -> bool {
-    let Some(hash) = value.strip_prefix("aa-") else {
-        return false;
-    };
-    hash.len() == 8
-        && hash
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    !value.is_empty()
+        && value.len() < 64
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_'
+        })
 }
 
 pub(crate) fn print_agent_report_human(header: &str, report: &AgentReport) {
@@ -306,7 +304,21 @@ mod tests {
     fn generated_agent_ids_are_prefixed_lowercase_hex() {
         let id = format!("aa-{}", random_hex_chars(8).unwrap());
 
+        assert!(id
+            .strip_prefix("aa-")
+            .unwrap()
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
         assert!(is_agent_id(&id));
+    }
+
+    #[test]
+    fn agent_ids_are_slug_style() {
+        assert!(is_agent_id("custom-agent_123"));
+
+        for value in ["", "Upper", "has space", "has/slash", &"a".repeat(64)] {
+            assert!(!is_agent_id(value));
+        }
     }
 
     #[test]

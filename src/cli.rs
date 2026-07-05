@@ -48,7 +48,10 @@ pub(crate) enum Command {
 #[derive(Debug, Subcommand)]
 pub(crate) enum AgentCommand {
     /// Create a new agent from stdin.
-    New,
+    New {
+        #[arg(long)]
+        agent_id: Option<String>,
+    },
     /// Run an existing agent with the selected agent system.
     Run {
         #[arg(long)]
@@ -526,8 +529,21 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Agent {
-                command: AgentCommand::New
+                command: AgentCommand::New { agent_id: None }
             }
+        ));
+    }
+
+    #[test]
+    fn parses_agent_new_agent_id_argument() {
+        let cli =
+            Cli::try_parse_from(["waap", "agent", "new", "--agent-id", "custom_agent"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Agent {
+                command: AgentCommand::New { agent_id: Some(agent_id) }
+            } if agent_id == "custom_agent"
         ));
     }
 

@@ -28,23 +28,36 @@ pub(crate) fn print_created_agent_report(
     }
 }
 
-pub(crate) fn create_agent(waap_root: &Path) -> io::Result<AgentReport> {
+pub(crate) fn create_agent(waap_root: &Path, agent_id: Option<&str>) -> io::Result<AgentReport> {
     let mut markdown = String::new();
     io::stdin()
         .read_to_string(&mut markdown)
         .map_err(|error| io::Error::new(error.kind(), format!("failed to read stdin: {error}")))?;
 
-    create_agent_with_markdown(waap_root, &markdown)
+    create_agent_with_markdown(waap_root, agent_id, &markdown)
 }
 
 pub(crate) fn create_agent_with_markdown(
     waap_root: &Path,
+    agent_id: Option<&str>,
     markdown: &str,
 ) -> io::Result<AgentReport> {
     require_initialized_project(waap_root)?;
 
     let agents_dir = WaapRecordKind::Agent.root_path(waap_root);
-    let agent_id = available_agent_id(&agents_dir)?;
+    let agent_id = match agent_id {
+        Some(agent_id) => {
+            validate_custom_agent_id(agent_id)?;
+            if agents_dir.join(agent_id).exists() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("agent id {agent_id:?} already exists"),
+                ));
+            }
+            agent_id.to_string()
+        }
+        None => available_agent_id(&agents_dir)?,
+    };
 
     let metadata = AgentMetadata {
         creation_date: current_toml_datetime(),
@@ -64,6 +77,19 @@ pub(crate) fn create_agent_with_markdown(
     })
 }
 
+fn validate_custom_agent_id(agent_id: &str) -> io::Result<()> {
+    if crate::agent::is_agent_id(agent_id) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "agent id {agent_id:?} must be non-empty, fewer than 64 characters, and contain only lowercase ASCII letters, digits, hyphen, or underscore"
+            ),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -79,7 +105,8 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join(".waap")).unwrap();
 
-        let report = create_agent_with_markdown(dir.path(), "# Purpose\nPlan things\n").unwrap();
+        let report =
+            create_agent_with_markdown(dir.path(), None, "# Purpose\nPlan things\n").unwrap();
         let contents = fs::read_to_string(&report.path).unwrap();
 
         assert!(is_agent_id(&report.agent_id));
@@ -96,9 +123,53 @@ mod tests {
     fn create_agent_errors_when_project_not_initialized() {
         let dir = tempdir().unwrap();
 
-        let err = create_agent_with_markdown(dir.path(), "# Purpose\n").unwrap_err();
+        let err = create_agent_with_markdown(dir.path(), None, "# Purpose\n").unwrap_err();
 
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
         assert!(err.to_string().contains("waap init"));
+    }
+
+    #[test]
+    fn create_agent_uses_valid_custom_agent_id() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".waap")).unwrap();
+
+        let report = create_agent_with_markdown(
+            dir.path(),
+            Some("custom-agent_123"),
+            "# Purpose\nPlan things\n",
+        )
+        .unwrap();
+
+        assert_eq!(report.agent_id, "custom-agent_123");
+        assert!(report
+            .path
+            .ends_with(".waap/agents/custom-agent_123/agent.md"));
+        assert!(check_waap(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn create_agent_rejects_invalid_custom_agent_id() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".waap")).unwrap();
+
+        for agent_id in ["", "Upper", "has space", "has/slash", &"a".repeat(64)] {
+            let err =
+                create_agent_with_markdown(dir.path(), Some(agent_id), "# Purpose\n").unwrap_err();
+
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        }
+    }
+
+    #[test]
+    fn create_agent_rejects_duplicate_custom_agent_id() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".waap/agents/custom-id")).unwrap();
+
+        let err =
+            create_agent_with_markdown(dir.path(), Some("custom-id"), "# Purpose\n").unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(!dir.path().join(".waap/agents/custom-id/agent.md").exists());
     }
 }

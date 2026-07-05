@@ -233,7 +233,7 @@ mod tests {
     fn agent_stop_reports_invalid_agent_id() {
         let dir = tempdir().unwrap();
 
-        let error = stop_agents(dir.path(), Some("not-an-agent"), noop_abort).unwrap_err();
+        let error = stop_agents(dir.path(), Some("not an agent"), noop_abort).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("not a valid agent id"));
