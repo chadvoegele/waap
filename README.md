@@ -94,7 +94,7 @@ Use `waap` with an agent referencing the `waap` skill:
 2. `.agents/skills/waap/roles/planner/agent.md` has a recommended `agent.md` for a planner role.
 3. `.agents/skills/waap/roles/developer/agent.md` has a recommended `agent.md` for a developer role.
 
-The skill also includes examples of using a `waap` loop to build a software factory and to run a structured agent program.
+The skill also includes examples of using a `waap` loop to build a [software factory](https://github.com/chadvoegele/waap/blob/main/.agents/skills/waap/SKILL.md#software-factory-loop) and to run a [structured agent program](https://github.com/chadvoegele/waap/blob/main/.agents/skills/waap/SKILL.md#structured-agent-program-loop).
 
 ## Build
 

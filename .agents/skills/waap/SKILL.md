@@ -177,18 +177,18 @@ To effectively use waap, follow this loop:
 To build a software factory, follow this loop:
 
 1. Draft a `spec.md` including any diagrams, or associated files describing the program.
-1. Create a waap ticket to create tickets for implementing the program. (`cat ticket.md | waap ticket new ...`)
+1. Create a planner ticket to create tickets for implementing the program. (`cat ticket.md | waap ticket new ...`)
 1. Run the planner agent. (`waap agent run ...`)
 1. While there are unblocked tickets, (`waap ticket list --status pending --unblocked`)
     1. Create agents to complete the work. (`cat agent.md | waap agent new ...`)
     1. Run the agents. (`waap agent run ...`)
-    1. Run end-to-end tests
+    1. Run end-to-end tests.
     1. Verify all aspects of the spec have been implemented.
     1. Add new tickets as needed to address spec drift, testing, or refactoring. (`cat new_ticket.md | waap ticket new ...`)
 
 ### Structured Agent Program Loop
 
-If your structured program leveraging agent, e.g.
+To run a structured program leveraging agents, e.g.
 
 ```
 1. Fetch configs from config store
