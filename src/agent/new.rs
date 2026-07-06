@@ -28,38 +28,27 @@ pub(crate) fn print_created_agent_report(
     }
 }
 
-pub(crate) fn create_agent(waap_root: &Path, agent_id: Option<&str>) -> io::Result<AgentReport> {
+pub(crate) fn create_agent(waap_root: &Path, name: Option<&str>) -> io::Result<AgentReport> {
     let mut markdown = String::new();
     io::stdin()
         .read_to_string(&mut markdown)
         .map_err(|error| io::Error::new(error.kind(), format!("failed to read stdin: {error}")))?;
 
-    create_agent_with_markdown(waap_root, agent_id, &markdown)
+    create_agent_with_markdown(waap_root, name, &markdown)
 }
 
 pub(crate) fn create_agent_with_markdown(
     waap_root: &Path,
-    agent_id: Option<&str>,
+    name: Option<&str>,
     markdown: &str,
 ) -> io::Result<AgentReport> {
     require_initialized_project(waap_root)?;
 
     let agents_dir = WaapRecordKind::Agent.root_path(waap_root);
-    let agent_id = match agent_id {
-        Some(agent_id) => {
-            validate_custom_agent_id(agent_id)?;
-            if agents_dir.join(agent_id).exists() {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!("agent id {agent_id:?} already exists"),
-                ));
-            }
-            agent_id.to_string()
-        }
-        None => available_agent_id(&agents_dir)?,
-    };
+    let agent_id = available_agent_id(&agents_dir, name)?;
 
     let metadata = AgentMetadata {
+        name: name.map(str::to_string),
         creation_date: current_toml_datetime(),
         status: "ready".to_string(),
         session_id: None,
@@ -75,19 +64,6 @@ pub(crate) fn create_agent_with_markdown(
         metadata,
         file_size,
     })
-}
-
-fn validate_custom_agent_id(agent_id: &str) -> io::Result<()> {
-    if crate::agent::is_agent_id(agent_id) {
-        Ok(())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "agent id {agent_id:?} must be non-empty, fewer than 64 characters, and contain only lowercase ASCII letters, digits, hyphen, or underscore"
-            ),
-        ))
-    }
 }
 
 #[cfg(test)]
@@ -130,46 +106,47 @@ mod tests {
     }
 
     #[test]
-    fn create_agent_uses_valid_custom_agent_id() {
+    fn create_agent_slugifies_name() {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join(".waap")).unwrap();
 
         let report = create_agent_with_markdown(
             dir.path(),
-            Some("custom-agent_123"),
+            Some("Custom Agent_123"),
             "# Purpose\nPlan things\n",
         )
         .unwrap();
 
-        assert_eq!(report.agent_id, "custom-agent_123");
+        assert_eq!(report.agent_id, "aa-custom-agent123");
+        assert_eq!(report.metadata.name.as_deref(), Some("Custom Agent_123"));
         assert!(report
             .path
-            .ends_with(".waap/agents/custom-agent_123/agent.md"));
+            .ends_with(".waap/agents/aa-custom-agent123/agent.md"));
         assert!(check_waap(dir.path()).is_empty());
     }
 
     #[test]
-    fn create_agent_rejects_invalid_custom_agent_id() {
+    fn create_agent_name_conflict_appends_hex_suffix() {
         let dir = tempdir().unwrap();
-        fs::create_dir_all(dir.path().join(".waap")).unwrap();
+        fs::create_dir_all(dir.path().join(".waap/agents/aa-custom-agent")).unwrap();
 
-        for agent_id in ["", "Upper", "has space", "has/slash", &"a".repeat(64)] {
-            let err =
-                create_agent_with_markdown(dir.path(), Some(agent_id), "# Purpose\n").unwrap_err();
+        let report =
+            create_agent_with_markdown(dir.path(), Some("Custom Agent"), "# Purpose\n").unwrap();
 
-            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-        }
+        assert!(report.agent_id.starts_with("aa-custom-agent-"));
+        assert_eq!(report.agent_id.len(), "aa-custom-agent-".len() + 4);
     }
 
     #[test]
-    fn create_agent_rejects_duplicate_custom_agent_id() {
+    fn create_agent_without_name_uses_random_hex_id() {
         let dir = tempdir().unwrap();
-        fs::create_dir_all(dir.path().join(".waap/agents/custom-id")).unwrap();
+        fs::create_dir_all(dir.path().join(".waap")).unwrap();
 
-        let err =
-            create_agent_with_markdown(dir.path(), Some("custom-id"), "# Purpose\n").unwrap_err();
+        let report = create_agent_with_markdown(dir.path(), None, "# Purpose\n").unwrap();
+        let suffix = report.agent_id.strip_prefix("aa-").unwrap();
 
-        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
-        assert!(!dir.path().join(".waap/agents/custom-id/agent.md").exists());
+        assert_eq!(suffix.len(), 8);
+        assert!(suffix.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(report.metadata.name, None);
     }
 }

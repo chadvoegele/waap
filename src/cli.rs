@@ -50,7 +50,7 @@ pub(crate) enum AgentCommand {
     /// Create a new agent from stdin.
     New {
         #[arg(long)]
-        agent_id: Option<String>,
+        name: Option<String>,
     },
     /// Run an existing agent with the selected agent system.
     Run {
@@ -94,7 +94,7 @@ pub(crate) enum TicketCommand {
     /// Create a new ticket from stdin.
     New {
         #[arg(long)]
-        title: String,
+        name: Option<String>,
 
         #[arg(long)]
         depends_on: Vec<String>,
@@ -529,21 +529,45 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Agent {
-                command: AgentCommand::New { agent_id: None }
+                command: AgentCommand::New { name: None }
             }
         ));
     }
 
     #[test]
-    fn parses_agent_new_agent_id_argument() {
-        let cli =
-            Cli::try_parse_from(["waap", "agent", "new", "--agent-id", "custom_agent"]).unwrap();
+    fn parses_agent_new_name_argument() {
+        let cli = Cli::try_parse_from(["waap", "agent", "new", "--name", "Custom Agent"]).unwrap();
 
         assert!(matches!(
             cli.command,
             Command::Agent {
-                command: AgentCommand::New { agent_id: Some(agent_id) }
-            } if agent_id == "custom_agent"
+                command: AgentCommand::New { name: Some(name) }
+            } if name == "Custom Agent"
+        ));
+    }
+
+    #[test]
+    fn parses_ticket_new_with_optional_name() {
+        let unnamed = Cli::try_parse_from(["waap", "ticket", "new"]).unwrap();
+        let named = Cli::try_parse_from(["waap", "ticket", "new", "--name", "New Ticket"]).unwrap();
+
+        assert!(matches!(
+            unnamed.command,
+            Command::Ticket {
+                command: TicketCommand::New {
+                    name: None,
+                    depends_on
+                }
+            } if depends_on.is_empty()
+        ));
+        assert!(matches!(
+            named.command,
+            Command::Ticket {
+                command: TicketCommand::New {
+                    name: Some(name),
+                    depends_on
+                }
+            } if name == "New Ticket" && depends_on.is_empty()
         ));
     }
 

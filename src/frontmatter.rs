@@ -96,20 +96,6 @@ pub(crate) fn reject_unknown_fields(
     }
 }
 
-pub(crate) fn require_string(
-    frontmatter: &Value,
-    key: &str,
-    path: &Path,
-    errors: &mut Vec<String>,
-) {
-    if frontmatter.get(key).and_then(Value::as_str).is_none() {
-        errors.push(format!(
-            "{} frontmatter field {key} must be a string",
-            path.display()
-        ));
-    }
-}
-
 pub(crate) fn require_optional_string(
     frontmatter: &Value,
     key: &str,

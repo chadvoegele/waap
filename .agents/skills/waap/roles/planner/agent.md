@@ -29,7 +29,7 @@ Ticket frontmatter uses TOML:
 
 ```toml
 +++
-title = "Implement Example Feature"
+name = "Implement Example Feature"
 creation_date = 2026-06-18T10:15:02Z
 status = "pending"
 depends_on = ["tt-required-foundation"]
@@ -43,13 +43,13 @@ depends_on = ["tt-required-foundation"]
 Create a ticket:
 
 ```sh
-waap ticket new --title "Implement Example Feature" < ticket.md
+waap ticket new --name "Implement Example Feature" < ticket.md
 ```
 
 Create a ticket with dependencies:
 
 ```sh
-waap ticket new --title "Implement Example Feature" --depends-on tt-required-foundation < ticket.md
+waap ticket new --name "Implement Example Feature" --depends-on tt-required-foundation < ticket.md
 ```
 
 Validate waap state:

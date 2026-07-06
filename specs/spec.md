@@ -48,13 +48,14 @@ waap uses agents with different purposes to perform each stage of the software d
 
 Agents do the work in waap. Agents use the repository source code and specifications primarily as context, and use `.waap/` to track their own state and log partial progress.
 
-Agent state is tracked in the `/.waap/agents/` directory. An agent is identified by a 8 character random hex hash, prefixed by `aa-`.
+Agent state is tracked in the `/.waap/agents/` directory. An agent can have an optional human-readable name. Its id is `aa-` plus the name slug, or an 8-character random hex value when unnamed.
 
 Agent metadata is stored in TOML frontmatter.
 
 **Agent Schema**
 ```
 +++
+name = "List Tickets Developer"
 creation_date = 2026-06-18T15:00:34Z
 status = "ready"  # ready, running, completed, aborted
 session_id = "ses_9032dd..."  # add after agent is started
@@ -84,7 +85,7 @@ Ticket metadata is stored in TOML frontmatter.
 **Ticket Schema**
 ```
 +++
-title = "List Tickets"
+name = "List Tickets"
 creation_date = 2026-06-18T10:15:02Z
 status = "pending"  # pending, in-progress, completed, abandoned
 +++
@@ -97,7 +98,7 @@ List tickets in `.waap/tickets/` directory. Return in JSON format.
 Additionally allow a flag to filter by status.
 ```
 
-The ticket id should be a filesystem-safe version of ticket title, i.e. a slug, prefixed by literal `tt-`.
+Tickets can have an optional human-readable name. A named ticket id is the name slug prefixed by `tt-`; an unnamed ticket id is `tt-` plus an 8-character random hex value. The legacy `title` metadata field is accepted as `name` when reading old tickets, but new writes use `name`.
 
 Slug Requirements:
 1. Lowercase
@@ -110,7 +111,7 @@ Slug Requirements:
     1. excess is truncated, and appended with a dash and random 4 character hex hash
     1. Example: `tt-list-all-very-long-tickets-that-are-too-long-for-a-slug-de32`
 
-If there is a conflicting ticket id, the new ticket should similarly append a 4 character hash.
+If a named ticket or agent id conflicts, append a 4-character random hex suffix.
 
 Example:
 `/.waap/tickets/tt-list-tickets/ticket.md`
@@ -153,14 +154,14 @@ Frontmatter is validated strictly: unknown fields outside the documented agent a
     - Appends ticket.md contents from stdin
     - Commits the ticket.md to git
     - Parameters
-        - Required
-            - `--title`
+        - Optional
+            - `--name`
     - Streams
         - stdin: write to ticket markdown
         - stdout: reports created ticket path, metadata, and file size
 - update
     - Updates an existing ticket
-    - The ticket title cannot be changed since it's also the id.
+    - The ticket name and id cannot be changed.
     - Commits the ticket.md changes to git
     - Parameters
         - Required
@@ -190,6 +191,9 @@ Frontmatter is validated strictly: unknown fields outside the documented agent a
     - Prepends TOML frontmatter in agent.md
     - Appends agent.md contents from stdin
     - Commits the agent.md to git
+    - Parameters
+        - Optional
+            - `--name`
     - Streams
         - stdin: write to agent markdown
         - stdout: reports created agent path, metadata, and file size
@@ -213,7 +217,7 @@ Frontmatter is validated strictly: unknown fields outside the documented agent a
             - `--agent-id`  # if not provided, all agents are stopped
 - update
     - Updates an existing agent
-    - The agent id cannot be changed.
+    - The agent name and id cannot be changed.
     - Commits the agent.md changes to git
     - Parameters
         - Required

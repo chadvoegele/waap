@@ -30,7 +30,7 @@ pub(crate) fn print_ticket_report(
 
 pub(crate) fn create_ticket(
     waap_root: &Path,
-    title: &str,
+    name: Option<&str>,
     depends_on: &[String],
 ) -> io::Result<TicketReport> {
     let mut markdown = String::new();
@@ -38,12 +38,12 @@ pub(crate) fn create_ticket(
         .read_to_string(&mut markdown)
         .map_err(|error| io::Error::new(error.kind(), format!("failed to read stdin: {error}")))?;
 
-    create_ticket_with_markdown(waap_root, title, depends_on, &markdown)
+    create_ticket_with_markdown(waap_root, name, depends_on, &markdown)
 }
 
 pub(crate) fn create_ticket_with_markdown(
     waap_root: &Path,
-    title: &str,
+    name: Option<&str>,
     depends_on: &[String],
     markdown: &str,
 ) -> io::Result<TicketReport> {
@@ -59,7 +59,7 @@ pub(crate) fn create_ticket_with_markdown(
     }
 
     let tickets_dir = WaapRecordKind::Ticket.root_path(waap_root);
-    let ticket_id = available_ticket_id(&tickets_dir, title)?;
+    let ticket_id = available_ticket_id(&tickets_dir, name)?;
 
     let depends_on_opt = if depends_on.is_empty() {
         None
@@ -69,7 +69,7 @@ pub(crate) fn create_ticket_with_markdown(
 
     let creation_date = current_toml_datetime();
     let metadata = TicketMetadata {
-        title: title.to_string(),
+        name: name.map(str::to_string),
         creation_date: creation_date.clone(),
         status: "pending".to_string(),
         depends_on: depends_on_opt,
@@ -81,7 +81,7 @@ pub(crate) fn create_ticket_with_markdown(
     Ok(TicketReport {
         ticket_id,
         path,
-        title: title.to_string(),
+        name: metadata.name,
         creation_date,
         status: "pending".to_string(),
         depends_on: metadata.depends_on,
@@ -104,15 +104,15 @@ mod tests {
         fs::create_dir_all(dir.path().join(".waap")).unwrap();
 
         let report =
-            create_ticket_with_markdown(dir.path(), "New Ticket", &[], "# Body\nDetails\n")
+            create_ticket_with_markdown(dir.path(), Some("New Ticket"), &[], "# Body\nDetails\n")
                 .unwrap();
         let contents = fs::read_to_string(&report.path).unwrap();
 
         assert_eq!(report.ticket_id, "tt-new-ticket");
-        assert_eq!(report.title, "New Ticket");
+        assert_eq!(report.name.as_deref(), Some("New Ticket"));
         assert_eq!(report.status, "pending");
         assert_eq!(report.file_size, contents.len() as u64);
-        assert!(contents.starts_with("+++\ntitle = \"New Ticket\"\ncreation_date = "));
+        assert!(contents.starts_with("+++\nname = \"New Ticket\"\ncreation_date = "));
         assert!(contents.contains("\nstatus = \"pending\"\n+++\n\n# Body\nDetails\n"));
         assert!(check_waap(dir.path()).is_empty());
     }
@@ -124,7 +124,8 @@ mod tests {
 
         let deps = vec!["tt-dep-one".to_string(), "tt-dep-two".to_string()];
         let report =
-            create_ticket_with_markdown(dir.path(), "Dependent Ticket", &deps, "# Body\n").unwrap();
+            create_ticket_with_markdown(dir.path(), Some("Dependent Ticket"), &deps, "# Body\n")
+                .unwrap();
         let contents = fs::read_to_string(&report.path).unwrap();
 
         assert_eq!(report.depends_on, Some(deps));
@@ -137,7 +138,7 @@ mod tests {
         fs::create_dir_all(dir.path().join(".waap")).unwrap();
 
         let deps = vec!["not-a-ticket-id".to_string()];
-        let err = create_ticket_with_markdown(dir.path(), "Bad Deps", &deps, "").unwrap_err();
+        let err = create_ticket_with_markdown(dir.path(), Some("Bad Deps"), &deps, "").unwrap_err();
 
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("not-a-ticket-id"));
@@ -147,9 +148,24 @@ mod tests {
     fn create_ticket_errors_when_project_not_initialized() {
         let dir = tempdir().unwrap();
 
-        let err = create_ticket_with_markdown(dir.path(), "New Ticket", &[], "").unwrap_err();
+        let err = create_ticket_with_markdown(dir.path(), Some("New Ticket"), &[], "").unwrap_err();
 
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
         assert!(err.to_string().contains("waap init"));
+    }
+
+    #[test]
+    fn create_ticket_without_name_uses_random_hex_id() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".waap")).unwrap();
+
+        let report = create_ticket_with_markdown(dir.path(), None, &[], "# Body\n").unwrap();
+        let suffix = report.ticket_id.strip_prefix("tt-").unwrap();
+        let contents = fs::read_to_string(&report.path).unwrap();
+
+        assert_eq!(suffix.len(), 8);
+        assert!(suffix.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(report.name, None);
+        assert!(!contents.contains("name ="));
     }
 }

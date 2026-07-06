@@ -398,6 +398,7 @@ mod tests {
             agent_id: "aa-3881fda0".to_string(),
             path: PathBuf::from(".waap/agents/aa-3881fda0/agent.md"),
             metadata: AgentMetadata {
+                name: None,
                 creation_date: "2026-06-18T15:00:34Z".to_string(),
                 status: "aborted".to_string(),
                 session_id: Some("ses_123".to_string()),
@@ -414,6 +415,7 @@ mod tests {
                         "agent_id": "aa-3881fda0",
                         "path": ".waap/agents/aa-3881fda0/agent.md",
                         "metadata": {
+                            "name": null,
                             "creation_date": "2026-06-18T15:00:34Z",
                             "status": "aborted",
                             "session_id": "ses_123",

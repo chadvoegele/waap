@@ -12,7 +12,7 @@ Add an optional `depends_on` field to the ticket schema, which is a list of tick
 
 ```
 +++
-title = "Frontend import UI"
+name = "Frontend import UI"
 creation_date = 2026-06-26T20:31:07Z
 status = "pending"
 depends_on = ["tt-mlflow-backend-proxy-endpoints"]
@@ -36,13 +36,13 @@ Each entry must be a valid ticket ID.
 Add an optional `--depends-on` flag (repeatable) to declare dependencies:
 
 ```
-waap ticket new --title "Frontend MLflow import UI" --depends-on tt-mlflow-backend-proxy-endpoints
+waap ticket new --name "Frontend MLflow import UI" --depends-on tt-mlflow-backend-proxy-endpoints
 ```
 
 Multiple dependencies:
 
 ```
-waap ticket new --title "Deploy pipeline" \
+waap ticket new --name "Deploy pipeline" \
   --depends-on tt-build-artifacts \
   --depends-on tt-integration-tests
 ```

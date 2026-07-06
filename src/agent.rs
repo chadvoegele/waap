@@ -11,7 +11,7 @@ use crate::frontmatter::{
     reject_unknown_fields, require_datetime, require_optional_string,
     require_optional_string_choice, require_string_choice, serialize_record,
 };
-use crate::ids::{random_hex_chars, toml_string};
+use crate::ids::{available_record_id, is_record_id, toml_string};
 use crate::record::{markdown_body_after_frontmatter, WaapRecordKind};
 
 pub(crate) mod get;
@@ -30,6 +30,7 @@ pub(crate) use update::{print_updated_agent_report, update_agent};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AgentMetadata {
+    pub(crate) name: Option<String>,
     pub(crate) creation_date: String,
     pub(crate) status: String,
     pub(crate) session_id: Option<String>,
@@ -41,10 +42,18 @@ impl AgentMetadata {
         let mut errors = Vec::new();
         reject_unknown_fields(
             value,
-            &["creation_date", "role", "status", "session_id", "system"],
+            &[
+                "name",
+                "creation_date",
+                "role",
+                "status",
+                "session_id",
+                "system",
+            ],
             path,
             &mut errors,
         );
+        require_optional_string(value, "name", path, &mut errors);
         require_datetime(value, "creation_date", path, &mut errors);
         // `role` is a deprecated field; tolerate it when present for backward compatibility.
         require_optional_string(value, "role", path, &mut errors);
@@ -61,6 +70,10 @@ impl AgentMetadata {
             return Err(errors);
         }
         Ok(Self {
+            name: value
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             creation_date: datetime_string(value, "creation_date"),
             status: value
                 .get("status")
@@ -80,6 +93,9 @@ impl AgentMetadata {
 
     pub(crate) fn to_frontmatter_lines(&self) -> String {
         let mut lines = String::new();
+        if let Some(name) = &self.name {
+            lines.push_str(&format!("name = {}\n", toml_string(name)));
+        }
         lines.push_str(&format!("creation_date = {}\n", self.creation_date));
         lines.push_str(&format!("status = {}\n", toml_string(&self.status)));
         if let Some(session_id) = &self.session_id {
@@ -224,33 +240,20 @@ impl AgentSystem {
     }
 }
 
-pub(crate) fn available_agent_id(agents_dir: &Path) -> io::Result<String> {
-    available_agent_id_with_generator(agents_dir, || random_hex_chars(8))
-}
-
-pub(crate) fn available_agent_id_with_generator(
-    agents_dir: &Path,
-    mut generate_hash: impl FnMut() -> io::Result<String>,
-) -> io::Result<String> {
-    loop {
-        let agent_id = format!("aa-{}", generate_hash()?);
-        if !agents_dir.join(&agent_id).exists() {
-            return Ok(agent_id);
-        }
-    }
+pub(crate) fn available_agent_id(agents_dir: &Path, name: Option<&str>) -> io::Result<String> {
+    available_record_id(agents_dir, "aa-", name)
 }
 
 pub(crate) fn is_agent_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() < 64
-        && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_'
-        })
+    is_record_id(value, "aa-")
 }
 
 pub(crate) fn print_agent_report_human(header: &str, report: &AgentReport) {
     println!("{header} {}", report.agent_id);
     println!("Path: {}", report.path.display());
+    if let Some(name) = &report.metadata.name {
+        println!("Name: {name}");
+    }
     println!("Creation date: {}", report.metadata.creation_date);
     println!("Status: {}", report.metadata.status);
     if let Some(session_id) = &report.metadata.session_id {
@@ -264,6 +267,7 @@ pub(crate) fn agent_report_json(report: &AgentReport) -> serde_json::Value {
         "agent_id": report.agent_id,
         "path": report.path.display().to_string(),
         "metadata": {
+            "name": report.metadata.name,
             "creation_date": report.metadata.creation_date,
             "status": report.metadata.status,
             "session_id": report.metadata.session_id,
@@ -274,31 +278,12 @@ pub(crate) fn agent_report_json(report: &AgentReport) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::path::PathBuf;
 
     use serde_json::json;
-    use tempfile::tempdir;
 
-    use super::{
-        agent_report_json, available_agent_id_with_generator, is_agent_id, AgentMetadata,
-        AgentReport, AgentSystem,
-    };
+    use super::{agent_report_json, is_agent_id, AgentMetadata, AgentReport, AgentSystem};
     use crate::ids::random_hex_chars;
-
-    #[test]
-    fn agent_id_generation_retries_conflicts() {
-        let dir = tempdir().unwrap();
-        fs::create_dir_all(dir.path().join("aa-00000001")).unwrap();
-        let mut hashes = ["00000001", "00000002"].into_iter();
-
-        let agent_id = available_agent_id_with_generator(dir.path(), || {
-            Ok(hashes.next().unwrap().to_string())
-        })
-        .unwrap();
-
-        assert_eq!(agent_id, "aa-00000002");
-    }
 
     #[test]
     fn generated_agent_ids_are_prefixed_lowercase_hex() {
@@ -314,9 +299,17 @@ mod tests {
 
     #[test]
     fn agent_ids_are_slug_style() {
-        assert!(is_agent_id("custom-agent_123"));
+        assert!(is_agent_id("aa-custom-agent123"));
 
-        for value in ["", "Upper", "has space", "has/slash", &"a".repeat(64)] {
+        for value in [
+            "",
+            "custom-agent",
+            "aa-Upper",
+            "aa-has space",
+            "aa-has/slash",
+            "aa-has_underscore",
+            &format!("aa-{}", "a".repeat(64)),
+        ] {
             assert!(!is_agent_id(value));
         }
     }
@@ -336,10 +329,14 @@ mod tests {
     #[test]
     fn agent_metadata_known_fields_pass() {
         let path = PathBuf::from("agent.md");
-        let toml = "creation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"ready\"\nsession_id = \"ses_1\"\nsystem = \"claude\"\n";
+        let toml = "name = \"Developer\"\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"ready\"\nsession_id = \"ses_1\"\nsystem = \"claude\"\n";
         let value: toml::Value = toml.parse().unwrap();
 
-        assert!(AgentMetadata::from_frontmatter(&value, &path).is_ok());
+        let metadata = AgentMetadata::from_frontmatter(&value, &path).unwrap();
+        assert_eq!(metadata.name.as_deref(), Some("Developer"));
+        assert!(metadata
+            .to_frontmatter_lines()
+            .starts_with("name = \"Developer\"\n"));
     }
 
     #[test]
@@ -364,6 +361,7 @@ mod tests {
             agent_id: "aa-3881fda0".to_string(),
             path: PathBuf::from(".waap/agents/aa-3881fda0/agent.md"),
             metadata: AgentMetadata {
+                name: None,
                 creation_date: "2026-06-18T15:00:34Z".to_string(),
                 status: "running".to_string(),
                 session_id: Some("ses_123".to_string()),
@@ -378,6 +376,7 @@ mod tests {
                 "agent_id": "aa-3881fda0",
                 "path": ".waap/agents/aa-3881fda0/agent.md",
                 "metadata": {
+                    "name": null,
                     "creation_date": "2026-06-18T15:00:34Z",
                     "status": "running",
                     "session_id": "ses_123",

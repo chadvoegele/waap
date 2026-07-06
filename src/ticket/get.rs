@@ -34,7 +34,7 @@ pub(crate) fn load_ticket_report(waap_root: &Path, ticket_id: &str) -> io::Resul
     Ok(TicketReport {
         ticket_id: ticket_id.to_string(),
         path: path.clone(),
-        title: metadata.title,
+        name: metadata.name,
         creation_date: metadata.creation_date,
         status: metadata.status,
         depends_on: metadata.depends_on,
@@ -74,7 +74,7 @@ mod tests {
         let report = get_ticket(dir.path(), "tt-new-ticket").unwrap();
 
         assert_eq!(report.ticket.ticket_id, "tt-new-ticket");
-        assert_eq!(report.ticket.title, "New Ticket");
+        assert_eq!(report.ticket.name.as_deref(), Some("New Ticket"));
         assert_eq!(report.ticket.creation_date, "2026-06-22T12:00:00Z");
         assert_eq!(report.ticket.status, "pending");
         assert_eq!(report.ticket.file_size, contents.len() as u64);
@@ -128,7 +128,7 @@ status = \"ready\"
             ticket: TicketReport {
                 ticket_id: "tt-new-ticket".to_string(),
                 path: PathBuf::from(".waap/tickets/tt-new-ticket/ticket.md"),
-                title: "New Ticket".to_string(),
+                name: Some("New Ticket".to_string()),
                 creation_date: "2026-06-22T12:00:00Z".to_string(),
                 status: "pending".to_string(),
                 depends_on: None,
@@ -143,7 +143,7 @@ status = \"ready\"
                 "ticket_id": "tt-new-ticket",
                 "path": ".waap/tickets/tt-new-ticket/ticket.md",
                 "metadata": {
-                    "title": "New Ticket",
+                    "name": "New Ticket",
                     "creation_date": "2026-06-22T12:00:00Z",
                     "status": "pending",
                     "depends_on": null,
@@ -160,7 +160,7 @@ status = \"ready\"
             ticket: TicketReport {
                 ticket_id: "tt-feature".to_string(),
                 path: PathBuf::from(".waap/tickets/tt-feature/ticket.md"),
-                title: "Feature".to_string(),
+                name: Some("Feature".to_string()),
                 creation_date: "2026-06-22T12:00:00Z".to_string(),
                 status: "pending".to_string(),
                 depends_on: Some(vec!["tt-dep-one".to_string(), "tt-dep-two".to_string()]),

@@ -68,7 +68,7 @@ fn ticket_new_then_update_each_create_one_commit() {
     let output = waap(
         dir.path(),
         "# Body\n",
-        &["ticket", "new", "--title", "My Task"],
+        &["ticket", "new", "--name", "My Task"],
     );
     assert!(output.status.success());
     assert_eq!(commit_count(dir.path()), before + 1);
@@ -138,7 +138,7 @@ fn agent_new_then_update_each_create_one_commit() {
 }
 
 #[test]
-fn agent_new_with_custom_agent_id_creates_exact_id() {
+fn agent_new_with_name_creates_slug_id() {
     let dir = tempdir().unwrap();
     init_repo_with_waap_project(dir.path());
 
@@ -150,8 +150,8 @@ fn agent_new_with_custom_agent_id_creates_exact_id() {
             "json",
             "agent",
             "new",
-            "--agent-id",
-            "custom-agent_123",
+            "--name",
+            "Custom Agent_123",
         ],
     );
 
@@ -162,12 +162,16 @@ fn agent_new_with_custom_agent_id_creates_exact_id() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
-    assert_eq!(value["agent_id"], "custom-agent_123");
+    assert_eq!(value["agent_id"], "aa-custom-agent123");
+    assert_eq!(value["metadata"]["name"], "Custom Agent_123");
     assert!(dir
         .path()
-        .join(".waap/agents/custom-agent_123/agent.md")
+        .join(".waap/agents/aa-custom-agent123/agent.md")
         .is_file());
-    assert_eq!(last_subject(dir.path()), "waap agent new custom-agent_123");
+    assert_eq!(
+        last_subject(dir.path()),
+        "waap agent new aa-custom-agent123"
+    );
 }
 
 #[test]
@@ -179,11 +183,7 @@ fn commit_excludes_unrelated_working_tree_changes() {
     std::fs::write(dir.path().join("user.txt"), "wip\n").unwrap();
     git(dir.path(), &["add", "user.txt"]);
 
-    let output = waap(
-        dir.path(),
-        "# Body\n",
-        &["ticket", "new", "--title", "Task"],
-    );
+    let output = waap(dir.path(), "# Body\n", &["ticket", "new", "--name", "Task"]);
     assert!(output.status.success());
 
     let files = last_commit_files(dir.path());
@@ -201,11 +201,7 @@ fn failed_commit_returns_error_but_keeps_state() {
     std::fs::create_dir_all(dir.path().join(".waap")).unwrap();
     std::fs::File::create(dir.path().join(".git/index.lock")).unwrap();
 
-    let output = waap(
-        dir.path(),
-        "# Body\n",
-        &["ticket", "new", "--title", "Task"],
-    );
+    let output = waap(dir.path(), "# Body\n", &["ticket", "new", "--name", "Task"]);
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -232,7 +228,7 @@ fn respects_waap_root_run_from_elsewhere() {
     let mut child = command
         .current_dir(other.path())
         .args(["--waap-root", waap_root.to_str().unwrap()])
-        .args(["ticket", "new", "--title", "Task"])
+        .args(["ticket", "new", "--name", "Task"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -317,11 +313,7 @@ fn ticket_new_errors_when_project_not_initialized() {
     let dir = tempdir().unwrap();
     init_repo(dir.path());
 
-    let output = waap(
-        dir.path(),
-        "# Body\n",
-        &["ticket", "new", "--title", "Task"],
-    );
+    let output = waap(dir.path(), "# Body\n", &["ticket", "new", "--name", "Task"]);
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);

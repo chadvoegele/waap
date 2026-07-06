@@ -90,7 +90,7 @@ pub(crate) fn run() -> ExitCode {
             }
         }
         Command::Agent { command } => match command {
-            AgentCommand::New { agent_id } => match create_agent(waap_root, agent_id.as_deref()) {
+            AgentCommand::New { name } => match create_agent(waap_root, name.as_deref()) {
                 Ok(report) => commit_and_print(
                     waap_root,
                     &[report.path.as_path()],
@@ -184,8 +184,8 @@ pub(crate) fn run() -> ExitCode {
             },
         },
         Command::Ticket { command } => match command {
-            TicketCommand::New { title, depends_on } => {
-                match create_ticket(waap_root, &title, &depends_on) {
+            TicketCommand::New { name, depends_on } => {
+                match create_ticket(waap_root, name.as_deref(), &depends_on) {
                     Ok(report) => commit_and_print(
                         waap_root,
                         &[report.path.as_path()],

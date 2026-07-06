@@ -243,7 +243,7 @@ status = \"ready\"
                 report: TicketReport {
                     ticket_id: "tt-one".to_string(),
                     path: PathBuf::from(".waap/tickets/tt-one/ticket.md"),
-                    title: "One".to_string(),
+                    name: Some("One".to_string()),
                     creation_date: "2026-06-22T12:00:00Z".to_string(),
                     status: "pending".to_string(),
                     depends_on: None,
@@ -255,7 +255,7 @@ status = \"ready\"
                 report: TicketReport {
                     ticket_id: "tt-two".to_string(),
                     path: PathBuf::from(".waap/tickets/tt-two/ticket.md"),
-                    title: "Two".to_string(),
+                    name: Some("Two".to_string()),
                     creation_date: "2026-06-22T12:00:00Z".to_string(),
                     status: "completed".to_string(),
                     depends_on: None,
@@ -280,7 +280,7 @@ status = \"ready\"
             report: TicketReport {
                 ticket_id: "tt-one".to_string(),
                 path: PathBuf::from(".waap/tickets/tt-one/ticket.md"),
-                title: "One".to_string(),
+                name: Some("One".to_string()),
                 creation_date: "2026-06-22T12:00:00Z".to_string(),
                 status: "in-progress".to_string(),
                 depends_on: None,
@@ -300,7 +300,7 @@ status = \"ready\"
                 report: TicketReport {
                     ticket_id: "tt-one".to_string(),
                     path: PathBuf::from(".waap/tickets/tt-one/ticket.md"),
-                    title: "One".to_string(),
+                    name: Some("One".to_string()),
                     creation_date: "2026-06-22T12:00:00Z".to_string(),
                     status: "completed".to_string(),
                     depends_on: None,
@@ -312,7 +312,7 @@ status = \"ready\"
                 report: TicketReport {
                     ticket_id: "tt-feature".to_string(),
                     path: PathBuf::from(".waap/tickets/tt-feature/ticket.md"),
-                    title: "Feature".to_string(),
+                    name: Some("Feature".to_string()),
                     creation_date: "2026-06-22T12:00:00Z".to_string(),
                     status: "pending".to_string(),
                     depends_on: Some(vec!["tt-one".to_string()]),
@@ -335,7 +335,7 @@ status = \"ready\"
             report: TicketReport {
                 ticket_id: "tt-one".to_string(),
                 path: PathBuf::from(".waap/tickets/tt-one/ticket.md"),
-                title: "One".to_string(),
+                name: Some("One".to_string()),
                 creation_date: "2026-06-22T12:00:00Z".to_string(),
                 status: "completed".to_string(),
                 depends_on: None,
@@ -356,7 +356,7 @@ status = \"ready\"
             report: TicketReport {
                 ticket_id: "tt".to_string(),
                 path: PathBuf::from(".waap/tickets/tt/ticket.md"),
-                title: "Short".to_string(),
+                name: Some("Short".to_string()),
                 creation_date: "2026-06-22T12:00:00Z".to_string(),
                 status: "pending".to_string(),
                 depends_on: None,

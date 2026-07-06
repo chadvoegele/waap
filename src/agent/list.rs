@@ -182,6 +182,7 @@ status = \"pending\"
                 agent_id: "aa-00000001".to_string(),
                 path: PathBuf::from(".waap/agents/aa-00000001/agent.md"),
                 metadata: AgentMetadata {
+                    name: None,
                     creation_date: "2026-06-18T15:00:34Z".to_string(),
                     status: "ready".to_string(),
                     session_id: None,
@@ -193,6 +194,7 @@ status = \"pending\"
                 agent_id: "aa-00000002".to_string(),
                 path: PathBuf::from(".waap/agents/aa-00000002/agent.md"),
                 metadata: AgentMetadata {
+                    name: None,
                     creation_date: "2026-06-18T15:00:34Z".to_string(),
                     status: "completed".to_string(),
                     session_id: Some("ses_123".to_string()),
@@ -257,6 +259,7 @@ status = \"pending\"
             agent_id: agent_id.to_string(),
             path: PathBuf::from(format!(".waap/agents/{agent_id}/agent.md")),
             metadata: AgentMetadata {
+                name: None,
                 creation_date: "2026-06-18T15:00:34Z".to_string(),
                 status: status.to_string(),
                 session_id: None,

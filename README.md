@@ -67,7 +67,7 @@ status = "ready"
 Continue working on `tt-file-picker` until done
 ```
 
-Then run your agent with `waap agent run --name aa-file-picker-implementer`
+Then run your agent with `waap agent run --agent-id aa-file-picker-implementer`.
 
 ## `waap` Loop
 

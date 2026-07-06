@@ -65,7 +65,7 @@ pub(crate) fn update_ticket(
     Ok(TicketReport {
         ticket_id: ticket_id.to_string(),
         path: path.clone(),
-        title: metadata.title,
+        name: metadata.name,
         creation_date: metadata.creation_date,
         status: metadata.status,
         depends_on: metadata.depends_on,
@@ -136,7 +136,7 @@ mod tests {
     }
 
     #[test]
-    fn ticket_update_preserves_frontmatter_and_body_except_status() {
+    fn ticket_update_migrates_legacy_title_and_preserves_body() {
         let dir = tempdir().unwrap();
         let path = dir.path().join(".waap/tickets/tt-new-ticket/ticket.md");
         let body = "# Description\nKeep this body exactly.\n";
@@ -158,14 +158,14 @@ mod tests {
         let contents = fs::read_to_string(&path).unwrap();
 
         assert_eq!(report.ticket_id, "tt-new-ticket");
-        assert_eq!(report.title, "New Ticket");
+        assert_eq!(report.name.as_deref(), Some("New Ticket"));
         assert_eq!(report.creation_date, "2026-06-22T12:00:00Z");
         assert_eq!(report.status, "completed");
         assert_eq!(report.file_size, contents.len() as u64);
         assert_eq!(
             contents,
             format!(
-                "+++\ntitle = \"New Ticket\"\ncreation_date = 2026-06-22T12:00:00Z\nstatus = \"completed\"\n+++\n\n{body}"
+                "+++\nname = \"New Ticket\"\ncreation_date = 2026-06-22T12:00:00Z\nstatus = \"completed\"\n+++\n\n{body}"
             )
         );
     }
@@ -175,7 +175,7 @@ mod tests {
         let report = TicketReport {
             ticket_id: "tt-new-ticket".to_string(),
             path: PathBuf::from(".waap/tickets/tt-new-ticket/ticket.md"),
-            title: "New Ticket".to_string(),
+            name: Some("New Ticket".to_string()),
             creation_date: "2026-06-22T12:00:00Z".to_string(),
             status: "pending".to_string(),
             depends_on: None,
@@ -188,7 +188,7 @@ mod tests {
                 "ticket_id": "tt-new-ticket",
                 "path": ".waap/tickets/tt-new-ticket/ticket.md",
                 "metadata": {
-                    "title": "New Ticket",
+                    "name": "New Ticket",
                     "creation_date": "2026-06-22T12:00:00Z",
                     "status": "pending",
                     "depends_on": null,

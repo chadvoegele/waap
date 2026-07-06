@@ -10,7 +10,7 @@ description: waap is a structured agent automation platform for specifying workf
 First, specify to-be-completed work in waap tickets. The work is described in markdown format, e.g. `cool_feature.md`.
 
 ```sh
-$ cat cool_feature.md | waap ticket new --title "Cool Feature"
+$ cat cool_feature.md | waap ticket new --name "Cool Feature"
 ```
 
 This creates a ticket at `.waap/tickets/<ticket-id>/ticket.md`. Ticket IDs start with `tt-` and use lowercase filesystem-safe slugs, e.g. `tt-cool-feature`.
@@ -54,7 +54,7 @@ Ticket metadata is stored as TOML frontmatter at the top of the ticket markdown 
 
 ```toml
 +++
-title = "Implement Example Feature"
+name = "Implement Example Feature"
 creation_date = 2026-06-18T10:15:02Z
 status = "pending"
 depends_on = ["tt-required-foundation"]
@@ -119,7 +119,7 @@ waap check
 Create a ticket from Markdown on stdin:
 
 ```sh
-waap ticket new --title "Implement Example Feature" --depends-on tt-foundation < ticket.md
+waap ticket new --name "Implement Example Feature" --depends-on tt-foundation < ticket.md
 ```
 
 List unblocked pending tickets:
