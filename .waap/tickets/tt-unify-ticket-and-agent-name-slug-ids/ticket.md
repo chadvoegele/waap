@@ -1,7 +1,7 @@
 +++
-title = "Unify ticket and agent name slug ids"
+name = "Unify ticket and agent name slug ids"
 creation_date = 2026-07-05T13:58:55Z
-status = "in-progress"
+status = "completed"
 +++
 
 # Goal
