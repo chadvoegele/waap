@@ -369,29 +369,7 @@ mod tests {
     use crate::cli::OutputFormat;
     use crate::codex::TurnStatus;
     use crate::git::{create_agent_worktree, remove_agent_worktree};
-
-    fn git(root: &Path, args: &[&str]) -> String {
-        let output = std::process::Command::new("git")
-            .current_dir(root)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
-
-    fn init_repo_with_commit(root: &Path) {
-        git(root, &["init", "-q"]);
-        git(root, &["config", "user.name", "Test"]);
-        git(root, &["config", "user.email", "test@example.com"]);
-        fs::write(root.join("README.md"), "seed\n").unwrap();
-        git(root, &["add", "-A"]);
-        git(root, &["commit", "-q", "-m", "seed"]);
-    }
+    use crate::test_git::{init_repo_with_commit, run as git};
 
     #[test]
     fn run_in_agent_worktree_launches_in_worktree_and_cleans_up_on_success() {

@@ -70,33 +70,12 @@ pub(crate) fn print_init_report(output_format: &OutputFormat, report: &InitRepor
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
-    use std::process::Command;
 
     use tempfile::tempdir;
 
     use super::init_project;
     use crate::check::check_waap;
-
-    fn init_repo(root: &Path) {
-        run(root, &["init", "-q"]);
-        run(root, &["config", "user.name", "Test"]);
-        run(root, &["config", "user.email", "test@example.com"]);
-    }
-
-    fn run(root: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .current_dir(root)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
+    use crate::test_git::init_repo;
 
     #[test]
     fn init_creates_waap_skeleton_in_fresh_git_repo() {

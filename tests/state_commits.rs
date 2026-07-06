@@ -1,33 +1,13 @@
 //! End-to-end tests that the mutating `waap` commands commit their own state changes.
 
+mod common;
+
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use tempfile::tempdir;
 
-fn git(waap_root: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .current_dir(waap_root)
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
-}
-
-fn init_repo(waap_root: &Path) {
-    git(waap_root, &["init", "-q"]);
-    git(waap_root, &["config", "user.name", "Test"]);
-    git(waap_root, &["config", "user.email", "test@example.com"]);
-    // An initial commit so HEAD exists and unrelated history is present.
-    std::fs::write(waap_root.join("README.md"), "seed\n").unwrap();
-    git(waap_root, &["add", "README.md"]);
-    git(waap_root, &["commit", "-q", "-m", "seed"]);
-}
+use common::{git, init_repo, isolate_git_config};
 
 /// Initialize a git repo and an already-initialized waap project inside it.
 fn init_repo_with_waap_project(waap_root: &Path) {
@@ -43,7 +23,9 @@ fn init_repo_with_waap_project(waap_root: &Path) {
 fn waap(waap_root: &Path, stdin: &str, args: &[&str]) -> Output {
     use std::io::Write;
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_waap"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_waap"));
+    isolate_git_config(&mut command);
+    let mut child = command
         .args(["--waap-root", waap_root.to_str().unwrap()])
         .args(args)
         .stdin(Stdio::piped())
@@ -245,7 +227,9 @@ fn respects_waap_root_run_from_elsewhere() {
     // Run the binary with cwd somewhere else; --waap-root must drive git.
     use std::io::Write;
     let other = tempdir().unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_waap"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_waap"));
+    isolate_git_config(&mut command);
+    let mut child = command
         .current_dir(other.path())
         .args(["--waap-root", waap_root.to_str().unwrap()])
         .args(["ticket", "new", "--title", "Task"])

@@ -97,19 +97,25 @@ pub(crate) fn commit_paths(waap_root: &Path, paths: &[&Path], message: &str) -> 
 
 /// Whether `path` is inside a git working tree.
 pub(crate) fn is_inside_git_work_tree(path: &Path) -> io::Result<bool> {
-    let output = Command::new("git")
-        .current_dir(path)
+    let output = git_process(path)
         .args(["rev-parse", "--is-inside-work-tree"])
         .output()
         .map_err(|error| io::Error::new(error.kind(), format!("failed to run git: {error}")))?;
     Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true")
 }
 
+fn git_process(waap_root: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.current_dir(waap_root);
+    #[cfg(test)]
+    crate::test_git::isolate(&mut command);
+    command
+}
+
 /// Run `git` in `waap_root` and return its raw [`Output`] without treating a non-zero exit as an
 /// error, so callers can inspect the exit code themselves.
 fn git_command(waap_root: &Path, args: &[OsString]) -> io::Result<Output> {
-    Command::new("git")
-        .current_dir(waap_root)
+    git_process(waap_root)
         .args(args)
         .output()
         .map_err(|error| io::Error::new(error.kind(), format!("failed to run git: {error}")))
@@ -145,40 +151,13 @@ fn run_git(waap_root: &Path, args: &[OsString]) -> io::Result<Output> {
 mod tests {
     use std::fs;
     use std::path::Path;
-    use std::process::Command;
 
     use tempfile::tempdir;
 
     use super::{
         commit_paths, create_agent_worktree, is_inside_git_work_tree, remove_agent_worktree,
     };
-
-    fn init_repo(root: &Path) {
-        run(root, &["init", "-q"]);
-        run(root, &["config", "user.name", "Test"]);
-        run(root, &["config", "user.email", "test@example.com"]);
-    }
-
-    fn init_repo_with_commit(root: &Path) {
-        init_repo(root);
-        write_file(&root.join("README.md"), "seed\n");
-        run(root, &["add", "-A"]);
-        run(root, &["commit", "-q", "-m", "seed"]);
-    }
-
-    fn run(root: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .current_dir(root)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
+    use crate::test_git::{init_repo, init_repo_with_commit, run};
 
     fn write_file(path: &Path, contents: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();

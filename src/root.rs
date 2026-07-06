@@ -84,12 +84,11 @@ pub(crate) fn resolve_waap_root(
 mod tests {
     use std::fs;
     use std::io;
-    use std::path::Path;
-    use std::process::Command;
 
     use tempfile::{tempdir, TempDir};
 
     use super::resolve_waap_root;
+    use crate::test_git::{init_repo, run as git};
 
     /// A tempdir guaranteed to have no `.git` anywhere in its ancestry.
     ///
@@ -99,15 +98,6 @@ mod tests {
     /// unrelated temp filesystem.
     fn tempdir_outside_any_git_repo() -> TempDir {
         tempfile::Builder::new().tempdir_in("/var/tmp").unwrap()
-    }
-
-    fn init_repo(root: &Path) {
-        let status = Command::new("git")
-            .current_dir(root)
-            .args(["init", "-q"])
-            .status()
-            .unwrap();
-        assert!(status.success());
     }
 
     #[test]
@@ -203,41 +193,20 @@ mod tests {
         let dir = tempdir().unwrap();
         init_repo(dir.path());
         fs::write(dir.path().join("README"), "seed").unwrap();
-        let status = Command::new("git")
-            .current_dir(dir.path())
-            .args(["add", "."])
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let status = Command::new("git")
-            .current_dir(dir.path())
-            .args([
-                "-c",
-                "user.name=Test",
-                "-c",
-                "user.email=test@example.com",
-                "commit",
-                "-q",
-                "-m",
-                "seed",
-            ])
-            .status()
-            .unwrap();
-        assert!(status.success());
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "seed"]);
 
         let worktree = dir.path().join("worktree");
-        let status = Command::new("git")
-            .current_dir(dir.path())
-            .args([
+        git(
+            dir.path(),
+            &[
                 "worktree",
                 "add",
                 worktree.to_str().unwrap(),
                 "-b",
                 "feature",
-            ])
-            .status()
-            .unwrap();
-        assert!(status.success());
+            ],
+        );
         assert!(worktree.join(".git").is_file());
         fs::create_dir_all(worktree.join(".waap")).unwrap();
 

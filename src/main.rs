@@ -12,6 +12,8 @@ mod opencode;
 mod process;
 mod record;
 mod root;
+#[cfg(test)]
+mod test_git;
 mod ticket;
 
 use std::process::ExitCode;
