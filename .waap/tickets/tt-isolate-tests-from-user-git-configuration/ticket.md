@@ -1,7 +1,7 @@
 +++
 title = "Isolate tests from user Git configuration"
 creation_date = 2026-07-06T15:03:59Z
-status = "pending"
+status = "in-progress"
 +++
 
 ## Problem
