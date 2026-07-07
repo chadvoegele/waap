@@ -1,7 +1,8 @@
 +++
 name = "root-resolution-validation"
 creation_date = 2026-07-07T14:38:07Z
-status = "ready"
+status = "running"
+system = "codex"
 +++
 
 # Purpose
