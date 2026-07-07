@@ -12,8 +12,8 @@ pub(crate) struct Cli {
     #[arg(long, value_enum, default_value = "human-readable", global = true)]
     pub(crate) output_format: OutputFormat,
 
-    /// Waap project root: the directory containing `.waap/`. When omitted, the nearest ancestor
-    /// `.waap/` is used, bounded by the git root.
+    /// Waap project root. When omitted, use the nearest ancestor containing `.waap/`, bounded by
+    /// and falling back to the git root.
     #[arg(long, global = true)]
     pub(crate) waap_root: Option<PathBuf>,
 

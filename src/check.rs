@@ -17,6 +17,7 @@ pub(crate) fn check_waap(waap_root: &Path) -> Vec<String> {
     let tickets_dir = waap_dir.join("tickets");
 
     if !waap_dir.exists() {
+        errors.push("no waap project found; run 'waap init'".to_string());
         return errors;
     }
 
@@ -41,24 +42,29 @@ pub(crate) fn check_waap(waap_root: &Path) -> Vec<String> {
 }
 
 pub(crate) fn print_check_result(output_format: &OutputFormat, errors: &[String]) {
+    println!("{}", format_check_result(output_format, errors));
+}
+
+pub(crate) fn print_check_errors(output_format: &OutputFormat, errors: &[String]) {
+    eprintln!("{}", format_check_result(output_format, errors));
+}
+
+fn format_check_result(output_format: &OutputFormat, errors: &[String]) -> String {
     match output_format {
-        OutputFormat::Json => {
-            println!(
-                "{}",
-                json!({
-                    "valid": errors.is_empty(),
-                    "errors": errors,
-                })
-            );
-        }
+        OutputFormat::Json => json!({
+            "valid": errors.is_empty(),
+            "errors": errors,
+        })
+        .to_string(),
         OutputFormat::HumanReadable => {
             if errors.is_empty() {
-                println!("OK: .waap is valid");
+                "OK: .waap is valid".to_string()
             } else {
-                println!("ERROR: .waap is invalid");
+                let mut output = "ERROR: .waap is invalid".to_string();
                 for error in errors {
-                    println!("- {error}");
+                    output.push_str(&format!("\n- {error}"));
                 }
+                output
             }
         }
     }
@@ -242,10 +248,13 @@ mod tests {
     }
 
     #[test]
-    fn missing_waap_state_passes() {
+    fn missing_waap_state_fails_with_init_guidance() {
         let dir = tempdir().unwrap();
 
-        assert!(check_waap(dir.path()).is_empty());
+        assert_eq!(
+            check_waap(dir.path()),
+            vec!["no waap project found; run 'waap init'"]
+        );
     }
 
     #[test]

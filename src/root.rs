@@ -35,11 +35,8 @@ fn not_inside_git_repository_error() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, "not inside a git repository")
 }
 
-/// Resolve the waap project root, either by validating an explicit `--waap-root` or by walking
-/// up from `start` to the nearest `.waap/`, bounded by the git root.
-///
-/// When `explicit_waap_root` is `None`, the git root is resolved from `start` first, so "not
-/// inside a git repository" always takes precedence over "no waap project found".
+/// Resolve the waap project root from an explicit `--waap-root` or by walking up from `start` to
+/// the nearest `.waap/`, bounded by and falling back to the git root.
 pub(crate) fn resolve_waap_root(
     start: &Path,
     explicit_waap_root: Option<&Path>,
@@ -52,17 +49,14 @@ pub(crate) fn resolve_waap_root(
                     format!("{} does not exist", explicit.display()),
                 )
             })?;
+            if !canonical.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{} is not a directory", explicit.display()),
+                ));
+            }
             if find_git_root(&canonical).is_none() {
                 return Err(not_inside_git_repository_error());
-            }
-            if !canonical.join(".waap").is_dir() {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!(
-                        "no waap project at {}; run 'waap init' or omit --waap-root",
-                        explicit.display()
-                    ),
-                ));
             }
             Ok(canonical)
         }
@@ -70,12 +64,7 @@ pub(crate) fn resolve_waap_root(
             let canonical_start = start.canonicalize()?;
             let git_root =
                 find_git_root(&canonical_start).ok_or_else(not_inside_git_repository_error)?;
-            find_waap_root(&canonical_start, &git_root).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "no waap project found; run 'waap init'",
-                )
-            })
+            Ok(find_waap_root(&canonical_start, &git_root).unwrap_or(git_root))
         }
     }
 }
@@ -153,17 +142,16 @@ mod tests {
     }
 
     #[test]
-    fn errors_when_waap_only_exists_above_git_root() {
+    fn falls_back_to_git_root_without_searching_above_it() {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join(".waap")).unwrap();
         let repo = dir.path().join("repo");
         fs::create_dir_all(&repo).unwrap();
         init_repo(&repo);
 
-        let err = resolve_waap_root(&repo, None).unwrap_err();
+        let root = resolve_waap_root(&repo, None).unwrap();
 
-        assert_eq!(err.kind(), io::ErrorKind::NotFound);
-        assert!(err.to_string().contains("waap init"));
+        assert_eq!(root, repo.canonicalize().unwrap());
     }
 
     #[test]
@@ -216,6 +204,34 @@ mod tests {
     }
 
     #[test]
+    fn falls_back_to_linked_worktree_root_without_waap() {
+        let dir = tempdir().unwrap();
+        init_repo(dir.path());
+        fs::write(dir.path().join("README"), "seed").unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "seed"]);
+
+        let worktree = dir.path().join("worktree");
+        git(
+            dir.path(),
+            &[
+                "worktree",
+                "add",
+                worktree.to_str().unwrap(),
+                "-b",
+                "feature",
+            ],
+        );
+        let sub = worktree.join("deep/nested");
+        fs::create_dir_all(&sub).unwrap();
+
+        let root = resolve_waap_root(&sub, None).unwrap();
+
+        assert!(worktree.join(".git").is_file());
+        assert_eq!(root, worktree.canonicalize().unwrap());
+    }
+
+    #[test]
     fn resolves_git_root_itself_when_only_waap_there() {
         let dir = tempdir().unwrap();
         init_repo(dir.path());
@@ -236,10 +252,9 @@ mod tests {
         let sub = dir.path().join("sub");
         fs::create_dir_all(&sub).unwrap();
 
-        let err = resolve_waap_root(dir.path(), Some(&sub)).unwrap_err();
+        let root = resolve_waap_root(dir.path(), Some(&sub)).unwrap();
 
-        assert_eq!(err.kind(), io::ErrorKind::NotFound);
-        assert!(err.to_string().contains("no waap project at"));
+        assert_eq!(root, sub.canonicalize().unwrap());
     }
 
     #[test]
@@ -265,17 +280,16 @@ mod tests {
     }
 
     #[test]
-    fn explicit_waap_root_errors_when_it_lacks_a_direct_waap_dir() {
+    fn explicit_waap_root_errors_when_it_is_not_a_directory() {
         let dir = tempdir().unwrap();
         init_repo(dir.path());
+        let file = dir.path().join("file");
+        fs::write(&file, "contents").unwrap();
 
-        let err = resolve_waap_root(dir.path(), Some(dir.path())).unwrap_err();
+        let err = resolve_waap_root(dir.path(), Some(&file)).unwrap_err();
 
-        assert_eq!(err.kind(), io::ErrorKind::NotFound);
-        assert!(err.to_string().contains("no waap project at"));
-        assert!(err
-            .to_string()
-            .contains("run 'waap init' or omit --waap-root"));
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("is not a directory"));
     }
 
     #[test]

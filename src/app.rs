@@ -1,5 +1,5 @@
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -9,7 +9,7 @@ use crate::agent::{
     print_agent_stop_report, print_created_agent_report, print_updated_agent_report, run_agent,
     stop_agents_with_systems, update_agent,
 };
-use crate::check::{check_waap, print_check_result};
+use crate::check::{check_waap, print_check_errors, print_check_result};
 use crate::cli::{AgentCommand, Cli, Command, TicketCommand};
 use crate::git::commit_paths;
 use crate::init::{init_project, print_init_report};
@@ -44,24 +44,6 @@ fn commit_and_print(
 pub(crate) fn run() -> ExitCode {
     let cli = Cli::parse();
 
-    // `init` creates `.waap/`, so it operates on `--waap-root` (or the current directory)
-    // directly rather than through `resolve_waap_root`, which requires `.waap/` to already exist.
-    if matches!(cli.command, Command::Init) {
-        let waap_root = cli.waap_root.clone().unwrap_or_else(|| PathBuf::from("."));
-        return match init_project(&waap_root) {
-            Ok(report) => commit_and_print(
-                &waap_root,
-                &[report.marker.as_path()],
-                "waap init",
-                |commit| print_init_report(&cli.output_format, &report, commit),
-            ),
-            Err(error) => {
-                eprintln!("failed to initialize waap project: {error}");
-                ExitCode::from(1)
-            }
-        };
-    }
-
     let cwd = match env::current_dir() {
         Ok(dir) => dir,
         Err(error) => {
@@ -78,8 +60,27 @@ pub(crate) fn run() -> ExitCode {
     };
     let waap_root = &waap_root;
 
+    if matches!(&cli.command, Command::Agent { .. } | Command::Ticket { .. }) {
+        let errors = check_waap(waap_root);
+        if !errors.is_empty() {
+            print_check_errors(&cli.output_format, &errors);
+            return ExitCode::from(1);
+        }
+    }
+
     match cli.command {
-        Command::Init => unreachable!("handled above"),
+        Command::Init => match init_project(waap_root) {
+            Ok(report) => commit_and_print(
+                waap_root,
+                &[report.marker.as_path()],
+                "waap init",
+                |commit| print_init_report(&cli.output_format, &report, commit),
+            ),
+            Err(error) => {
+                eprintln!("failed to initialize waap project: {error}");
+                ExitCode::from(1)
+            }
+        },
         Command::Check => {
             let errors = check_waap(waap_root);
             print_check_result(&cli.output_format, &errors);

@@ -124,14 +124,18 @@ The `waap` CLI is the primary interface for interacting with waap state, though 
 
 - Global Parameters
     - `--output-format`  # Choices: json, human-readable
-    - `--waap-root`  # Path to the waap project root that contains `.waap/`; defaults to current directory
+    - `--waap-root`  # Existing project directory inside a git repository
 
 The default format is human-readable.
+
+Without `--waap-root`, commands use the nearest ancestor containing `.waap/`, bounded by the
+current git root. If none exists, commands use the git root so `waap init` can initialize it and
+other commands can report missing state.
 
 ### waap check
 Validates `/.waap` state.
 
-Missing state is considered valid. Only validate directories and files that already exist.
+Missing `/.waap` state is invalid and reports that `waap init` is required.
 
 1. `/.waap` has the correct directory structure.
 1. For `/.waap/agents/`,
