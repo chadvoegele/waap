@@ -21,7 +21,7 @@ fn init_repo_with_waap_project(waap_root: &Path) {
 }
 
 fn waap(waap_root: &Path, stdin: &str, args: &[&str]) -> Output {
-    use std::io::Write;
+    use std::io::{ErrorKind, Write};
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_waap"));
     isolate_git_config(&mut command);
@@ -33,12 +33,14 @@ fn waap(waap_root: &Path, stdin: &str, args: &[&str]) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(stdin.as_bytes())
-        .unwrap();
+    let write_result = child.stdin.take().unwrap().write_all(stdin.as_bytes());
+    if let Err(error) = write_result {
+        assert_eq!(
+            error.kind(),
+            ErrorKind::BrokenPipe,
+            "stdin write failed: {error}"
+        );
+    }
     child.wait_with_output().unwrap()
 }
 
