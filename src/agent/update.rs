@@ -7,26 +7,48 @@ use crate::agent::{
     AgentReport, AgentStatus,
 };
 use crate::cli::OutputFormat;
+use crate::git::commit_paths;
+use crate::mutation::{Committed, MutationError, MutationResult};
 
 pub(crate) fn print_updated_agent_report(
     output_format: &OutputFormat,
-    report: &AgentReport,
-    commit: &str,
+    committed: &Committed<AgentReport>,
 ) {
+    let report = &committed.value;
     match output_format {
         OutputFormat::Json => {
             let mut value = agent_report_json(report);
-            value["commit"] = serde_json::json!(commit);
+            value["commit"] = serde_json::json!(committed.commit);
             println!("{value}");
         }
         OutputFormat::HumanReadable => {
             print_agent_report_human("Updated agent", report);
-            println!("Commit: {commit}");
+            println!("Commit: {}", committed.commit);
         }
     }
 }
 
 pub(crate) fn update_agent(
+    waap_root: &Path,
+    agent_id: &str,
+    set_status: Option<&AgentStatus>,
+    set_session_id: Option<&str>,
+) -> MutationResult<Committed<AgentReport>> {
+    let report = update_agent_record(waap_root, agent_id, set_status, set_session_id)?;
+    let commit = commit_paths(
+        waap_root,
+        &[report.path.as_path()],
+        &format!("waap agent update {}", report.agent_id),
+    )
+    .map_err(MutationError::Commit)?;
+
+    Ok(Committed {
+        value: report,
+        commit,
+    })
+}
+
+fn update_agent_record(
     waap_root: &Path,
     agent_id: &str,
     set_status: Option<&AgentStatus>,
@@ -60,7 +82,8 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use crate::agent::{agent_report_json, update_agent, AgentMetadata, AgentReport, AgentStatus};
+    use super::update_agent_record;
+    use crate::agent::{agent_report_json, AgentMetadata, AgentReport, AgentStatus};
 
     #[test]
     fn agent_update_requires_at_least_one_update_field() {
@@ -70,7 +93,7 @@ mod tests {
             "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"ready\"\n+++\n\n# Purpose\n",
         );
 
-        let error = update_agent(dir.path(), "aa-3881fda0", None, None).unwrap_err();
+        let error = update_agent_record(dir.path(), "aa-3881fda0", None, None).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("at least one"));
@@ -81,7 +104,8 @@ mod tests {
         let dir = tempdir().unwrap();
 
         let error =
-            update_agent(dir.path(), "aa-3881fda0", Some(&AgentStatus::Running), None).unwrap_err();
+            update_agent_record(dir.path(), "aa-3881fda0", Some(&AgentStatus::Running), None)
+                .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
         assert!(error
@@ -98,7 +122,7 @@ mod tests {
             "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"planner\"\nstatus = \"ready\"\n+++\n\n# Purpose\nDo work\n",
         );
 
-        let report = update_agent(
+        let report = update_agent_record(
             dir.path(),
             "aa-3881fda0",
             Some(&AgentStatus::Completed),
@@ -127,7 +151,7 @@ mod tests {
             "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"running\"\nsession_id = \"ses_old\"\n+++\n\n# Purpose\n",
         );
 
-        let report = update_agent(dir.path(), "aa-3881fda0", None, Some("ses_new")).unwrap();
+        let report = update_agent_record(dir.path(), "aa-3881fda0", None, Some("ses_new")).unwrap();
         let contents = fs::read_to_string(&path).unwrap();
 
         assert_eq!(report.metadata.status, "running");

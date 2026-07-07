@@ -7,34 +7,50 @@ use crate::agent::{
     write_agent_record, AgentMetadata, AgentReport,
 };
 use crate::cli::OutputFormat;
+use crate::git::commit_paths;
 use crate::ids::current_toml_datetime;
+use crate::mutation::{Committed, MutationError, MutationResult};
 use crate::record::{require_initialized_project, WaapRecordKind};
 
 pub(crate) fn print_created_agent_report(
     output_format: &OutputFormat,
-    report: &AgentReport,
-    commit: &str,
+    committed: &Committed<AgentReport>,
 ) {
+    let report = &committed.value;
     match output_format {
         OutputFormat::Json => {
             let mut value = agent_report_json(report);
-            value["commit"] = serde_json::json!(commit);
+            value["commit"] = serde_json::json!(committed.commit);
             println!("{value}");
         }
         OutputFormat::HumanReadable => {
             print_agent_report_human("Created agent", report);
-            println!("Commit: {commit}");
+            println!("Commit: {}", committed.commit);
         }
     }
 }
 
-pub(crate) fn create_agent(waap_root: &Path, name: Option<&str>) -> io::Result<AgentReport> {
+pub(crate) fn create_agent(
+    waap_root: &Path,
+    name: Option<&str>,
+) -> MutationResult<Committed<AgentReport>> {
     let mut markdown = String::new();
     io::stdin()
         .read_to_string(&mut markdown)
         .map_err(|error| io::Error::new(error.kind(), format!("failed to read stdin: {error}")))?;
 
-    create_agent_with_markdown(waap_root, name, &markdown)
+    let report = create_agent_with_markdown(waap_root, name, &markdown)?;
+    let commit = commit_paths(
+        waap_root,
+        &[report.path.as_path()],
+        &format!("waap agent new {}", report.agent_id),
+    )
+    .map_err(MutationError::Commit)?;
+
+    Ok(Committed {
+        value: report,
+        commit,
+    })
 }
 
 pub(crate) fn create_agent_with_markdown(

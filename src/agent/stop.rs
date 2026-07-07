@@ -12,56 +12,87 @@ use crate::agent::{
     AgentReport, AgentStatus, AgentSystem,
 };
 use crate::cli::OutputFormat;
+use crate::git::commit_paths;
+use crate::mutation::{MutationError, MutationResult};
 use crate::record::{list_record_ids, WaapRecordKind};
 
-pub(crate) fn print_agent_stop_report(
-    output_format: &OutputFormat,
-    reports: &[AgentReport],
-    commit: Option<&str>,
-) {
+#[derive(Debug)]
+pub(crate) struct AgentStopReport {
+    pub(crate) stopped_agents: Vec<AgentReport>,
+    pub(crate) commit: Option<String>,
+}
+
+pub(crate) fn print_agent_stop_report(output_format: &OutputFormat, report: &AgentStopReport) {
     match output_format {
-        OutputFormat::Json => println!("{}", agent_stop_json(reports, commit)),
+        OutputFormat::Json => println!("{}", agent_stop_json(report)),
         OutputFormat::HumanReadable => {
-            for report in reports {
-                print_agent_report_human("Stopped agent", report);
+            for agent in &report.stopped_agents {
+                print_agent_report_human("Stopped agent", agent);
             }
-            if let Some(commit) = commit {
+            if let Some(commit) = &report.commit {
                 println!("Commit: {commit}");
             }
         }
     }
 }
 
-pub(crate) fn agent_stop_json(reports: &[AgentReport], commit: Option<&str>) -> serde_json::Value {
+pub(crate) fn agent_stop_json(report: &AgentStopReport) -> serde_json::Value {
     json!({
-        "stopped_agents": reports.iter().map(agent_report_json).collect::<Vec<_>>(),
-        "commit": commit,
+        "stopped_agents": report.stopped_agents.iter().map(agent_report_json).collect::<Vec<_>>(),
+        "commit": report.commit,
     })
 }
 
 pub(crate) fn stop_agents_with_systems(
     waap_root: &Path,
     agent_id: Option<&str>,
-) -> io::Result<Vec<AgentReport>> {
+) -> MutationResult<AgentStopReport> {
     let mut config = None;
     // The abort closure receives both `agent_id` and `session_id`: claude/opencode key their stop on
     // the `session_id`, while codex keys on the `agent_id` because `turn/interrupt` requires the live
     // JSON-RPC connection held only by the running `waap agent run` process, which is signalled by its
     // unique argv (see /specs/codex-agent-system.md §5).
-    stop_agents(
-        waap_root,
-        agent_id,
-        |system, agent_id, session_id| match system {
-            AgentSystem::Opencode => {
-                if config.is_none() {
-                    config = Some(opencode_run_config_from_env(waap_root)?);
+    let stopped_agents =
+        stop_agents(
+            waap_root,
+            agent_id,
+            |system, agent_id, session_id| match system {
+                AgentSystem::Opencode => {
+                    if config.is_none() {
+                        config = Some(opencode_run_config_from_env(waap_root)?);
+                    }
+                    abort_opencode_session(config.as_ref().expect("config initialized"), session_id)
                 }
-                abort_opencode_session(config.as_ref().expect("config initialized"), session_id)
-            }
-            AgentSystem::Claude => kill_claude_session(session_id),
-            AgentSystem::Codex => signal_codex_run(agent_id),
-        },
-    )
+                AgentSystem::Claude => kill_claude_session(session_id),
+                AgentSystem::Codex => signal_codex_run(agent_id),
+            },
+        )?;
+
+    let commit = if stopped_agents.is_empty() {
+        None
+    } else {
+        let paths: Vec<&Path> = stopped_agents
+            .iter()
+            .map(|report| report.path.as_path())
+            .collect();
+        let ids: Vec<&str> = stopped_agents
+            .iter()
+            .map(|report| report.agent_id.as_str())
+            .collect();
+        Some(
+            commit_paths(
+                waap_root,
+                &paths,
+                &format!("waap agent stop {}", ids.join(" ")),
+            )
+            .map_err(MutationError::Commit)?,
+        )
+    };
+
+    Ok(AgentStopReport {
+        stopped_agents,
+        commit,
+    })
 }
 
 pub(crate) fn stop_agents(
@@ -115,7 +146,7 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{agent_stop_json, stop_agents};
+    use super::{agent_stop_json, stop_agents, AgentStopReport};
     use crate::agent::get::load_agent_report;
     use crate::agent::{AgentMetadata, AgentReport, AgentSystem};
 
@@ -408,7 +439,10 @@ mod tests {
         }];
 
         assert_eq!(
-            agent_stop_json(&reports, Some("abc123")),
+            agent_stop_json(&AgentStopReport {
+                stopped_agents: reports,
+                commit: Some("abc123".to_string()),
+            }),
             json!({
                 "stopped_agents": [
                     {

@@ -68,9 +68,18 @@ fn ticket_new_then_update_each_create_one_commit() {
     let output = waap(
         dir.path(),
         "# Body\n",
-        &["ticket", "new", "--name", "My Task"],
+        &[
+            "--output-format",
+            "json",
+            "ticket",
+            "new",
+            "--name",
+            "My Task",
+        ],
     );
     assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["commit"], git(dir.path(), &["rev-parse", "HEAD"]));
     assert_eq!(commit_count(dir.path()), before + 1);
     assert_eq!(last_subject(dir.path()), "waap ticket new tt-my-task");
     assert!(last_commit_files(dir.path()).contains(".waap/tickets/tt-my-task/ticket.md"));
@@ -79,6 +88,8 @@ fn ticket_new_then_update_each_create_one_commit() {
         dir.path(),
         "",
         &[
+            "--output-format",
+            "json",
             "ticket",
             "update",
             "--ticket-id",
@@ -88,6 +99,8 @@ fn ticket_new_then_update_each_create_one_commit() {
         ],
     );
     assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["commit"], git(dir.path(), &["rev-parse", "HEAD"]));
     assert_eq!(commit_count(dir.path()), before + 2);
     assert_eq!(last_subject(dir.path()), "waap ticket update tt-my-task");
 }
@@ -121,6 +134,8 @@ fn agent_new_then_update_each_create_one_commit() {
         dir.path(),
         "",
         &[
+            "--output-format",
+            "json",
             "agent",
             "update",
             "--agent-id",
@@ -130,6 +145,8 @@ fn agent_new_then_update_each_create_one_commit() {
         ],
     );
     assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["commit"], git(dir.path(), &["rev-parse", "HEAD"]));
     assert_eq!(commit_count(dir.path()), before + 2);
     assert_eq!(
         last_subject(dir.path()),
@@ -206,9 +223,11 @@ fn failed_commit_returns_error_but_keeps_state() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("failed to commit waap state change"),
+        stderr.starts_with("failed to commit waap state change:"),
         "{stderr}"
     );
+    assert!(!stderr.contains("failed to create ticket"), "{stderr}");
+    assert!(output.stdout.is_empty());
     // State update is intact on disk despite the commit failure.
     assert!(dir.path().join(".waap/tickets/tt-task/ticket.md").is_file());
 }
@@ -260,6 +279,64 @@ fn agent_stop_without_running_agents_creates_no_commit() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(commit_count(dir.path()), before);
+}
+
+#[test]
+fn agent_stop_commits_and_reports_the_commit() {
+    let dir = tempdir().unwrap();
+    init_repo_with_waap_project(dir.path());
+
+    let output = waap(
+        dir.path(),
+        "# Purpose\n",
+        &["--output-format", "json", "agent", "new"],
+    );
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let agent_id = value["agent_id"].as_str().unwrap().to_string();
+
+    let output = waap(
+        dir.path(),
+        "",
+        &[
+            "agent",
+            "update",
+            "--agent-id",
+            &agent_id,
+            "--set-status",
+            "running",
+        ],
+    );
+    assert!(output.status.success());
+
+    let before = commit_count(dir.path());
+    let output = waap(
+        dir.path(),
+        "",
+        &[
+            "--output-format",
+            "json",
+            "agent",
+            "stop",
+            "--agent-id",
+            &agent_id,
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["commit"], git(dir.path(), &["rev-parse", "HEAD"]));
+    assert_eq!(value["stopped_agents"][0]["agent_id"], agent_id);
+    assert_eq!(value["stopped_agents"][0]["metadata"]["status"], "aborted");
+    assert_eq!(commit_count(dir.path()), before + 1);
+    assert_eq!(
+        last_subject(dir.path()),
+        format!("waap agent stop {agent_id}")
+    );
 }
 
 #[test]

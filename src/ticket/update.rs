@@ -3,6 +3,8 @@ use std::io;
 use std::path::Path;
 
 use crate::cli::OutputFormat;
+use crate::git::commit_paths;
+use crate::mutation::{Committed, MutationError, MutationResult};
 use crate::ticket::{
     is_ticket_id, print_ticket_report_human, read_ticket_record, ticket_path, ticket_report_json,
     write_ticket_record, TicketReport, TicketStatus,
@@ -10,23 +12,50 @@ use crate::ticket::{
 
 pub(crate) fn print_updated_ticket_report(
     output_format: &OutputFormat,
-    report: &TicketReport,
-    commit: &str,
+    committed: &Committed<TicketReport>,
 ) {
+    let report = &committed.value;
     match output_format {
         OutputFormat::Json => {
             let mut value = ticket_report_json(report);
-            value["commit"] = serde_json::json!(commit);
+            value["commit"] = serde_json::json!(committed.commit);
             println!("{value}");
         }
         OutputFormat::HumanReadable => {
             print_ticket_report_human("Updated ticket", report);
-            println!("Commit: {commit}");
+            println!("Commit: {}", committed.commit);
         }
     }
 }
 
 pub(crate) fn update_ticket(
+    waap_root: &Path,
+    ticket_id: &str,
+    set_status: Option<&TicketStatus>,
+    add_depends_on: &[String],
+    remove_depends_on: &[String],
+) -> MutationResult<Committed<TicketReport>> {
+    let report = update_ticket_record(
+        waap_root,
+        ticket_id,
+        set_status,
+        add_depends_on,
+        remove_depends_on,
+    )?;
+    let commit = commit_paths(
+        waap_root,
+        &[report.path.as_path()],
+        &format!("waap ticket update {}", report.ticket_id),
+    )
+    .map_err(MutationError::Commit)?;
+
+    Ok(Committed {
+        value: report,
+        commit,
+    })
+}
+
+fn update_ticket_record(
     waap_root: &Path,
     ticket_id: &str,
     set_status: Option<&TicketStatus>,
@@ -82,7 +111,8 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use crate::ticket::{ticket_report_json, update_ticket, TicketReport, TicketStatus};
+    use super::update_ticket_record;
+    use crate::ticket::{ticket_report_json, TicketReport, TicketStatus};
 
     fn write_file(path: &Path, contents: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -103,7 +133,7 @@ mod tests {
     fn ticket_update_reports_missing_ticket() {
         let dir = tempdir().unwrap();
 
-        let error = update_ticket(
+        let error = update_ticket_record(
             dir.path(),
             "tt-new-ticket",
             Some(&TicketStatus::Completed),
@@ -122,7 +152,7 @@ mod tests {
     fn ticket_update_rejects_invalid_ticket_id() {
         let dir = tempdir().unwrap();
 
-        let error = update_ticket(
+        let error = update_ticket_record(
             dir.path(),
             "new-ticket",
             Some(&TicketStatus::Completed),
@@ -147,7 +177,7 @@ mod tests {
             ),
         );
 
-        let report = update_ticket(
+        let report = update_ticket_record(
             dir.path(),
             "tt-new-ticket",
             Some(&TicketStatus::Completed),
@@ -203,7 +233,7 @@ mod tests {
         let dir = tempdir().unwrap();
         make_ticket(dir.path(), "tt-my-ticket", "");
 
-        let report = update_ticket(
+        let report = update_ticket_record(
             dir.path(),
             "tt-my-ticket",
             None,
@@ -227,7 +257,7 @@ mod tests {
             "depends_on = [\"tt-dep-a\", \"tt-dep-b\"]\n",
         );
 
-        let report = update_ticket(
+        let report = update_ticket_record(
             dir.path(),
             "tt-my-ticket",
             None,
@@ -244,7 +274,7 @@ mod tests {
         let dir = tempdir().unwrap();
         make_ticket(dir.path(), "tt-my-ticket", "depends_on = [\"tt-dep-a\"]\n");
 
-        let report = update_ticket(
+        let report = update_ticket_record(
             dir.path(),
             "tt-my-ticket",
             None,
@@ -261,7 +291,7 @@ mod tests {
         let dir = tempdir().unwrap();
         make_ticket(dir.path(), "tt-my-ticket", "depends_on = [\"tt-dep-a\"]\n");
 
-        let report = update_ticket(
+        let report = update_ticket_record(
             dir.path(),
             "tt-my-ticket",
             None,
@@ -278,7 +308,7 @@ mod tests {
         let dir = tempdir().unwrap();
         make_ticket(dir.path(), "tt-my-ticket", "");
 
-        let error = update_ticket(
+        let error = update_ticket_record(
             dir.path(),
             "tt-my-ticket",
             None,
@@ -296,7 +326,7 @@ mod tests {
         let dir = tempdir().unwrap();
         make_ticket(dir.path(), "tt-my-ticket", "");
 
-        let error = update_ticket(
+        let error = update_ticket_record(
             dir.path(),
             "tt-my-ticket",
             None,

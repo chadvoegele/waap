@@ -3,7 +3,9 @@ use std::io::{self, Read};
 use std::path::Path;
 
 use crate::cli::OutputFormat;
+use crate::git::commit_paths;
 use crate::ids::current_toml_datetime;
+use crate::mutation::{Committed, MutationError, MutationResult};
 use crate::record::{require_initialized_project, WaapRecordKind};
 use crate::ticket::{
     available_ticket_id, is_ticket_id, print_ticket_report_human, ticket_path, ticket_report_json,
@@ -12,18 +14,18 @@ use crate::ticket::{
 
 pub(crate) fn print_ticket_report(
     output_format: &OutputFormat,
-    report: &TicketReport,
-    commit: &str,
+    committed: &Committed<TicketReport>,
 ) {
+    let report = &committed.value;
     match output_format {
         OutputFormat::Json => {
             let mut value = ticket_report_json(report);
-            value["commit"] = serde_json::json!(commit);
+            value["commit"] = serde_json::json!(committed.commit);
             println!("{value}");
         }
         OutputFormat::HumanReadable => {
             print_ticket_report_human("Created ticket", report);
-            println!("Commit: {commit}");
+            println!("Commit: {}", committed.commit);
         }
     }
 }
@@ -32,13 +34,24 @@ pub(crate) fn create_ticket(
     waap_root: &Path,
     name: Option<&str>,
     depends_on: &[String],
-) -> io::Result<TicketReport> {
+) -> MutationResult<Committed<TicketReport>> {
     let mut markdown = String::new();
     io::stdin()
         .read_to_string(&mut markdown)
         .map_err(|error| io::Error::new(error.kind(), format!("failed to read stdin: {error}")))?;
 
-    create_ticket_with_markdown(waap_root, name, depends_on, &markdown)
+    let report = create_ticket_with_markdown(waap_root, name, depends_on, &markdown)?;
+    let commit = commit_paths(
+        waap_root,
+        &[report.path.as_path()],
+        &format!("waap ticket new {}", report.ticket_id),
+    )
+    .map_err(MutationError::Commit)?;
+
+    Ok(Committed {
+        value: report,
+        commit,
+    })
 }
 
 pub(crate) fn create_ticket_with_markdown(
