@@ -1,7 +1,8 @@
 +++
 name = "root-resolution-validation-retry"
 creation_date = 2026-07-07T14:40:15Z
-status = "ready"
+status = "running"
+system = "codex"
 +++
 
 # Purpose
