@@ -1,7 +1,8 @@
 +++
 name = "command-commit-output-refactor"
 creation_date = 2026-07-07T14:48:46Z
-status = "ready"
+status = "running"
+system = "codex"
 +++
 
 # Purpose
