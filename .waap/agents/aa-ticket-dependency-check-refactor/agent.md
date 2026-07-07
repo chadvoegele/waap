@@ -1,7 +1,8 @@
 +++
 name = "ticket-dependency-check-refactor"
 creation_date = 2026-07-07T14:54:24Z
-status = "ready"
+status = "running"
+system = "codex"
 +++
 
 # Purpose
