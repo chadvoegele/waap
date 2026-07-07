@@ -1,7 +1,8 @@
 +++
 name = "move-agent-frontmatter-check"
 creation_date = 2026-07-07T14:48:47Z
-status = "ready"
+status = "running"
+system = "codex"
 +++
 
 # Purpose
