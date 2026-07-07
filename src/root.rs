@@ -81,12 +81,13 @@ mod tests {
 
     /// A tempdir guaranteed to have no `.git` anywhere in its ancestry.
     ///
-    /// The default tempdir base (`/tmp`) is shared scratch space that can carry stray `.git`
-    /// directories left behind by unrelated tooling, which would falsely satisfy the git-root
-    /// walk in tests that assert "not inside a git repository". `/var/tmp` is a separate,
-    /// unrelated temp filesystem.
+    /// The default tempdir base (`/tmp`) can carry stray `.git` directories left by unrelated
+    /// tooling, which would falsely satisfy the git-root walk. `/dev/shm` is separate,
+    /// memory-backed scratch space outside the project's Git ancestry.
     fn tempdir_outside_any_git_repo() -> TempDir {
-        tempfile::Builder::new().tempdir_in("/var/tmp").unwrap()
+        tempfile::Builder::new()
+            .tempdir_in("/dev/shm")
+            .expect("failed to create git-isolated tempdir in /dev/shm")
     }
 
     #[test]
