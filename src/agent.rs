@@ -14,9 +14,12 @@ use crate::frontmatter::{
 use crate::ids::{available_record_id, is_record_id, toml_string};
 use crate::record::{markdown_body_after_frontmatter, WaapRecordKind};
 
+mod claude;
+mod codex;
 pub(crate) mod get;
 pub(crate) mod list;
 pub(crate) mod new;
+mod opencode;
 pub(crate) mod run;
 pub(crate) mod stop;
 pub(crate) mod update;

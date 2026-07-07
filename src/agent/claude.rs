@@ -6,19 +6,19 @@ use std::process::{Command as ProcessCommand, ExitStatus};
 use crate::process::run_forwarding;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct ClaudeRunConfig {
-    pub(crate) model: Option<String>,
-    pub(crate) waap_root: PathBuf,
+pub(super) struct ClaudeRunConfig {
+    model: Option<String>,
+    pub(super) waap_root: PathBuf,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct ClaudeRunCommand {
-    pub(crate) program: String,
-    pub(crate) args: Vec<String>,
-    pub(crate) working_dir: PathBuf,
+pub(super) struct ClaudeRunCommand {
+    program: String,
+    args: Vec<String>,
+    working_dir: PathBuf,
 }
 
-pub(crate) fn claude_run_config_from_env(waap_root: &Path) -> io::Result<ClaudeRunConfig> {
+pub(super) fn claude_run_config_from_env(waap_root: &Path) -> io::Result<ClaudeRunConfig> {
     Ok(ClaudeRunConfig {
         model: env::var("CLAUDE_MODEL")
             .ok()
@@ -27,7 +27,7 @@ pub(crate) fn claude_run_config_from_env(waap_root: &Path) -> io::Result<ClaudeR
     })
 }
 
-pub(crate) fn kill_claude_session(session_id: &str) -> io::Result<()> {
+pub(super) fn kill_claude_session(session_id: &str) -> io::Result<()> {
     let status = ProcessCommand::new("pkill")
         .arg("-TERM")
         .arg("-f")
@@ -44,7 +44,7 @@ pub(crate) fn kill_claude_session(session_id: &str) -> io::Result<()> {
 /// Run the Claude system in the foreground, forwarding its stdout and stderr to
 /// this process's stdout and stderr, and return its exit status. `on_started`
 /// runs once the process has been launched.
-pub(crate) fn run_claude_attached<F>(
+pub(super) fn run_claude_attached<F>(
     command: &ClaudeRunCommand,
     on_started: F,
 ) -> io::Result<ExitStatus>
@@ -58,7 +58,7 @@ where
     run_forwarding(&mut process, on_started)
 }
 
-pub(crate) fn build_claude_run_command(
+pub(super) fn build_claude_run_command(
     config: &ClaudeRunConfig,
     agent_id: &str,
     session_id: &str,

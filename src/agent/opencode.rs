@@ -8,21 +8,21 @@ use serde_json::{json, Value as JsonValue};
 use crate::process::run_forwarding;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct OpencodeRunConfig {
-    pub(crate) server_url: String,
-    pub(crate) username: String,
-    pub(crate) password: String,
-    pub(crate) model: String,
-    pub(crate) waap_root: PathBuf,
+pub(super) struct OpencodeRunConfig {
+    server_url: String,
+    username: String,
+    password: String,
+    model: String,
+    pub(super) waap_root: PathBuf,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct OpencodeRunCommand {
-    pub(crate) program: String,
-    pub(crate) args: Vec<String>,
+pub(super) struct OpencodeRunCommand {
+    program: String,
+    args: Vec<String>,
 }
 
-pub(crate) fn opencode_run_config_from_env(waap_root: &Path) -> io::Result<OpencodeRunConfig> {
+pub(super) fn opencode_run_config_from_env(waap_root: &Path) -> io::Result<OpencodeRunConfig> {
     Ok(OpencodeRunConfig {
         server_url: required_env("OPENCODE_SERVER_URL")?,
         username: required_env("OPENCODE_SERVER_USERNAME")?,
@@ -32,7 +32,7 @@ pub(crate) fn opencode_run_config_from_env(waap_root: &Path) -> io::Result<Openc
     })
 }
 
-pub(crate) fn required_env(name: &str) -> io::Result<String> {
+fn required_env(name: &str) -> io::Result<String> {
     env::var(name).map_err(|_| {
         io::Error::new(
             io::ErrorKind::NotFound,
@@ -44,7 +44,7 @@ pub(crate) fn required_env(name: &str) -> io::Result<String> {
 /// Run the OpenCode system in the foreground, forwarding its stdout and stderr
 /// to this process's stdout and stderr, and return its exit status.
 /// `on_started` runs once the process has been launched.
-pub(crate) fn run_opencode_attached<F>(
+pub(super) fn run_opencode_attached<F>(
     command: &OpencodeRunCommand,
     on_started: F,
 ) -> io::Result<ExitStatus>
@@ -56,7 +56,7 @@ where
     run_forwarding(&mut process, on_started)
 }
 
-pub(crate) fn create_opencode_session(config: &OpencodeRunConfig) -> io::Result<String> {
+pub(super) fn create_opencode_session(config: &OpencodeRunConfig) -> io::Result<String> {
     let response: JsonValue = reqwest::blocking::Client::new()
         .post(opencode_url(config, "/session"))
         .basic_auth(&config.username, Some(&config.password))
@@ -80,7 +80,7 @@ pub(crate) fn create_opencode_session(config: &OpencodeRunConfig) -> io::Result<
         })
 }
 
-pub(crate) fn abort_opencode_session(
+pub(super) fn abort_opencode_session(
     config: &OpencodeRunConfig,
     session_id: &str,
 ) -> io::Result<()> {
@@ -98,10 +98,10 @@ pub(crate) fn abort_opencode_session(
     Ok(())
 }
 
-pub(crate) fn opencode_http_error(error: reqwest::Error) -> io::Error {
+fn opencode_http_error(error: reqwest::Error) -> io::Error {
     io::Error::other(format!("opencode HTTP request failed: {error}"))
 }
-pub(crate) fn create_session_payload() -> JsonValue {
+fn create_session_payload() -> JsonValue {
     json!({
         "permission": [
             { "permission": "question", "action": "deny", "pattern": "*" },
@@ -111,11 +111,11 @@ pub(crate) fn create_session_payload() -> JsonValue {
     })
 }
 
-pub(crate) fn opencode_url(config: &OpencodeRunConfig, path: &str) -> String {
+fn opencode_url(config: &OpencodeRunConfig, path: &str) -> String {
     format!("{}{}", config.server_url.trim_end_matches('/'), path)
 }
 
-pub(crate) fn build_opencode_run_command(
+pub(super) fn build_opencode_run_command(
     config: &OpencodeRunConfig,
     agent_id: &str,
     session_id: &str,

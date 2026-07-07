@@ -47,9 +47,9 @@ and `labels` need no change (they iterate `value_variants()`), so frontmatter
 In `src/cli.rs`: no structural change — `--system` is a `value_enum` over
 `AgentSystem`.
 
-## 2. JSON-RPC app-server client (`src/codex.rs`)
+## 2. JSON-RPC app-server client (`src/agent/codex.rs`)
 
-Add `src/codex.rs` as the client to the app-server, over a spawned stdio child.
+Add `src/agent/codex.rs` as the client to the app-server, over a spawned stdio child.
 
 Spawn command (no prompt on the argv — the prompt is sent as turn input),
 launched with `current_dir = <worktree>`:

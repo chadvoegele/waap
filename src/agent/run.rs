@@ -4,18 +4,18 @@ use std::process::{ExitCode, ExitStatus};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use super::claude::{build_claude_run_command, claude_run_config_from_env, run_claude_attached};
+use super::codex::{codex_run_config_from_env, spawn_codex_app_server, TurnStatus};
+use super::opencode::{
+    build_opencode_run_command, create_opencode_session, opencode_run_config_from_env,
+    run_opencode_attached,
+};
 use crate::agent::{
     agent_report_json, load_agent_report, print_agent_report_human, read_agent_record,
     write_agent_record, AgentMetadata, AgentReport, AgentSystem,
 };
-use crate::claude::{build_claude_run_command, claude_run_config_from_env, run_claude_attached};
 use crate::cli::OutputFormat;
-use crate::codex::{codex_run_config_from_env, spawn_codex_app_server, TurnStatus};
 use crate::git::{commit_paths, create_agent_worktree, remove_agent_worktree};
-use crate::opencode::{
-    build_opencode_run_command, create_opencode_session, opencode_run_config_from_env,
-    run_opencode_attached,
-};
 use uuid::Uuid;
 
 pub(crate) fn print_run_agent_report(
@@ -365,9 +365,9 @@ mod tests {
     use super::{
         finalize_agent_run, finalize_codex_run, run_in_agent_worktree, update_codex_session,
     };
+    use crate::agent::codex::TurnStatus;
     use crate::agent::{agent_report_json, AgentMetadata, AgentReport};
     use crate::cli::OutputFormat;
-    use crate::codex::TurnStatus;
     use crate::git::{create_agent_worktree, remove_agent_worktree};
     use crate::test_git::{init_repo_with_commit, run as git};
 

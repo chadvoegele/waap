@@ -34,14 +34,14 @@ const APPROVAL_POLICY_NEVER: &str = "never";
 const SANDBOX_DANGER_FULL_ACCESS: &str = "danger-full-access";
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct CodexRunConfig {
-    pub(crate) model: Option<String>,
-    pub(crate) waap_root: PathBuf,
+pub(super) struct CodexRunConfig {
+    model: Option<String>,
+    pub(super) waap_root: PathBuf,
 }
 
 /// Read codex run configuration from the environment. Has no required vars, so
 /// it never fails for missing config (mirrors /specs/codex-agent-system.md §7).
-pub(crate) fn codex_run_config_from_env(waap_root: &Path) -> io::Result<CodexRunConfig> {
+pub(super) fn codex_run_config_from_env(waap_root: &Path) -> io::Result<CodexRunConfig> {
     Ok(CodexRunConfig {
         model: env::var("CODEX_MODEL")
             .ok()
@@ -57,7 +57,7 @@ pub(crate) fn codex_run_config_from_env(waap_root: &Path) -> io::Result<CodexRun
 /// (`nohup`/`setsid`) — see /specs/codex-agent-system.md §5. R's `SIGTERM`
 /// handler then issues a graceful `turn/interrupt`. Mirrors
 /// `kill_claude_session`'s pkill exit-code handling (0 or 1 ⇒ Ok).
-pub(crate) fn signal_codex_run(agent_id: &str) -> io::Result<()> {
+pub(super) fn signal_codex_run(agent_id: &str) -> io::Result<()> {
     let mut command = ProcessCommand::new("pkill");
     command
         .arg("-TERM")
@@ -80,7 +80,7 @@ fn map_pkill_status(mut command: ProcessCommand) -> io::Result<()> {
 
 /// Final state of a turn, mirroring `codex_app_server_protocol::v2::TurnStatus`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TurnStatus {
+pub(super) enum TurnStatus {
     Completed,
     Interrupted,
     Failed,
@@ -90,7 +90,7 @@ pub(crate) enum TurnStatus {
 impl TurnStatus {
     /// Completion logic the dependent run flow keys on: only `Completed` is a
     /// successful run.
-    pub(crate) fn is_success(self) -> bool {
+    pub(super) fn is_success(self) -> bool {
         matches!(self, TurnStatus::Completed)
     }
 
@@ -217,7 +217,7 @@ fn completed_status_for_turn(
 /// transport so tests can drive it with in-memory buffers without spawning a
 /// process (`reader`/`writer` are the child's stdout/stdin; `out` is waap's
 /// stdout, where streamed agent message deltas are forwarded).
-pub(crate) struct CodexClient<R, W, O> {
+pub(super) struct CodexClient<R, W, O> {
     reader: R,
     writer: W,
     out: O,
@@ -234,7 +234,7 @@ pub(crate) struct CodexClient<R, W, O> {
 /// Spawn `codex app-server --stdio` with piped stdin+stdout and a JSON-RPC
 /// client over it, running in `config.waap_root` (the worktree). No prompt on
 /// the argv — the prompt is sent as turn input.
-pub(crate) fn spawn_codex_app_server(
+pub(super) fn spawn_codex_app_server(
     config: &CodexRunConfig,
 ) -> io::Result<CodexClient<BufReader<ChildStdout>, ChildStdin, io::Stdout>> {
     let mut child = ProcessCommand::new("codex")
@@ -361,14 +361,14 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
 
     /// `initialize` handshake: send the request, wait for the response, then
     /// send the `initialized` notification.
-    pub(crate) fn initialize(&mut self) -> io::Result<()> {
+    pub(super) fn initialize(&mut self) -> io::Result<()> {
         self.send_request(METHOD_INITIALIZE, initialize_params())?;
         self.write_line(&notification_line(METHOD_INITIALIZED, None))
     }
 
     /// `thread/start` configured for never-prompt approvals and full sandbox
     /// access; returns the authentic `thread.id`.
-    pub(crate) fn thread_start(&mut self, cwd: &Path) -> io::Result<String> {
+    pub(super) fn thread_start(&mut self, cwd: &Path) -> io::Result<String> {
         let params = thread_start_params(cwd, self.model.as_deref());
         let result = self.send_request(METHOD_THREAD_START, params)?;
         result
@@ -384,7 +384,7 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
     }
 
     /// `turn/start` carrying `prompt` as text input; returns the `turn.id`.
-    pub(crate) fn turn_start(&mut self, thread_id: &str, prompt: &str) -> io::Result<String> {
+    pub(super) fn turn_start(&mut self, thread_id: &str, prompt: &str) -> io::Result<String> {
         let params = turn_start_params(thread_id, prompt, self.model.as_deref());
         let result = self.send_request(METHOD_TURN_START, params)?;
         result
@@ -400,7 +400,7 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
     }
 
     /// `turn/interrupt` for a graceful stop; the turn ends non-`Completed`.
-    pub(crate) fn turn_interrupt(&mut self, thread_id: &str, turn_id: &str) -> io::Result<()> {
+    fn turn_interrupt(&mut self, thread_id: &str, turn_id: &str) -> io::Result<()> {
         self.send_request(
             METHOD_TURN_INTERRUPT,
             turn_interrupt_params(thread_id, turn_id),
@@ -419,7 +419,7 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
     /// soon as the next inbound message unblocks the read — during an active turn
     /// codex streams notifications continuously, so the interrupt is prompt
     /// without needing to wake the blocking read from the signal handler.
-    pub(crate) fn pump_until_turn_completed(
+    pub(super) fn pump_until_turn_completed(
         &mut self,
         thread_id: &str,
         turn_id: &str,
