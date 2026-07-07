@@ -1,7 +1,7 @@
 +++
-title = "Root Resolution And Waap Validation"
+name = "Root Resolution And Waap Validation"
 creation_date = 2026-07-07T02:37:30Z
-status = "pending"
+status = "in-progress"
 +++
 
 # Goal
