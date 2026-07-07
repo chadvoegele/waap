@@ -82,6 +82,7 @@ pub(crate) fn create_ticket_with_markdown(
 
     let creation_date = current_toml_datetime();
     let metadata = TicketMetadata {
+        ticket_id: ticket_id.clone(),
         name: name.map(str::to_string),
         creation_date: creation_date.clone(),
         status: "pending".to_string(),

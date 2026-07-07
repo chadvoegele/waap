@@ -107,8 +107,7 @@ fn check_agent_frontmatter(path: &Path, errors: &mut Vec<String>) {
 
 pub(crate) fn check_tickets(tickets_dir: &Path, errors: &mut Vec<String>) {
     let entries = read_dir(tickets_dir, ".waap/tickets", errors);
-    let mut known_ids: HashSet<String> = HashSet::new();
-    let mut deps_map: HashMap<String, Vec<String>> = HashMap::new();
+    let mut tickets = Vec::new();
 
     for entry in entries {
         let path = entry.path();
@@ -120,9 +119,7 @@ pub(crate) fn check_tickets(tickets_dir: &Path, errors: &mut Vec<String>) {
             continue;
         }
 
-        if is_ticket_id(&name) {
-            known_ids.insert(name.clone());
-        } else {
+        if !is_ticket_id(&name) {
             errors.push(format!(
                 "{label} must be named as a ticket id like tt-list-tickets"
             ));
@@ -132,44 +129,60 @@ pub(crate) fn check_tickets(tickets_dir: &Path, errors: &mut Vec<String>) {
         if !ticket_file.is_file() {
             errors.push(format!("{label}/ticket.md is required"));
         } else if let Some(frontmatter) = parse_frontmatter(&ticket_file, errors) {
-            match TicketMetadata::from_frontmatter(&frontmatter, &ticket_file) {
-                Ok(metadata) => {
-                    if let Some(deps) = metadata.depends_on {
-                        deps_map.insert(name.clone(), deps);
-                    }
-                }
+            match TicketMetadata::from_frontmatter(&frontmatter, &ticket_file, &name) {
+                Ok(metadata) => tickets.push(metadata),
                 Err(mut frontmatter_errors) => errors.append(&mut frontmatter_errors),
             }
         }
     }
 
-    check_ticket_dependencies(&known_ids, &deps_map, errors);
+    check_ticket_dependencies(&tickets, errors);
 }
 
-fn check_ticket_dependencies(
-    known_ids: &HashSet<String>,
-    deps_map: &HashMap<String, Vec<String>>,
-    errors: &mut Vec<String>,
-) {
-    for (ticket_id, deps) in deps_map {
-        for dep in deps {
-            if !known_ids.contains(dep) {
+fn check_ticket_dependencies(tickets: &[TicketMetadata], errors: &mut Vec<String>) {
+    check_dependencies_exist(tickets, errors);
+    check_cycles(tickets, errors);
+}
+
+fn check_dependencies_exist(tickets: &[TicketMetadata], errors: &mut Vec<String>) {
+    let known_ids: HashSet<&str> = tickets
+        .iter()
+        .map(|ticket| ticket.ticket_id.as_str())
+        .collect();
+
+    for ticket in tickets {
+        for dep in ticket.depends_on.iter().flatten() {
+            if !known_ids.contains(dep.as_str()) {
                 errors.push(format!(
-                    ".waap/tickets/{ticket_id}/ticket.md depends_on {dep:?} which does not exist"
+                    ".waap/tickets/{}/ticket.md depends_on {dep:?} which does not exist",
+                    ticket.ticket_id
                 ));
             }
         }
     }
+}
+
+fn check_cycles(tickets: &[TicketMetadata], errors: &mut Vec<String>) {
+    let deps_map: HashMap<&str, &[String]> = tickets
+        .iter()
+        .filter_map(|ticket| {
+            ticket
+                .depends_on
+                .as_deref()
+                .map(|deps| (ticket.ticket_id.as_str(), deps))
+        })
+        .collect();
 
     let mut visited: HashSet<String> = HashSet::new();
     let mut in_stack: HashSet<String> = HashSet::new();
 
-    for ticket_id in known_ids {
+    for ticket in tickets {
+        let ticket_id = &ticket.ticket_id;
         if !visited.contains(ticket_id) {
             let mut path = Vec::new();
             detect_cycle(
                 ticket_id,
-                deps_map,
+                &deps_map,
                 &mut visited,
                 &mut in_stack,
                 &mut path,
@@ -181,7 +194,7 @@ fn check_ticket_dependencies(
 
 fn detect_cycle(
     id: &str,
-    deps_map: &HashMap<String, Vec<String>>,
+    deps_map: &HashMap<&str, &[String]>,
     visited: &mut HashSet<String>,
     in_stack: &mut HashSet<String>,
     path: &mut Vec<String>,
@@ -192,7 +205,7 @@ fn detect_cycle(
     path.push(id.to_string());
 
     if let Some(deps) = deps_map.get(id) {
-        for dep in deps {
+        for dep in *deps {
             if !visited.contains(dep.as_str()) {
                 detect_cycle(dep, deps_map, visited, in_stack, path, errors);
             } else if in_stack.contains(dep.as_str()) {

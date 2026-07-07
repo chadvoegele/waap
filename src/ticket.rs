@@ -25,6 +25,7 @@ pub(crate) use new::{create_ticket, print_ticket_report};
 pub(crate) use update::{print_updated_ticket_report, update_ticket};
 
 pub(crate) struct TicketMetadata {
+    pub(crate) ticket_id: String,
     pub(crate) name: Option<String>,
     pub(crate) creation_date: String,
     pub(crate) status: String,
@@ -32,7 +33,11 @@ pub(crate) struct TicketMetadata {
 }
 
 impl TicketMetadata {
-    pub(crate) fn from_frontmatter(value: &Value, path: &Path) -> Result<Self, Vec<String>> {
+    pub(crate) fn from_frontmatter(
+        value: &Value,
+        path: &Path,
+        ticket_id: &str,
+    ) -> Result<Self, Vec<String>> {
         let mut errors = Vec::new();
         reject_unknown_fields(
             value,
@@ -78,6 +83,7 @@ impl TicketMetadata {
             })
             .filter(|v| !v.is_empty());
         Ok(Self {
+            ticket_id: ticket_id.to_string(),
             name: value
                 .get("name")
                 .or_else(|| value.get("title"))
@@ -125,7 +131,7 @@ pub(crate) fn load_ticket_metadata(
     let Some(value) = parse_frontmatter_from_contents(&contents, &path, &mut errors) else {
         return Err(invalid_frontmatter_error(errors));
     };
-    TicketMetadata::from_frontmatter(&value, &path).map_err(invalid_frontmatter_error)
+    TicketMetadata::from_frontmatter(&value, &path, ticket_id).map_err(invalid_frontmatter_error)
 }
 
 pub(crate) fn read_ticket_record(
@@ -138,8 +144,8 @@ pub(crate) fn read_ticket_record(
     let Some(value) = parse_frontmatter_from_contents(&contents, &path, &mut errors) else {
         return Err(invalid_frontmatter_error(errors));
     };
-    let metadata =
-        TicketMetadata::from_frontmatter(&value, &path).map_err(invalid_frontmatter_error)?;
+    let metadata = TicketMetadata::from_frontmatter(&value, &path, ticket_id)
+        .map_err(invalid_frontmatter_error)?;
     let body = markdown_body_after_frontmatter(&contents)?;
     Ok((metadata, body))
 }
@@ -267,7 +273,8 @@ mod tests {
         let toml = "title = \"Test\"\ncreation_date = 2026-06-22T12:00:00Z\nstatus = \"pending\"\ndepends_on = [\"tt-dep-a\", \"tt-dep-b\"]\n";
         let value: Value = toml.parse().unwrap();
 
-        let metadata = TicketMetadata::from_frontmatter(&value, path).unwrap();
+        let metadata = TicketMetadata::from_frontmatter(&value, path, "tt-test").unwrap();
+        assert_eq!(metadata.ticket_id, "tt-test");
         assert_eq!(metadata.name.as_deref(), Some("Test"));
         assert_eq!(
             metadata.depends_on,
@@ -276,6 +283,7 @@ mod tests {
 
         let lines = metadata.to_frontmatter_lines();
         assert!(lines.starts_with("name = \"Test\"\n"));
+        assert!(!lines.contains("ticket_id"));
         assert!(!lines.contains("title ="));
         assert!(lines.contains("depends_on = [\"tt-dep-a\", \"tt-dep-b\"]"));
     }
@@ -286,7 +294,7 @@ mod tests {
         let toml = "name = \"Test\"\ncreation_date = 2026-06-22T12:00:00Z\nstatus = \"pending\"\n";
         let value: Value = toml.parse().unwrap();
 
-        let metadata = TicketMetadata::from_frontmatter(&value, path).unwrap();
+        let metadata = TicketMetadata::from_frontmatter(&value, path, "tt-test").unwrap();
 
         assert_eq!(metadata.name.as_deref(), Some("Test"));
         assert!(metadata
@@ -300,7 +308,7 @@ mod tests {
         let toml = "title = \"Test\"\ncreation_date = 2026-06-22T12:00:00Z\nstatus = \"pending\"\n";
         let value: Value = toml.parse().unwrap();
 
-        let metadata = TicketMetadata::from_frontmatter(&value, path).unwrap();
+        let metadata = TicketMetadata::from_frontmatter(&value, path, "tt-test").unwrap();
         assert_eq!(metadata.depends_on, None);
         assert!(!metadata.to_frontmatter_lines().contains("depends_on"));
     }
@@ -311,7 +319,7 @@ mod tests {
         let toml = "title = \"Test\"\ncreation_date = 2026-06-22T12:00:00Z\nstatus = \"pending\"\ndepends_on = []\n";
         let value: Value = toml.parse().unwrap();
 
-        let metadata = TicketMetadata::from_frontmatter(&value, path).unwrap();
+        let metadata = TicketMetadata::from_frontmatter(&value, path, "tt-test").unwrap();
         assert_eq!(metadata.depends_on, None);
         assert!(!metadata.to_frontmatter_lines().contains("depends_on"));
     }
@@ -322,7 +330,7 @@ mod tests {
         let toml = "title = \"Test\"\ncreation_date = 2026-06-22T12:00:00Z\nstatus = \"pending\"\ndepends_on = \"tt-dep-a\"\n";
         let value: Value = toml.parse().unwrap();
 
-        let errors = TicketMetadata::from_frontmatter(&value, path)
+        let errors = TicketMetadata::from_frontmatter(&value, path, "tt-test")
             .err()
             .unwrap();
         assert!(errors
@@ -336,7 +344,7 @@ mod tests {
         let toml = "title = \"Test\"\ncreation_date = 2026-06-22T12:00:00Z\nstatus = \"pending\"\ndependencies = [\"tt-dep-a\"]\n";
         let value: Value = toml.parse().unwrap();
 
-        let errors = TicketMetadata::from_frontmatter(&value, path)
+        let errors = TicketMetadata::from_frontmatter(&value, path, "tt-test")
             .err()
             .unwrap();
         assert!(errors
