@@ -1,7 +1,7 @@
 +++
 name = "Refactor ticket dependency checks around parsed metadata"
 creation_date = 2026-07-07T11:59:59Z
-status = "pending"
+status = "in-progress"
 depends_on = ["tt-move-agent-frontmatter-check-into-check-module"]
 +++
 
