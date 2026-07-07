@@ -1,7 +1,7 @@
 +++
 name = "Move agent system adapters under src/agent"
 creation_date = 2026-07-07T10:50:29Z
-status = "pending"
+status = "in-progress"
 +++
 
 # Goal
