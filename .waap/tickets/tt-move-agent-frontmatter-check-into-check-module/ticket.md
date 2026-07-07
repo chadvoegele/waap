@@ -2,6 +2,7 @@
 name = "Move agent frontmatter check into check module"
 creation_date = 2026-07-07T10:53:08Z
 status = "pending"
+depends_on = ["tt-root-resolution-and-waap-validation"]
 +++
 
 # Goal
