@@ -7,7 +7,7 @@ use serde_json::json;
 use toml::Value;
 
 use crate::frontmatter::{
-    datetime_string, invalid_frontmatter_error, parse_frontmatter, parse_frontmatter_from_contents,
+    datetime_string, invalid_frontmatter_error, parse_frontmatter_from_contents,
     reject_unknown_fields, require_datetime, require_optional_string,
     require_optional_string_choice, require_string_choice, serialize_record,
 };
@@ -173,15 +173,6 @@ pub(crate) fn write_agent_record(
     }
     let contents = serialize_record(&metadata.to_frontmatter_lines(), body);
     fs::write(path, contents)
-}
-
-pub(crate) fn check_agent_frontmatter(path: &Path, errors: &mut Vec<String>) {
-    let Some(frontmatter) = parse_frontmatter(path, errors) else {
-        return;
-    };
-    if let Err(mut frontmatter_errors) = AgentMetadata::from_frontmatter(&frontmatter, path) {
-        errors.append(&mut frontmatter_errors);
-    }
 }
 
 #[derive(Debug, PartialEq, Eq)]

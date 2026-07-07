@@ -4,8 +4,7 @@ use std::path::Path;
 
 use serde_json::json;
 
-use crate::agent::check_agent_frontmatter;
-use crate::agent::is_agent_id;
+use crate::agent::{is_agent_id, AgentMetadata};
 use crate::cli::OutputFormat;
 use crate::frontmatter::parse_frontmatter;
 use crate::ticket::{is_ticket_id, TicketMetadata};
@@ -94,6 +93,15 @@ pub(crate) fn check_agents(agents_dir: &Path, errors: &mut Vec<String>) {
         } else {
             check_agent_frontmatter(&agent_file, errors);
         }
+    }
+}
+
+fn check_agent_frontmatter(path: &Path, errors: &mut Vec<String>) {
+    let Some(frontmatter) = parse_frontmatter(path, errors) else {
+        return;
+    };
+    if let Err(mut frontmatter_errors) = AgentMetadata::from_frontmatter(&frontmatter, path) {
+        errors.append(&mut frontmatter_errors);
     }
 }
 
