@@ -35,9 +35,9 @@ pub(crate) fn print_ticket_list(output_format: &OutputFormat, entries: &[TicketL
     }
 }
 
-const TICKET_ID_HEADER: &str = "TICKET ID";
-const STATUS_HEADER: &str = "STATUS";
-const STATE_HEADER: &str = "STATE";
+const TICKET_ID_HEADER: &str = "Ticket ID";
+const STATUS_HEADER: &str = "Status";
+const STATE_HEADER: &str = "State";
 
 fn ticket_list_human_lines(entries: &[TicketListEntry]) -> Vec<String> {
     if entries.is_empty() {
@@ -53,14 +53,28 @@ fn ticket_list_human_lines(entries: &[TicketListEntry]) -> Vec<String> {
         .max()
         .unwrap_or(0)
         .max(TICKET_ID_HEADER.len());
+    let status_width = entries
+        .iter()
+        .map(|entry| entry.report.status.len())
+        .max()
+        .unwrap_or(0)
+        .max(STATUS_HEADER.len());
 
     let header = if has_state_column {
-        format!("{TICKET_ID_HEADER:id_width$}  {STATUS_HEADER}  {STATE_HEADER}")
+        format!("{TICKET_ID_HEADER:id_width$}  {STATUS_HEADER:status_width$}  {STATE_HEADER}")
     } else {
         format!("{TICKET_ID_HEADER:id_width$}  {STATUS_HEADER}")
     };
+    let id_separator = "-".repeat(TICKET_ID_HEADER.len());
+    let status_separator = "-".repeat(STATUS_HEADER.len());
+    let state_separator = "-".repeat(STATE_HEADER.len());
+    let separator = if has_state_column {
+        format!("{id_separator:id_width$}  {status_separator:status_width$}  {state_separator}")
+    } else {
+        format!("{id_separator:id_width$}  {status_separator}")
+    };
 
-    let mut lines = vec![header];
+    let mut lines = vec![header, separator];
     lines.extend(entries.iter().map(|entry| {
         let id = &entry.report.ticket_id;
         let status = &entry.report.status;
@@ -70,7 +84,7 @@ fn ticket_list_human_lines(entries: &[TicketListEntry]) -> Vec<String> {
             } else {
                 "[unblocked]"
             };
-            format!("{id:id_width$}  {status}  {state}")
+            format!("{id:id_width$}  {status:status_width$}  {state}")
         } else {
             format!("{id:id_width$}  {status}")
         }
@@ -320,13 +334,27 @@ status = \"ready\"
                 },
                 blocked: true,
             },
+            TicketListEntry {
+                report: TicketReport {
+                    ticket_id: "tt-ready".to_string(),
+                    path: PathBuf::from(".waap/tickets/tt-ready/ticket.md"),
+                    name: Some("Ready".to_string()),
+                    creation_date: "2026-06-22T12:00:00Z".to_string(),
+                    status: "completed".to_string(),
+                    depends_on: Some(vec!["tt-one".to_string()]),
+                    file_size: 789,
+                },
+                blocked: false,
+            },
         ];
 
         let lines = ticket_list_human_lines(&entries);
 
-        assert_eq!(lines[0], "TICKET ID   STATUS  STATE");
-        assert_eq!(lines[1], "tt-one      completed");
-        assert_eq!(lines[2], "tt-feature  pending  [blocked]");
+        assert_eq!(lines[0], "Ticket ID   Status     State");
+        assert_eq!(lines[1], "---------   ------     -----");
+        assert_eq!(lines[2], "tt-one      completed");
+        assert_eq!(lines[3], "tt-feature  pending    [blocked]");
+        assert_eq!(lines[4], "tt-ready    completed  [unblocked]");
     }
 
     #[test]
@@ -346,8 +374,9 @@ status = \"ready\"
 
         let lines = ticket_list_human_lines(&entries);
 
-        assert_eq!(lines[0], "TICKET ID  STATUS");
-        assert_eq!(lines[1], "tt-one     completed");
+        assert_eq!(lines[0], "Ticket ID  Status");
+        assert_eq!(lines[1], "---------  ------");
+        assert_eq!(lines[2], "tt-one     completed");
     }
 
     #[test]
@@ -367,8 +396,9 @@ status = \"ready\"
 
         let lines = ticket_list_human_lines(&entries);
 
-        assert_eq!(lines[0], "TICKET ID  STATUS");
-        assert_eq!(lines[1], "tt         pending");
+        assert_eq!(lines[0], "Ticket ID  Status");
+        assert_eq!(lines[1], "---------  ------");
+        assert_eq!(lines[2], "tt         pending");
     }
 
     #[test]
