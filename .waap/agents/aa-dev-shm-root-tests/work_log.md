@@ -9,3 +9,5 @@
 - Confirmed all 15 `root::tests` pass.
 - Passed `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, debug and release
   builds, and the full test suite (221 unit and 19 integration tests).
+- Rebased onto the latest `main`, fast-forward merged, and repeated all required validations on
+  the merged tree; all passed. Marked the ticket completed.
