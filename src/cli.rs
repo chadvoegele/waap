@@ -9,6 +9,10 @@ use crate::ticket::TicketStatus;
 #[command(name = "waap")]
 #[command(about = "Waap Agent Automation Platform")]
 pub(crate) struct Cli {
+    /// Enable debug logging.
+    #[arg(short, long, global = true)]
+    pub(crate) verbose: bool,
+
     #[arg(long, value_enum, default_value = "human-readable", global = true)]
     pub(crate) output_format: OutputFormat,
 
@@ -155,6 +159,18 @@ mod tests {
     fn waap_root_defaults_to_none() {
         let cli = Cli::try_parse_from(["waap", "check"]).unwrap();
         assert_eq!(cli.waap_root, None);
+    }
+
+    #[test]
+    fn parses_global_verbose_flag() {
+        let cli = Cli::try_parse_from(["waap", "check", "-v"]).unwrap();
+        assert!(cli.verbose);
+    }
+
+    #[test]
+    fn verbose_defaults_to_false() {
+        let cli = Cli::try_parse_from(["waap", "check"]).unwrap();
+        assert!(!cli.verbose);
     }
 
     #[test]

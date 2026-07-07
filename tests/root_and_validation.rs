@@ -10,10 +10,18 @@ use tempfile::tempdir;
 use common::{init_repo, isolate_git_config};
 
 fn waap(cwd: &Path, stdin: &str, args: &[&str]) -> Output {
+    waap_with_log_level(cwd, stdin, args, None)
+}
+
+fn waap_with_log_level(cwd: &Path, stdin: &str, args: &[&str], log_level: Option<&str>) -> Output {
     use std::io::Write;
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_waap"));
     isolate_git_config(&mut command);
+    command.env_remove("WAAP_LOG_LEVEL");
+    if let Some(log_level) = log_level {
+        command.env("WAAP_LOG_LEVEL", log_level);
+    }
     let mut child = command
         .current_dir(cwd)
         .args(args)
@@ -37,6 +45,51 @@ fn stdout(output: &Output) -> String {
 
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn verbose_logs_resolved_root() {
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+    assert!(waap(dir.path(), "", &["init"]).status.success());
+
+    let output = waap(dir.path(), "", &["--verbose", "check"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stderr(&output).contains(&format!(
+        "resolved waap root: {}",
+        dir.path().canonicalize().unwrap().display()
+    )));
+}
+
+#[test]
+fn waap_log_level_enables_debug_logging() {
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+    assert!(waap(dir.path(), "", &["init"]).status.success());
+
+    let output = waap_with_log_level(dir.path(), "", &["check"], Some("debug"));
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stderr(&output).contains("resolved waap root:"));
+}
+
+#[test]
+fn verbose_overrides_log_level_and_preserves_json_stdout() {
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+    assert!(waap(dir.path(), "", &["init"]).status.success());
+
+    let output = waap_with_log_level(
+        dir.path(),
+        "",
+        &["--verbose", "--output-format", "json", "check"],
+        Some("off"),
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stderr(&output).contains("resolved waap root:"));
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
 }
 
 #[test]

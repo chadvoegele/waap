@@ -2,6 +2,8 @@ use std::env;
 use std::process::ExitCode;
 
 use clap::Parser;
+use env_logger::{Builder, Env, Target};
+use log::LevelFilter;
 
 use crate::agent::{
     create_agent, list_agents, load_agent_content, print_agent_content_report, print_agent_list,
@@ -28,8 +30,20 @@ fn mutation_error(context: &str, error: MutationError) -> ExitCode {
     ExitCode::from(1)
 }
 
+fn init_logging(verbose: bool) {
+    let mut builder = if verbose {
+        let mut builder = Builder::new();
+        builder.filter_level(LevelFilter::Debug);
+        builder
+    } else {
+        Builder::from_env(Env::new().filter_or("WAAP_LOG_LEVEL", "error"))
+    };
+    builder.target(Target::Stderr).init();
+}
+
 pub(crate) fn run() -> ExitCode {
     let cli = Cli::parse();
+    init_logging(cli.verbose);
 
     let cwd = match env::current_dir() {
         Ok(dir) => dir,
@@ -45,6 +59,7 @@ pub(crate) fn run() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    log::debug!("resolved waap root: {}", waap_root.display());
     let waap_root = &waap_root;
 
     if matches!(&cli.command, Command::Agent { .. } | Command::Ticket { .. }) {
