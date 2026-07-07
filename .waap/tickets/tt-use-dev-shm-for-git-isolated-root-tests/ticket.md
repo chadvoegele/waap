@@ -1,7 +1,7 @@
 +++
 name = "Use dev shm for git-isolated root tests"
 creation_date = 2026-07-07T12:12:15Z
-status = "in-progress"
+status = "completed"
 depends_on = ["tt-root-resolution-and-waap-validation"]
 +++
 
