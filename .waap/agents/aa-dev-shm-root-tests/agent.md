@@ -1,7 +1,8 @@
 +++
 name = "dev-shm-root-tests"
 creation_date = 2026-07-07T14:48:49Z
-status = "ready"
+status = "running"
+system = "codex"
 +++
 
 # Purpose
