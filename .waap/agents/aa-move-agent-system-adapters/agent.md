@@ -1,7 +1,8 @@
 +++
 name = "move-agent-system-adapters"
 creation_date = 2026-07-07T14:38:13Z
-status = "ready"
+status = "running"
+system = "codex"
 +++
 
 # Purpose
