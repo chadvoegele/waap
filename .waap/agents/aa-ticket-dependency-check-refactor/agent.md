@@ -1,7 +1,7 @@
 +++
 name = "ticket-dependency-check-refactor"
 creation_date = 2026-07-07T14:54:24Z
-status = "running"
+status = "completed"
 session_id = "019f3d12-d8f2-7601-82cc-b3b7d093b8e1"
 system = "codex"
 +++
