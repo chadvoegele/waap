@@ -1,7 +1,7 @@
 +++
 name = "Add global verbose logging mode"
 creation_date = 2026-07-07T10:40:18Z
-status = "pending"
+status = "in-progress"
 depends_on = ["tt-root-resolution-and-waap-validation", "tt-move-command-commit-and-success-printing-out-of-app-dispatch"]
 +++
 
