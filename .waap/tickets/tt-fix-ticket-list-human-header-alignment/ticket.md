@@ -1,7 +1,7 @@
 +++
 name = "Fix ticket list human header alignment"
 creation_date = 2026-07-07T10:57:20Z
-status = "in-progress"
+status = "completed"
 +++
 
 # Goal
