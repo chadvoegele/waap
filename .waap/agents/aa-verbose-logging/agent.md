@@ -1,7 +1,8 @@
 +++
 name = "verbose-logging"
 creation_date = 2026-07-07T14:58:45Z
-status = "ready"
+status = "running"
+system = "codex"
 +++
 
 # Purpose
