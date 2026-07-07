@@ -1,7 +1,7 @@
 +++
 name = "move-agent-system-adapters"
 creation_date = 2026-07-07T14:38:13Z
-status = "running"
+status = "completed"
 session_id = "019f3d04-122c-7f30-bbd1-ed6557eccf26"
 system = "codex"
 +++
