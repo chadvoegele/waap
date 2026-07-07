@@ -1,7 +1,7 @@
 +++
 name = "move-agent-frontmatter-check"
 creation_date = 2026-07-07T14:48:47Z
-status = "running"
+status = "completed"
 session_id = "019f3d0d-c2b8-72a3-bd55-d84095cea0f2"
 system = "codex"
 +++
