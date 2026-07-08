@@ -1,7 +1,7 @@
 +++
 name = "generalize-git-worktree-helpers"
 creation_date = 2026-07-08T13:34:04Z
-status = "running"
+status = "completed"
 session_id = "019f41ef-9a08-7ee3-9af9-99e779b5a5e5"
 system = "codex"
 +++
