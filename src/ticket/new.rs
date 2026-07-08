@@ -4,12 +4,12 @@ use std::path::Path;
 
 use crate::cli::OutputFormat;
 use crate::git::{commit_paths, Committed};
-use crate::ids::current_toml_datetime;
 use crate::record::{require_initialized_project, WaapRecordKind};
 use crate::ticket::{
     available_ticket_id, is_ticket_id, print_ticket_report_human, ticket_path, ticket_report_json,
     write_ticket_record, TicketMetadata, TicketReport,
 };
+use crate::toml::current_toml_datetime;
 
 pub(crate) fn print_ticket_report(
     output_format: &OutputFormat,

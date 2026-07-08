@@ -2,17 +2,18 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use ::toml::Value;
 use clap::ValueEnum;
 use serde_json::json;
-use toml::Value;
 
 use crate::frontmatter::{
-    datetime_string, invalid_frontmatter_error, parse_frontmatter_from_contents,
-    reject_unknown_fields, require_datetime, require_optional_string,
-    require_optional_string_choice, require_string_choice, serialize_record,
+    invalid_frontmatter_error, parse_frontmatter_from_contents, reject_unknown_fields,
+    require_datetime, require_optional_string, require_optional_string_choice,
+    require_string_choice, serialize_record,
 };
-use crate::ids::{available_record_id, is_record_id, toml_string};
+use crate::ids::{available_record_id, is_record_id};
 use crate::record::{markdown_body_after_frontmatter, WaapRecordKind};
+use crate::toml::{datetime_string, toml_string};
 
 mod claude;
 mod codex;
@@ -312,7 +313,7 @@ mod tests {
     fn agent_metadata_unknown_field_is_error() {
         let path = PathBuf::from("agent.md");
         let toml = "creation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"ready\"\nworktree = \"some/path\"\n";
-        let value: toml::Value = toml.parse().unwrap();
+        let value: ::toml::Value = toml.parse().unwrap();
 
         let errors = AgentMetadata::from_frontmatter(&value, &path)
             .err()
@@ -324,7 +325,7 @@ mod tests {
     fn agent_metadata_known_fields_pass() {
         let path = PathBuf::from("agent.md");
         let toml = "name = \"Developer\"\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"ready\"\nsession_id = \"ses_1\"\nsystem = \"claude\"\n";
-        let value: toml::Value = toml.parse().unwrap();
+        let value: ::toml::Value = toml.parse().unwrap();
 
         let metadata = AgentMetadata::from_frontmatter(&value, &path).unwrap();
         assert_eq!(metadata.name.as_deref(), Some("Developer"));
@@ -337,7 +338,7 @@ mod tests {
     fn agent_metadata_system_codex_passes() {
         let path = PathBuf::from("agent.md");
         let toml = "creation_date = 2026-06-18T15:00:34Z\nstatus = \"ready\"\nsystem = \"codex\"\n";
-        let value: toml::Value = toml.parse().unwrap();
+        let value: ::toml::Value = toml.parse().unwrap();
 
         assert!(AgentMetadata::from_frontmatter(&value, &path).is_ok());
     }

@@ -2,7 +2,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use toml::Value;
+use ::toml::Value;
 
 pub(crate) fn serialize_record(frontmatter_lines: &str, body: &str) -> String {
     format!("+++\n{frontmatter_lines}+++\n{body}")
@@ -10,13 +10,6 @@ pub(crate) fn serialize_record(frontmatter_lines: &str, body: &str) -> String {
 
 pub(crate) fn invalid_frontmatter_error(errors: Vec<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, errors.join("; "))
-}
-
-pub(crate) fn datetime_string(frontmatter: &Value, key: &str) -> String {
-    match frontmatter.get(key).expect("validated datetime") {
-        Value::Datetime(datetime) => datetime.to_string(),
-        _ => unreachable!("validated datetime"),
-    }
 }
 
 pub(crate) fn parse_frontmatter(path: &Path, errors: &mut Vec<String>) -> Option<Value> {

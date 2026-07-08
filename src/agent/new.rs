@@ -8,8 +8,8 @@ use crate::agent::{
 };
 use crate::cli::OutputFormat;
 use crate::git::{commit_paths, Committed};
-use crate::ids::current_toml_datetime;
 use crate::record::{require_initialized_project, WaapRecordKind};
+use crate::toml::current_toml_datetime;
 
 pub(crate) fn print_created_agent_report(
     output_format: &OutputFormat,

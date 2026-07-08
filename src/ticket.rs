@@ -2,17 +2,18 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use ::toml::Value;
 use clap::ValueEnum;
 use serde_json::json;
-use toml::Value;
 
 use crate::frontmatter::{
-    datetime_string, invalid_frontmatter_error, parse_frontmatter_from_contents,
-    reject_unknown_fields, require_datetime, require_optional_string,
-    require_optional_string_array, require_string_choice, serialize_record,
+    invalid_frontmatter_error, parse_frontmatter_from_contents, reject_unknown_fields,
+    require_datetime, require_optional_string, require_optional_string_array,
+    require_string_choice, serialize_record,
 };
-use crate::ids::{available_record_id, is_record_id, toml_string};
+use crate::ids::{available_record_id, is_record_id};
 use crate::record::{markdown_body_after_frontmatter, WaapRecordKind};
+use crate::toml::{datetime_string, toml_string};
 
 pub(crate) mod get;
 pub(crate) mod list;
@@ -263,7 +264,7 @@ pub(crate) fn ticket_report_json(report: &TicketReport) -> serde_json::Value {
 mod tests {
     use std::path::Path;
 
-    use toml::Value;
+    use ::toml::Value;
 
     use super::TicketMetadata;
 
