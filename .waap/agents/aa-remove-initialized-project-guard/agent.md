@@ -1,7 +1,8 @@
 +++
 name = "remove-initialized-project-guard"
 creation_date = 2026-07-08T14:13:40Z
-status = "ready"
+status = "running"
+system = "codex"
 +++
 
 # Purpose
