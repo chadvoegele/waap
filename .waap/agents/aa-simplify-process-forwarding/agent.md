@@ -1,7 +1,8 @@
 +++
 name = "simplify-process-forwarding"
 creation_date = 2026-07-08T14:12:09Z
-status = "ready"
+status = "running"
+system = "codex"
 +++
 
 # Purpose
