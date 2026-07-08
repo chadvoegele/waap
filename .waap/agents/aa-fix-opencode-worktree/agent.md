@@ -2,6 +2,7 @@
 name = "fix-opencode-worktree"
 creation_date = 2026-07-08T14:19:58Z
 status = "running"
+session_id = "019f4219-9fec-7d81-a69d-dfef619287db"
 system = "codex"
 +++
 
