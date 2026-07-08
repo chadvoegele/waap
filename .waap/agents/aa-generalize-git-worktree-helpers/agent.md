@@ -1,7 +1,8 @@
 +++
 name = "generalize-git-worktree-helpers"
 creation_date = 2026-07-08T13:34:04Z
-status = "ready"
+status = "running"
+system = "codex"
 +++
 
 # Purpose
