@@ -1,7 +1,8 @@
 +++
 name = "prevent-invalid-waap-state"
 creation_date = 2026-07-08T14:05:16Z
-status = "ready"
+status = "running"
+system = "codex"
 +++
 
 # Purpose
