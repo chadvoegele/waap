@@ -7,9 +7,9 @@ use clap::ValueEnum;
 use serde_json::json;
 
 use crate::frontmatter::{
-    invalid_frontmatter_error, parse_frontmatter_from_contents, reject_unknown_fields,
-    require_datetime, require_optional_string, require_optional_string_choice,
-    require_string_choice, serialize_record,
+    invalid_frontmatter_error, parse_frontmatter, reject_unknown_fields, require_datetime,
+    require_optional_string, require_optional_string_choice, require_string_choice,
+    serialize_record,
 };
 use crate::ids::{available_record_id, is_record_id};
 use crate::record::{markdown_body_after_frontmatter, WaapRecordKind};
@@ -121,9 +121,8 @@ pub(crate) fn agent_path(waap_root: &Path, agent_id: &str) -> PathBuf {
 
 pub(crate) fn load_agent_metadata(waap_root: &Path, agent_id: &str) -> io::Result<AgentMetadata> {
     let path = validate_agent_path(waap_root, agent_id)?;
-    let contents = fs::read_to_string(&path)?;
     let mut errors = Vec::new();
-    let Some(value) = parse_frontmatter_from_contents(&contents, &path, &mut errors) else {
+    let Some(value) = parse_frontmatter(&path, &mut errors) else {
         return Err(invalid_frontmatter_error(errors));
     };
     AgentMetadata::from_frontmatter(&value, &path).map_err(invalid_frontmatter_error)
@@ -135,12 +134,7 @@ pub(crate) fn read_agent_record(
 ) -> io::Result<(AgentMetadata, String)> {
     let path = validate_agent_path(waap_root, agent_id)?;
     let contents = fs::read_to_string(&path)?;
-    let mut errors = Vec::new();
-    let Some(value) = parse_frontmatter_from_contents(&contents, &path, &mut errors) else {
-        return Err(invalid_frontmatter_error(errors));
-    };
-    let metadata =
-        AgentMetadata::from_frontmatter(&value, &path).map_err(invalid_frontmatter_error)?;
+    let metadata = load_agent_metadata(waap_root, agent_id)?;
     let body = markdown_body_after_frontmatter(&contents)?;
     Ok((metadata, body))
 }

@@ -7,9 +7,9 @@ use clap::ValueEnum;
 use serde_json::json;
 
 use crate::frontmatter::{
-    invalid_frontmatter_error, parse_frontmatter_from_contents, reject_unknown_fields,
-    require_datetime, require_optional_string, require_optional_string_array,
-    require_string_choice, serialize_record,
+    invalid_frontmatter_error, parse_frontmatter, reject_unknown_fields, require_datetime,
+    require_optional_string, require_optional_string_array, require_string_choice,
+    serialize_record,
 };
 use crate::ids::{available_record_id, is_record_id};
 use crate::record::{markdown_body_after_frontmatter, WaapRecordKind};
@@ -127,9 +127,8 @@ pub(crate) fn load_ticket_metadata(
     ticket_id: &str,
 ) -> io::Result<TicketMetadata> {
     let path = validate_ticket_path(waap_root, ticket_id)?;
-    let contents = fs::read_to_string(&path)?;
     let mut errors = Vec::new();
-    let Some(value) = parse_frontmatter_from_contents(&contents, &path, &mut errors) else {
+    let Some(value) = parse_frontmatter(&path, &mut errors) else {
         return Err(invalid_frontmatter_error(errors));
     };
     TicketMetadata::from_frontmatter(&value, &path, ticket_id).map_err(invalid_frontmatter_error)
@@ -141,12 +140,7 @@ pub(crate) fn read_ticket_record(
 ) -> io::Result<(TicketMetadata, String)> {
     let path = validate_ticket_path(waap_root, ticket_id)?;
     let contents = fs::read_to_string(&path)?;
-    let mut errors = Vec::new();
-    let Some(value) = parse_frontmatter_from_contents(&contents, &path, &mut errors) else {
-        return Err(invalid_frontmatter_error(errors));
-    };
-    let metadata = TicketMetadata::from_frontmatter(&value, &path, ticket_id)
-        .map_err(invalid_frontmatter_error)?;
+    let metadata = load_ticket_metadata(waap_root, ticket_id)?;
     let body = markdown_body_after_frontmatter(&contents)?;
     Ok((metadata, body))
 }
