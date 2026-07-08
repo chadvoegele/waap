@@ -3,17 +3,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-/// Relative path, under the repository root, of the worktree that `waap agent run`
-/// prepares for an agent.
 pub(crate) fn agent_worktree_dir(agent_id: &str) -> PathBuf {
     Path::new("worktrees").join(agent_id)
 }
 
-/// Create the git worktree that `waap agent run` runs the agent inside.
-///
-/// A fresh branch named after the agent is created at the current `HEAD` and checked out into
-/// `worktrees/<agent_id>`. Returns the canonical absolute path of the new worktree so callers can
-/// launch the selected system there.
 pub(crate) fn create_agent_worktree(waap_root: &Path, agent_id: &str) -> io::Result<PathBuf> {
     let relative = agent_worktree_dir(agent_id);
     run_git(
@@ -29,10 +22,6 @@ pub(crate) fn create_agent_worktree(waap_root: &Path, agent_id: &str) -> io::Res
     waap_root.join(&relative).canonicalize()
 }
 
-/// Remove the agent worktree created by [`create_agent_worktree`].
-///
-/// `--force` is used so cleanup still succeeds when the agent left uncommitted or untracked changes
-/// behind, which keeps the worktree lifecycle consistent even after an early exit or failure.
 pub(crate) fn remove_agent_worktree(waap_root: &Path, agent_id: &str) -> io::Result<()> {
     let relative = agent_worktree_dir(agent_id);
     run_git(
@@ -40,19 +29,13 @@ pub(crate) fn remove_agent_worktree(waap_root: &Path, agent_id: &str) -> io::Res
         &[
             "worktree".into(),
             "remove".into(),
-            "--force".into(),
+            "--force".into(),  // in case an agent left uncommitted or untracked changes
             relative.as_os_str().to_os_string(),
         ],
     )?;
     Ok(())
 }
 
-/// Stage and commit only the given paths under `waap_root`, returning the new commit hash.
-///
-/// A pathspec is passed to both `git add` and `git commit` so that unrelated changes already
-/// present in the working tree or index are left untouched: the commit records the working-tree
-/// contents of `paths` and nothing else. All git invocations run with `waap_root` as their working
-/// directory so `--waap-root` is respected.
 pub(crate) fn commit_paths(waap_root: &Path, paths: &[&Path], message: &str) -> io::Result<String> {
     if paths.is_empty() {
         return Err(io::Error::new(
@@ -65,10 +48,6 @@ pub(crate) fn commit_paths(waap_root: &Path, paths: &[&Path], message: &str) -> 
     add_args.extend(paths.iter().map(|path| path.as_os_str().to_os_string()));
     run_git(waap_root, &add_args)?;
 
-    // A no-op state write (the paths have no staged diff) is a successful no-op: skip the commit so
-    // idempotent state writes don't abort on git's "nothing to commit" non-zero exit. `git diff
-    // --cached --quiet` signals via its exit code (0 = nothing staged, 1 = staged changes), so it
-    // must bypass the success-only `run_git` wrapper.
     let mut diff_args: Vec<OsString> = vec![
         "diff".into(),
         "--cached".into(),
@@ -80,7 +59,6 @@ pub(crate) fn commit_paths(waap_root: &Path, paths: &[&Path], message: &str) -> 
     let has_staged_changes = match diff.status.code() {
         Some(0) => false,
         Some(1) => true,
-        // Any other exit status (or a signal) is a genuine failure, not the documented diff signal.
         _ => return Err(run_git_error(&diff_args, &diff)),
     };
 
@@ -95,7 +73,6 @@ pub(crate) fn commit_paths(waap_root: &Path, paths: &[&Path], message: &str) -> 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Whether `path` is inside a git working tree.
 pub(crate) fn is_inside_git_work_tree(path: &Path) -> io::Result<bool> {
     let output = git_process(path)
         .args(["rev-parse", "--is-inside-work-tree"])
@@ -112,8 +89,6 @@ fn git_process(waap_root: &Path) -> Command {
     command
 }
 
-/// Run `git` in `waap_root` and return its raw [`Output`] without treating a non-zero exit as an
-/// error, so callers can inspect the exit code themselves.
 fn git_command(waap_root: &Path, args: &[OsString]) -> io::Result<Output> {
     git_process(waap_root)
         .args(args)
@@ -121,7 +96,6 @@ fn git_command(waap_root: &Path, args: &[OsString]) -> io::Result<Output> {
         .map_err(|error| io::Error::new(error.kind(), format!("failed to run git: {error}")))
 }
 
-/// Build the error for a `git` invocation that exited unsuccessfully.
 fn run_git_error(args: &[OsString], output: &Output) -> io::Error {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stderr = stderr.trim();
