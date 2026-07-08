@@ -1,7 +1,7 @@
 +++
 name = "Reduce Unnecessary Crate Visibility"
 creation_date = 2026-07-08T02:34:08Z
-status = "in-progress"
+status = "completed"
 depends_on = ["tt-prevent-commands-from-invalidating-waap-state", "tt-fix-opencode-agent-runs-using-main-checkout-instead-of-worktree", "tt-remove-redundant-initialized-project-guard"]
 +++
 
