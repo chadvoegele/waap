@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -5,8 +6,8 @@ use std::path::Path;
 use crate::cli::OutputFormat;
 use crate::git::{commit_paths, Committed};
 use crate::ticket::{
-    is_ticket_id, print_ticket_report_human, read_ticket_record, ticket_path, ticket_report_json,
-    write_ticket_record, TicketReport, TicketStatus,
+    is_ticket_id, load_tickets_metadata, print_ticket_report_human, read_ticket_record,
+    ticket_path, ticket_report_json, write_ticket_record, TicketReport, TicketStatus,
 };
 
 pub(crate) fn print_updated_ticket_report(
@@ -71,6 +72,19 @@ fn update_ticket_record(
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("{dep_id:?} is not a valid ticket id"),
+            ));
+        }
+    }
+
+    let ticket_ids: HashSet<String> = load_tickets_metadata(waap_root)?
+        .into_iter()
+        .map(|metadata| metadata.ticket_id)
+        .collect();
+    for dep_id in add_depends_on {
+        if !ticket_ids.contains(dep_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("dependency ticket {dep_id:?} does not exist"),
             ));
         }
     }
@@ -236,6 +250,7 @@ mod tests {
     fn add_depends_on_adds_new_dependency() {
         let dir = tempdir().unwrap();
         make_ticket(dir.path(), "tt-my-ticket", "");
+        make_ticket(dir.path(), "tt-dep-a", "");
 
         let report = update_ticket_record(
             dir.path(),
@@ -255,6 +270,8 @@ mod tests {
     #[test]
     fn remove_depends_on_removes_existing_dependency() {
         let dir = tempdir().unwrap();
+        make_ticket(dir.path(), "tt-dep-a", "");
+        make_ticket(dir.path(), "tt-dep-b", "");
         make_ticket(
             dir.path(),
             "tt-my-ticket",
@@ -276,6 +293,8 @@ mod tests {
     #[test]
     fn add_and_remove_depends_on_in_one_call() {
         let dir = tempdir().unwrap();
+        make_ticket(dir.path(), "tt-dep-a", "");
+        make_ticket(dir.path(), "tt-dep-b", "");
         make_ticket(dir.path(), "tt-my-ticket", "depends_on = [\"tt-dep-a\"]\n");
 
         let report = update_ticket_record(
@@ -293,6 +312,7 @@ mod tests {
     #[test]
     fn remove_nonexistent_depends_on_is_noop() {
         let dir = tempdir().unwrap();
+        make_ticket(dir.path(), "tt-dep-a", "");
         make_ticket(dir.path(), "tt-my-ticket", "depends_on = [\"tt-dep-a\"]\n");
 
         let report = update_ticket_record(
@@ -323,6 +343,27 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("not a valid ticket id"));
+    }
+
+    #[test]
+    fn add_depends_on_rejects_missing_ticket() {
+        let dir = tempdir().unwrap();
+        make_ticket(dir.path(), "tt-my-ticket", "");
+
+        let error = update_ticket_record(
+            dir.path(),
+            "tt-my-ticket",
+            None,
+            &["tt-missing".to_string()],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("tt-missing"));
+        let contents =
+            fs::read_to_string(dir.path().join(".waap/tickets/tt-my-ticket/ticket.md")).unwrap();
+        assert!(!contents.contains("depends_on"));
     }
 
     #[test]

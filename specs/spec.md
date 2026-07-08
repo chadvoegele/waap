@@ -128,6 +128,9 @@ The `waap` CLI is the primary interface for interacting with waap state, though 
 
 The default format is human-readable.
 
+Mutation commands must not leave `/.waap/` invalid when they return success. Manual edits can
+still invalidate state; `waap check` remains the validator for finding and repairing such changes.
+
 Without `--waap-root`, commands use the nearest ancestor containing `.waap/`, bounded by the
 current git root. If none exists, commands use the git root so `waap init` can initialize it and
 other commands can report missing state.
@@ -160,6 +163,7 @@ Frontmatter is validated strictly: unknown fields outside the documented agent a
     - Parameters
         - Optional
             - `--name`
+            - `--depends-on`  # Existing ticket id; repeatable
     - Streams
         - stdin: write to ticket markdown
         - stdout: reports created ticket path, metadata, and file size
@@ -172,6 +176,8 @@ Frontmatter is validated strictly: unknown fields outside the documented agent a
             - `--ticket-id`
         - At least one of these
             - `--set-status`
+            - `--add-depends-on`  # Existing ticket id; repeatable
+            - `--remove-depends-on`  # Valid ticket id; repeatable; absent dependencies are ignored
     - Streams
         - stdout: reports updated ticket path, metadata, and file size
 - get

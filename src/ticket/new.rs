@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
@@ -6,8 +7,8 @@ use crate::cli::OutputFormat;
 use crate::git::{commit_paths, Committed};
 use crate::record::{require_initialized_project, WaapRecordKind};
 use crate::ticket::{
-    available_ticket_id, is_ticket_id, print_ticket_report_human, ticket_path, ticket_report_json,
-    write_ticket_record, TicketMetadata, TicketReport,
+    available_ticket_id, is_ticket_id, load_tickets_metadata, print_ticket_report_human,
+    ticket_path, ticket_report_json, write_ticket_record, TicketMetadata, TicketReport,
 };
 use crate::toml::current_toml_datetime;
 
@@ -75,6 +76,19 @@ pub(crate) fn create_ticket_with_markdown(
         }
     }
 
+    let ticket_ids: HashSet<String> = load_tickets_metadata(waap_root)?
+        .into_iter()
+        .map(|metadata| metadata.ticket_id)
+        .collect();
+    for id in depends_on {
+        if !ticket_ids.contains(id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("dependency ticket {id:?} does not exist"),
+            ));
+        }
+    }
+
     let tickets_dir = WaapRecordKind::Ticket.root_path(waap_root);
     let ticket_id = available_ticket_id(&tickets_dir, name)?;
 
@@ -110,11 +124,16 @@ pub(crate) fn create_ticket_with_markdown(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path;
 
     use tempfile::tempdir;
 
     use super::create_ticket_with_markdown;
     use crate::check::check_waap;
+
+    fn create_named_ticket(waap_root: &Path, name: &str) {
+        create_ticket_with_markdown(waap_root, Some(name), &[], "").unwrap();
+    }
 
     #[test]
     fn create_ticket_writes_frontmatter_and_stdin_content() {
@@ -139,6 +158,8 @@ mod tests {
     fn create_ticket_with_depends_on_round_trips() {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join(".waap")).unwrap();
+        create_named_ticket(dir.path(), "Dep One");
+        create_named_ticket(dir.path(), "Dep Two");
 
         let deps = vec!["tt-dep-one".to_string(), "tt-dep-two".to_string()];
         let report =
@@ -160,6 +181,19 @@ mod tests {
 
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("not-a-ticket-id"));
+    }
+
+    #[test]
+    fn create_ticket_rejects_missing_depends_on_ticket() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".waap")).unwrap();
+
+        let deps = vec!["tt-missing".to_string()];
+        let err = create_ticket_with_markdown(dir.path(), Some("Bad Deps"), &deps, "").unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("tt-missing"));
+        assert!(!dir.path().join(".waap/tickets/tt-bad-deps").exists());
     }
 
     #[test]

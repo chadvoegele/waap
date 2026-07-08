@@ -12,7 +12,7 @@ use crate::frontmatter::{
     serialize_record,
 };
 use crate::ids::{available_record_id, is_record_id};
-use crate::record::{markdown_body_after_frontmatter, WaapRecordKind};
+use crate::record::{list_record_ids, markdown_body_after_frontmatter, WaapRecordKind};
 use crate::toml::{datetime_string, toml_string};
 
 pub(crate) mod get;
@@ -132,6 +132,13 @@ pub(crate) fn load_ticket_metadata(
         return Err(invalid_frontmatter_error(errors));
     };
     TicketMetadata::from_frontmatter(&value, &path, ticket_id).map_err(invalid_frontmatter_error)
+}
+
+pub(crate) fn load_tickets_metadata(waap_root: &Path) -> io::Result<Vec<TicketMetadata>> {
+    list_record_ids(waap_root, WaapRecordKind::Ticket)?
+        .iter()
+        .map(|ticket_id| load_ticket_metadata(waap_root, ticket_id))
+        .collect()
 }
 
 pub(crate) fn read_ticket_record(
