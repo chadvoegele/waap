@@ -2,6 +2,7 @@
 name = "Stream frontmatter metadata loading"
 creation_date = 2026-07-08T12:12:53Z
 status = "pending"
+depends_on = ["tt-move-toml-helpers-out-of-idsfrontmatter"]
 +++
 
 ## Context
