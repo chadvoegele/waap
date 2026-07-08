@@ -1,7 +1,7 @@
 +++
 name = "Generalize Git Worktree Helpers"
 creation_date = 2026-07-08T02:41:37Z
-status = "in-progress"
+status = "completed"
 +++
 
 Refactor Git worktree helpers so `git.rs` exposes generic Git operations rather than agent-specific helpers.
