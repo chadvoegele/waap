@@ -93,6 +93,8 @@ It is helpful to ensure continuity across agents, to also instruct the agent to 
 
 `waap agent run` owns the agent worktree lifecycle. Before launching the selected system, it creates an isolated git worktree (`worktrees/<agent-id>`) and runs the agent inside it; after the system process exits it removes that worktree. This isolates each agent's changes so many agents can run in parallel, without relying on the agent to create or clean up its own worktree.
 
+The agent branch includes the pre-worktree running-state commit. For OpenCode, waap then creates the session with the canonical worktree directory and commits its authentic id to `main` before launch, so `agent list` and `agent stop` can find the live session.
+
 ## Agent Frontmatter
 
 Agent metadata is stored as TOML frontmatter at the top of the agent markdown file.

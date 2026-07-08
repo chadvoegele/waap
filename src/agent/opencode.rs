@@ -14,6 +14,19 @@ pub(super) struct OpencodeRunConfig {
     pub(super) waap_root: PathBuf,
 }
 
+#[cfg(test)]
+impl OpencodeRunConfig {
+    pub(super) fn for_test(waap_root: PathBuf) -> Self {
+        Self {
+            server_url: "https://opencode.example".to_string(),
+            username: "runner".to_string(),
+            password: "secret".to_string(),
+            model: "openai/gpt-5.5".to_string(),
+            waap_root,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct OpencodeRunCommand {
     program: String,
@@ -232,12 +245,6 @@ mod tests {
     }
 
     fn test_opencode_config() -> OpencodeRunConfig {
-        OpencodeRunConfig {
-            server_url: "https://opencode.example".to_string(),
-            username: "runner".to_string(),
-            password: "secret".to_string(),
-            model: "openai/gpt-5.5".to_string(),
-            waap_root: PathBuf::from("/repo/with space"),
-        }
+        OpencodeRunConfig::for_test(PathBuf::from("/repo/with space"))
     }
 }

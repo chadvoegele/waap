@@ -8,7 +8,7 @@ use super::claude::{build_claude_run_command, claude_run_config_from_env, spawn_
 use super::codex::{codex_run_config_from_env, spawn_codex_app_server, TurnStatus};
 use super::opencode::{
     build_opencode_run_command, create_opencode_session, opencode_run_config_from_env,
-    spawn_opencode_attached,
+    spawn_opencode_attached, OpencodeRunConfig,
 };
 use crate::agent::{
     agent_report_json, load_agent_report, print_agent_report_human, read_agent_record,
@@ -92,28 +92,62 @@ where
     Ok(outcome)
 }
 
+/// Create and run an OpenCode session inside the canonical agent worktree.
+///
+/// OpenCode persists the directory supplied at session creation and gives it precedence over the
+/// later run request's `--dir`. Setting the config root once, before both operations, keeps the
+/// persisted session directory and run command aligned. Session creation remains inside the
+/// worktree lifecycle so every subsequent error still triggers cleanup.
+fn run_opencode_in_agent_worktree<P, S, U, L>(
+    waap_root: &Path,
+    agent_id: &str,
+    mut config: OpencodeRunConfig,
+    prepare: P,
+    create_session: S,
+    update_session: U,
+    launch: L,
+) -> io::Result<ExitStatus>
+where
+    P: FnOnce() -> io::Result<()>,
+    S: FnOnce(&OpencodeRunConfig) -> io::Result<String>,
+    U: FnOnce(&str) -> io::Result<()>,
+    L: FnOnce(&OpencodeRunConfig, &str) -> io::Result<ExitStatus>,
+{
+    run_in_agent_worktree(waap_root, agent_id, prepare, |worktree| {
+        config.waap_root = worktree.to_path_buf();
+        let session_id = create_session(&config)?;
+        update_session(&session_id)?;
+        launch(&config, &session_id)
+    })
+}
+
 fn run_agent_opencode(
     waap_root: &Path,
     output_format: &OutputFormat,
     agent_id: &str,
 ) -> io::Result<ExitCode> {
-    let mut config = opencode_run_config_from_env(waap_root)?;
+    let config = opencode_run_config_from_env(waap_root)?;
 
-    // Create the session before cutting the worktree so the session id can be committed with the
-    // `running` status in a single commit on `main`, ahead of the worktree.
-    let session_id = create_opencode_session(&config)?;
     let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
-    metadata.session_id = Some(session_id.clone());
     metadata.system = Some(AgentSystem::Opencode);
 
-    let status = run_in_agent_worktree(
+    let status = run_opencode_in_agent_worktree(
         waap_root,
         agent_id,
+        config,
         || mark_running(waap_root, output_format, agent_id, &mut metadata, &body),
-        |worktree| {
-            // Launch opencode against the prepared worktree rather than the repository root.
-            config.waap_root = worktree.to_path_buf();
-            let command = build_opencode_run_command(&config, agent_id, &session_id);
+        create_opencode_session,
+        |session_id| {
+            update_agent_session(
+                waap_root,
+                output_format,
+                agent_id,
+                session_id,
+                AgentSystem::Opencode,
+            )
+        },
+        |config, session_id| {
+            let command = build_opencode_run_command(config, agent_id, session_id);
             let mut child = spawn_opencode_attached(&command)?;
             child.wait()
         },
@@ -151,7 +185,7 @@ fn run_agent_claude(
 /// Drive a `codex` run via the `codex app-server --stdio` JSON-RPC client (see
 /// /specs/codex-agent-system.md §3). Structurally mirrors `run_agent_opencode`, but codex's
 /// `session_id` (its authentic `ThreadId`) is unknown until `thread/start` returns inside the
-/// worktree, so it is persisted and committed mid-run by `update_codex_session` rather than ahead of
+/// worktree, so it is persisted and committed mid-run by `update_agent_session` rather than ahead of
 /// the worktree. Completion is derived from the turn status, not a process exit code.
 fn run_agent_codex(
     waap_root: &Path,
@@ -186,7 +220,13 @@ fn run_agent_codex(
             let thread_id = client.thread_start(worktree)?;
 
             // Persist the authentic ThreadId as session_id, then commit (one extra commit on `main`).
-            update_codex_session(waap_root, output_format, agent_id, &thread_id)?;
+            update_agent_session(
+                waap_root,
+                output_format,
+                agent_id,
+                &thread_id,
+                AgentSystem::Codex,
+            )?;
 
             let prompt = format!(
                 "Complete when instructions in /.waap/agents/{agent_id}/agent.md are satisfied"
@@ -202,8 +242,8 @@ fn run_agent_codex(
 ///
 /// This runs as the worktree `prepare` step, *before* the worktree is cut, so the worktree branch
 /// descends from the `running` commit (keeping history linear). The commit always lands on `main`
-/// (`waap_root`) rather than the worktree branch so `waap agent list --status running` and
-/// `waap agent stop` see the running status and session id from the main worktree during the run.
+/// (`waap_root`) rather than the worktree branch so `waap agent list --status running` sees it.
+/// System-created session ids are added to `main` after the worktree is available.
 fn mark_running(
     waap_root: &Path,
     output_format: &OutputFormat,
@@ -235,38 +275,40 @@ fn mark_running(
     Ok(())
 }
 
-/// Persist codex's authentic `ThreadId` as the agent's `session_id`, commit it to `main`, and report
-/// it. Unlike opencode/claude, codex's session id is only known after `thread/start` returns inside
-/// the worktree, so this runs mid-run and adds one extra commit on `main` (mirrors `mark_running`'s
-/// write+`commit_paths` pattern). `metadata.system` is set to `codex` so the record on `main` carries
-/// the system alongside the session id.
-fn update_codex_session(
+/// Persist a system-created session id on `main` and report it.
+///
+/// OpenCode and Codex only return authentic session ids after their sessions are created inside the
+/// worktree. This adds a commit on `main` before either system starts agent work, keeping
+/// `agent list` and `agent stop` connected to the live session.
+fn update_agent_session(
     waap_root: &Path,
     output_format: &OutputFormat,
     agent_id: &str,
-    thread_id: &str,
+    session_id: &str,
+    system: AgentSystem,
 ) -> io::Result<()> {
     let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
     // Read from `main` immediately before deciding; if the session id and system already match the
     // target values the write+commit is a no-op, so skip it (still report the agent state).
-    if metadata.session_id.as_deref() == Some(thread_id)
-        && metadata.system == Some(AgentSystem::Codex)
+    let header = format!("{} session", system.as_str());
+    if metadata.session_id.as_deref() == Some(session_id)
+        && metadata.system.as_ref() == Some(&system)
     {
         let report = load_agent_report(waap_root, agent_id)?;
-        print_run_agent_report(output_format, "Codex session", &report, "");
+        print_run_agent_report(output_format, &header, &report, "");
         return Ok(());
     }
-    metadata.session_id = Some(thread_id.to_string());
-    metadata.system = Some(AgentSystem::Codex);
+    metadata.session_id = Some(session_id.to_string());
+    metadata.system = Some(system.clone());
     write_agent_record(waap_root, agent_id, &metadata, &body)?;
 
     let report = load_agent_report(waap_root, agent_id)?;
     let commit = commit_paths(
         waap_root,
         &[report.path.as_path()],
-        &format!("waap agent codex session {agent_id}"),
+        &format!("waap agent {} session {agent_id}", system.as_str()),
     )?;
-    print_run_agent_report(output_format, "Codex session", &report, &commit);
+    print_run_agent_report(output_format, &header, &report, &commit);
     Ok(())
 }
 
@@ -361,20 +403,25 @@ fn finalize_run(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::{Cell, RefCell};
     use std::fs;
     use std::os::unix::process::ExitStatusExt;
     use std::path::{Path, PathBuf};
-    use std::process::ExitStatus;
+    use std::process::{Command, ExitStatus};
 
     use serde_json::json;
     use tempfile::tempdir;
 
     use super::{
-        agent_worktree_dir, finalize_agent_run, finalize_codex_run, run_in_agent_worktree,
-        update_codex_session,
+        agent_worktree_dir, finalize_agent_run, finalize_codex_run, mark_running,
+        run_in_agent_worktree, run_opencode_in_agent_worktree, update_agent_session,
     };
     use crate::agent::codex::TurnStatus;
-    use crate::agent::{agent_report_json, AgentMetadata, AgentReport};
+    use crate::agent::opencode::OpencodeRunConfig;
+    use crate::agent::stop::stop_agents;
+    use crate::agent::{
+        agent_report_json, read_agent_record, AgentMetadata, AgentReport, AgentSystem,
+    };
     use crate::cli::OutputFormat;
     use crate::git::{create_worktree, remove_worktree};
     use crate::test_git::{init_repo_with_commit, run as git};
@@ -444,6 +491,117 @@ mod tests {
 
         assert_eq!(error.to_string(), "boom");
         // Cleanup still runs when the run fails.
+        assert!(!dir.path().join("worktrees/aa-00000001").exists());
+    }
+
+    #[test]
+    fn opencode_session_and_run_use_canonical_worktree() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let session_directory = RefCell::new(None);
+        let run_directory = RefCell::new(None);
+        let effective_cwd = RefCell::new(None);
+
+        let status = run_opencode_in_agent_worktree(
+            dir.path(),
+            "aa-00000001",
+            OpencodeRunConfig::for_test(dir.path().to_path_buf()),
+            || Ok(()),
+            |config| {
+                session_directory.replace(Some(config.waap_root.clone()));
+                Ok("ses_worktree".to_string())
+            },
+            |_| Ok(()),
+            |config, session_id| {
+                assert_eq!(session_id, "ses_worktree");
+                run_directory.replace(Some(config.waap_root.clone()));
+
+                // Model OpenCode's routing rule: the persisted session directory wins over the
+                // request's `--dir`. A pwd-equivalent command must still resolve to the worktree.
+                let persisted = session_directory.borrow().clone().unwrap();
+                let output = Command::new("pwd").current_dir(persisted).output().unwrap();
+                assert!(output.status.success());
+                effective_cwd.replace(Some(
+                    PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+                        .canonicalize()
+                        .unwrap(),
+                ));
+                Ok(ExitStatus::from_raw(0))
+            },
+        )
+        .unwrap();
+
+        let session_directory = session_directory.into_inner().unwrap();
+        assert_eq!(status.code(), Some(0));
+        assert_eq!(run_directory.into_inner().unwrap(), session_directory);
+        assert_eq!(effective_cwd.into_inner().unwrap(), session_directory);
+        assert!(session_directory.ends_with("worktrees/aa-00000001"));
+        assert_ne!(session_directory, dir.path().canonicalize().unwrap());
+        assert!(!dir.path().join("worktrees/aa-00000001").exists());
+    }
+
+    #[test]
+    fn opencode_worktree_is_cleaned_up_after_session_creation_error() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let launch_called = Cell::new(false);
+
+        let error = run_opencode_in_agent_worktree(
+            dir.path(),
+            "aa-00000001",
+            OpencodeRunConfig::for_test(dir.path().to_path_buf()),
+            || Ok(()),
+            |_| Err(std::io::Error::other("session failed")),
+            |_| Ok(()),
+            |_, _| {
+                launch_called.set(true);
+                Ok(ExitStatus::from_raw(0))
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "session failed");
+        assert!(!launch_called.get());
+        assert!(!dir.path().join("worktrees/aa-00000001").exists());
+    }
+
+    #[test]
+    fn opencode_worktree_is_cleaned_up_after_launch_error() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+
+        let error = run_opencode_in_agent_worktree(
+            dir.path(),
+            "aa-00000001",
+            OpencodeRunConfig::for_test(dir.path().to_path_buf()),
+            || Ok(()),
+            |_| Ok("ses_worktree".to_string()),
+            |_| Ok(()),
+            |_, _| Err(std::io::Error::other("launch failed")),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "launch failed");
+        assert!(!dir.path().join("worktrees/aa-00000001").exists());
+    }
+
+    #[test]
+    fn opencode_worktree_is_cleaned_up_after_nonzero_exit() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+
+        let status = run_opencode_in_agent_worktree(
+            dir.path(),
+            "aa-00000001",
+            OpencodeRunConfig::for_test(dir.path().to_path_buf()),
+            || Ok(()),
+            |_| Ok("ses_worktree".to_string()),
+            |_| Ok(()),
+            |_, _| Ok(ExitStatus::from_raw(7 << 8)),
+        )
+        .unwrap();
+
+        assert_eq!(status.code(), Some(7));
         assert!(!dir.path().join("worktrees/aa-00000001").exists());
     }
 
@@ -582,6 +740,73 @@ mod tests {
         git(root, &["add", "-A"]);
         git(root, &["commit", "-q", "-m", "seed agent"]);
         path
+    }
+
+    #[test]
+    fn opencode_session_is_visible_and_stoppable_during_run() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let agent_id = "aa-00000001";
+        seed_agent_record(dir.path(), agent_id, "ready");
+        let (mut metadata, body) = read_agent_record(dir.path(), agent_id).unwrap();
+        metadata.system = Some(AgentSystem::Opencode);
+        let abort_called = Cell::new(false);
+
+        run_opencode_in_agent_worktree(
+            dir.path(),
+            agent_id,
+            OpencodeRunConfig::for_test(dir.path().to_path_buf()),
+            || {
+                mark_running(
+                    dir.path(),
+                    &OutputFormat::Json,
+                    agent_id,
+                    &mut metadata,
+                    &body,
+                )
+            },
+            |_| Ok("ses_live".to_string()),
+            |session_id| {
+                update_agent_session(
+                    dir.path(),
+                    &OutputFormat::Json,
+                    agent_id,
+                    session_id,
+                    AgentSystem::Opencode,
+                )
+            },
+            |config, session_id| {
+                let (main_metadata, _) = read_agent_record(dir.path(), agent_id).unwrap();
+                assert_eq!(main_metadata.status, "running");
+                assert_eq!(main_metadata.system, Some(AgentSystem::Opencode));
+                assert_eq!(main_metadata.session_id.as_deref(), Some(session_id));
+
+                // The branch was cut from the running-state commit before the later session-id
+                // commit on main, so it carries both the status and selected system.
+                let (branch_metadata, _) = read_agent_record(&config.waap_root, agent_id).unwrap();
+                assert_eq!(branch_metadata.status, "running");
+                assert_eq!(branch_metadata.system, Some(AgentSystem::Opencode));
+
+                let stopped = stop_agents(
+                    dir.path(),
+                    Some(agent_id),
+                    |system, stopped_agent_id, stopped_session_id| {
+                        assert_eq!(system, &AgentSystem::Opencode);
+                        assert_eq!(stopped_agent_id, agent_id);
+                        assert_eq!(stopped_session_id, session_id);
+                        abort_called.set(true);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                assert_eq!(stopped.len(), 1);
+                Ok(ExitStatus::from_raw(0))
+            },
+        )
+        .unwrap();
+
+        assert!(abort_called.get());
+        assert!(!dir.path().join("worktrees/aa-00000001").exists());
     }
 
     #[test]
@@ -823,15 +1048,22 @@ mod tests {
     }
 
     #[test]
-    fn update_codex_session_writes_session_id_and_system_and_commits() {
-        // `update_codex_session` persists the authentic ThreadId as `session_id`, sets the system to
-        // `codex`, and commits the record to `main` with a codex-session subject.
+    fn update_agent_session_writes_codex_session_id_and_system_and_commits() {
+        // `update_agent_session` persists the authentic ThreadId as `session_id`, sets the system
+        // to `codex`, and commits the record to `main` with a codex-session subject.
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path());
         let agent_id = "aa-00000001";
         let path = seed_agent_record(dir.path(), agent_id, "running");
 
-        update_codex_session(dir.path(), &OutputFormat::Json, agent_id, "th_abc123").unwrap();
+        update_agent_session(
+            dir.path(),
+            &OutputFormat::Json,
+            agent_id,
+            "th_abc123",
+            AgentSystem::Codex,
+        )
+        .unwrap();
 
         let contents = fs::read_to_string(&path).unwrap();
         assert!(contents.contains("status = \"running\"\n"));
@@ -845,7 +1077,7 @@ mod tests {
     }
 
     #[test]
-    fn update_codex_session_skips_commit_when_already_set() {
+    fn update_agent_session_skips_commit_when_already_set() {
         // Acceptance criteria 2: when the session id and system already match the target, the
         // write+commit is skipped (no new commit) while the call still succeeds.
         let dir = tempdir().unwrap();
@@ -854,11 +1086,25 @@ mod tests {
         seed_agent_record(dir.path(), agent_id, "running");
 
         // First call writes the session id and system and commits once.
-        update_codex_session(dir.path(), &OutputFormat::Json, agent_id, "th_abc123").unwrap();
+        update_agent_session(
+            dir.path(),
+            &OutputFormat::Json,
+            agent_id,
+            "th_abc123",
+            AgentSystem::Codex,
+        )
+        .unwrap();
         let head_after_first = git(dir.path(), &["rev-parse", "HEAD"]);
 
         // Second call with the same target is a no-op: no new commit.
-        update_codex_session(dir.path(), &OutputFormat::Json, agent_id, "th_abc123").unwrap();
+        update_agent_session(
+            dir.path(),
+            &OutputFormat::Json,
+            agent_id,
+            "th_abc123",
+            AgentSystem::Codex,
+        )
+        .unwrap();
         let head_after_second = git(dir.path(), &["rev-parse", "HEAD"]);
 
         assert_eq!(head_after_first, head_after_second);
