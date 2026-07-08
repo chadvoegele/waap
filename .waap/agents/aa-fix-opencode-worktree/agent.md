@@ -1,7 +1,8 @@
 +++
 name = "fix-opencode-worktree"
 creation_date = 2026-07-08T14:19:58Z
-status = "ready"
+status = "running"
+system = "codex"
 +++
 
 # Purpose
