@@ -12,42 +12,42 @@ pub(crate) enum WaapRecordKind {
 }
 
 impl WaapRecordKind {
-    pub(crate) fn directory_name(self) -> &'static str {
+    fn directory_name(self) -> &'static str {
         match self {
             WaapRecordKind::Agent => "agents",
             WaapRecordKind::Ticket => "tickets",
         }
     }
 
-    pub(crate) fn singular_name(self) -> &'static str {
+    fn singular_name(self) -> &'static str {
         match self {
             WaapRecordKind::Agent => "agent",
             WaapRecordKind::Ticket => "ticket",
         }
     }
 
-    pub(crate) fn directory_description(self) -> &'static str {
+    fn directory_description(self) -> &'static str {
         match self {
             WaapRecordKind::Agent => "an agent directory",
             WaapRecordKind::Ticket => "a ticket directory",
         }
     }
 
-    pub(crate) fn id_example(self) -> &'static str {
+    fn id_example(self) -> &'static str {
         match self {
             WaapRecordKind::Agent => "aa-3881fda0",
             WaapRecordKind::Ticket => "tt-list-tickets",
         }
     }
 
-    pub(crate) fn is_valid_id(self, value: &str) -> bool {
+    fn is_valid_id(self, value: &str) -> bool {
         match self {
             WaapRecordKind::Agent => is_agent_id(value),
             WaapRecordKind::Ticket => is_ticket_id(value),
         }
     }
 
-    pub(crate) fn root_label(self) -> String {
+    fn root_label(self) -> String {
         format!(".waap/{}", self.directory_name())
     }
 

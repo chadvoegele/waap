@@ -18,7 +18,7 @@ use crate::cli::OutputFormat;
 use crate::git::{commit_paths, create_worktree, remove_worktree};
 use uuid::Uuid;
 
-pub(crate) fn print_run_agent_report(
+fn print_run_agent_report(
     output_format: &OutputFormat,
     header: &str,
     report: &AgentReport,

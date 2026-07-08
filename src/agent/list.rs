@@ -45,7 +45,7 @@ fn agent_list_human_lines(reports: &[AgentReport]) -> Vec<String> {
     lines
 }
 
-pub(crate) fn agent_list_json(reports: &[AgentReport]) -> serde_json::Value {
+fn agent_list_json(reports: &[AgentReport]) -> serde_json::Value {
     json!(reports
         .iter()
         .map(|report| json!({

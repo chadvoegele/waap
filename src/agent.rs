@@ -17,13 +17,13 @@ use crate::toml::{datetime_string, toml_string};
 
 mod claude;
 mod codex;
-pub(crate) mod get;
-pub(crate) mod list;
-pub(crate) mod new;
+mod get;
+mod list;
+mod new;
 mod opencode;
-pub(crate) mod run;
-pub(crate) mod stop;
-pub(crate) mod update;
+mod run;
+mod stop;
+mod update;
 
 pub(crate) use get::{load_agent_content, load_agent_report, print_agent_content_report};
 pub(crate) use list::{list_agents, print_agent_list};
@@ -95,7 +95,7 @@ impl AgentMetadata {
         })
     }
 
-    pub(crate) fn to_frontmatter_lines(&self) -> String {
+    fn to_frontmatter_lines(&self) -> String {
         let mut lines = String::new();
         if let Some(name) = &self.name {
             lines.push_str(&format!("name = {}\n", toml_string(name)));
@@ -221,7 +221,7 @@ impl AgentSystem {
             .cloned()
     }
 
-    pub(crate) fn labels() -> Vec<&'static str> {
+    fn labels() -> Vec<&'static str> {
         AgentSystem::value_variants()
             .iter()
             .map(AgentSystem::as_str)

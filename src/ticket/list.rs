@@ -92,7 +92,7 @@ fn ticket_list_human_lines(entries: &[TicketListEntry]) -> Vec<String> {
     lines
 }
 
-pub(crate) fn ticket_list_json(entries: &[TicketListEntry]) -> serde_json::Value {
+fn ticket_list_json(entries: &[TicketListEntry]) -> serde_json::Value {
     json!(entries
         .iter()
         .map(|entry| json!({"ticket_id": entry.report.ticket_id, "status": entry.report.status, "blocked": entry.blocked}))

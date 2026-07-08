@@ -59,7 +59,7 @@ pub(crate) fn create_ticket(
     })
 }
 
-pub(crate) fn create_ticket_with_markdown(
+fn create_ticket_with_markdown(
     waap_root: &Path,
     name: Option<&str>,
     depends_on: &[String],

@@ -69,7 +69,7 @@ fn format_check_result(output_format: &OutputFormat, errors: &[String]) -> Strin
     }
 }
 
-pub(crate) fn check_agents(agents_dir: &Path, errors: &mut Vec<String>) {
+fn check_agents(agents_dir: &Path, errors: &mut Vec<String>) {
     let entries = read_dir(agents_dir, ".waap/agents", errors);
     for entry in entries {
         let path = entry.path();
@@ -105,7 +105,7 @@ fn check_agent_frontmatter(path: &Path, errors: &mut Vec<String>) {
     }
 }
 
-pub(crate) fn check_tickets(tickets_dir: &Path, errors: &mut Vec<String>) {
+fn check_tickets(tickets_dir: &Path, errors: &mut Vec<String>) {
     let entries = read_dir(tickets_dir, ".waap/tickets", errors);
     let mut tickets = Vec::new();
 
@@ -222,7 +222,7 @@ fn detect_cycle(
     path.pop();
 }
 
-pub(crate) fn read_dir(path: &Path, label: &str, errors: &mut Vec<String>) -> Vec<fs::DirEntry> {
+fn read_dir(path: &Path, label: &str, errors: &mut Vec<String>) -> Vec<fs::DirEntry> {
     match fs::read_dir(path) {
         Ok(entries) => entries
             .filter_map(|entry| match entry {

@@ -35,7 +35,7 @@ pub(crate) fn print_agent_stop_report(output_format: &OutputFormat, report: &Age
     }
 }
 
-pub(crate) fn agent_stop_json(report: &AgentStopReport) -> serde_json::Value {
+fn agent_stop_json(report: &AgentStopReport) -> serde_json::Value {
     json!({
         "stopped_agents": report.stopped_agents.iter().map(agent_report_json).collect::<Vec<_>>(),
         "commit": report.commit,
@@ -99,7 +99,7 @@ pub(crate) fn stop_agents_with_systems(
     })
 }
 
-pub(crate) fn stop_agents(
+pub(super) fn stop_agents(
     waap_root: &Path,
     agent_id: Option<&str>,
     mut abort: impl FnMut(&AgentSystem, &str, &str) -> io::Result<()>,

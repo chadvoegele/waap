@@ -57,7 +57,7 @@ pub(crate) fn create_agent(
     })
 }
 
-pub(crate) fn create_agent_with_markdown(
+fn create_agent_with_markdown(
     waap_root: &Path,
     name: Option<&str>,
     markdown: &str,

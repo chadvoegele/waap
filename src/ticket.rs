@@ -15,10 +15,10 @@ use crate::ids::{available_record_id, is_record_id};
 use crate::record::{list_record_ids, markdown_body_after_frontmatter, WaapRecordKind};
 use crate::toml::{datetime_string, toml_string};
 
-pub(crate) mod get;
-pub(crate) mod list;
-pub(crate) mod new;
-pub(crate) mod update;
+mod get;
+mod list;
+mod new;
+mod update;
 
 pub(crate) use get::{get_ticket, print_ticket_get_report};
 pub(crate) use list::{list_tickets, print_ticket_list};
@@ -100,7 +100,7 @@ impl TicketMetadata {
         })
     }
 
-    pub(crate) fn to_frontmatter_lines(&self) -> String {
+    fn to_frontmatter_lines(&self) -> String {
         let mut lines = String::new();
         if let Some(name) = &self.name {
             lines.push_str(&format!("name = {}\n", toml_string(name)));

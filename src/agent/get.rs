@@ -25,7 +25,7 @@ pub(crate) fn print_agent_content_report(
     }
 }
 
-pub(crate) fn agent_content_report_json(report: &AgentReport, content: &str) -> serde_json::Value {
+fn agent_content_report_json(report: &AgentReport, content: &str) -> serde_json::Value {
     let mut value = agent_report_json(report);
     value["content"] = json!(content);
     value

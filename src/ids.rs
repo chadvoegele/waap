@@ -38,7 +38,7 @@ pub(crate) fn available_record_id(
     }
 }
 
-pub(crate) fn slugify_name(name: &str) -> io::Result<String> {
+fn slugify_name(name: &str) -> io::Result<String> {
     let mut slug = String::new();
     let mut previous_dash = false;
 

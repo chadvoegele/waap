@@ -21,7 +21,7 @@ pub(crate) fn print_ticket_get_report(output_format: &OutputFormat, report: &Tic
     }
 }
 
-pub(crate) fn ticket_get_report_json(report: &TicketGetReport) -> serde_json::Value {
+fn ticket_get_report_json(report: &TicketGetReport) -> serde_json::Value {
     let mut value = ticket_report_json(&report.ticket);
     value["content"] = json!(report.content);
     value
