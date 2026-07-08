@@ -26,13 +26,17 @@ Simplify `src/process.rs`:
 - Replace `.stderr(Stdio::piped())` with `.stderr(Stdio::inherit())`.
 - Remove the manual pipe-draining/copy code and stderr forwarding thread.
 - Replace the callback-oriented `run_forwarding(command, on_started)` API with a spawn-now/wait-later shape so lifecycle sequencing is explicit at the call site.
-- Return a spawned process handle, or `std::process::Child` directly if a wrapper adds no value.
+- Prefer configuring the existing `Command` and calling `command.spawn()` directly instead of adding a new helper or wrapper unless implementation proves one is useful.
 - Callers should mark the agent running only after spawn succeeds, then wait for completion.
 
 The intended call-site shape is:
 
 ```rust
-let mut child = spawn_attached(&mut process)?;
+let mut child = process
+    .stdin(Stdio::null())
+    .stdout(Stdio::inherit())
+    .stderr(Stdio::inherit())
+    .spawn()?;
 mark_running()?;
 let status = child.wait()?;
 ```
