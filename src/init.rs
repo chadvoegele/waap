@@ -14,11 +14,6 @@ pub(crate) struct InitReport {
     pub(crate) marker: PathBuf,
 }
 
-/// Create the `.waap/` project skeleton at `waap_root`.
-///
-/// `agents/` and `tickets/` start out empty, so a marker file is written directly under `.waap/`
-/// to give the initial commit something to track — `check_waap` only inspects the `agents` and
-/// `tickets` subdirectories, so the marker doesn't trip its validation.
 pub(crate) fn init_project(waap_root: &Path) -> MutationResult<Committed<InitReport>> {
     let waap_dir = waap_root.join(".waap");
     if waap_dir.exists() {
