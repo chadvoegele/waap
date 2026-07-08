@@ -25,8 +25,19 @@ Simplify `src/process.rs`:
 - Replace `.stdout(Stdio::piped())` with `.stdout(Stdio::inherit())`.
 - Replace `.stderr(Stdio::piped())` with `.stderr(Stdio::inherit())`.
 - Remove the manual pipe-draining/copy code and stderr forwarding thread.
-- Keep `on_started()` running after successful `spawn()`.
-- Return the child exit status via `child.wait()`.
+- Replace the callback-oriented `run_forwarding(command, on_started)` API with a spawn-now/wait-later shape so lifecycle sequencing is explicit at the call site.
+- Return a spawned process handle, or `std::process::Child` directly if a wrapper adds no value.
+- Callers should mark the agent running only after spawn succeeds, then wait for completion.
+
+The intended call-site shape is:
+
+```rust
+let mut child = spawn_attached(&mut process)?;
+mark_running()?;
+let status = child.wait()?;
+```
+
+Prefer a synchronous process handle over a Rust `Future`; this code does not otherwise need async runtime machinery.
 
 ## Test Updates
 
@@ -35,7 +46,7 @@ Update or remove tests that depend on custom `Vec<u8>` capture via the private `
 Keep coverage for:
 
 - Child exit status is propagated.
-- `on_started()` runs after spawn.
+- The call path can mark the agent running after successful spawn and before waiting.
 - stdin is connected to null so stdin-reading commands do not block.
 
 ## Validation
