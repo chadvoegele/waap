@@ -14,8 +14,8 @@ I found that an effective pattern for running autonomous agents was making a `TO
 
 `waap` uses two types:
 
-1. Tickets describe implementation work and live at `.waap/tickets/<ticket-id>/ticket.md`.
-2. Agents describe assigned agent work and live at `.waap/agents/<agent-id>/agent.md`.
+1. `waap` tickets describe implementation work and live at `.waap/tickets/<ticket-id>/ticket.md`.
+2. `waap` agents contain agent instructions, e.g. `AGENTS.md`, and live at `.waap/agents/<agent-id>/agent.md`.
 
 The records use TOML frontmatter for structured `waap` metadata and the markdown body for unstructured content. The schema is intentionally plain text for agent-friendliness, and can be validated anytime with `waap check` using the `waap` CLI. The records are persisted in `git` so that agents can refer to past context.
 
