@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::cli::OutputFormat;
 use crate::git::{commit_paths, Committed};
-use crate::record::{require_initialized_project, WaapRecordKind};
+use crate::record::WaapRecordKind;
 use crate::ticket::{
     available_ticket_id, is_ticket_id, load_tickets_metadata, print_ticket_report_human,
     ticket_path, ticket_report_json, write_ticket_record, TicketMetadata, TicketReport,
@@ -65,8 +65,6 @@ pub(crate) fn create_ticket_with_markdown(
     depends_on: &[String],
     markdown: &str,
 ) -> io::Result<TicketReport> {
-    require_initialized_project(waap_root)?;
-
     for id in depends_on {
         if !is_ticket_id(id) {
             return Err(io::Error::new(
@@ -194,16 +192,6 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("tt-missing"));
         assert!(!dir.path().join(".waap/tickets/tt-bad-deps").exists());
-    }
-
-    #[test]
-    fn create_ticket_errors_when_project_not_initialized() {
-        let dir = tempdir().unwrap();
-
-        let err = create_ticket_with_markdown(dir.path(), Some("New Ticket"), &[], "").unwrap_err();
-
-        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
-        assert!(err.to_string().contains("waap init"));
     }
 
     #[test]

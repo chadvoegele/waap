@@ -8,7 +8,7 @@ use crate::agent::{
 };
 use crate::cli::OutputFormat;
 use crate::git::{commit_paths, Committed};
-use crate::record::{require_initialized_project, WaapRecordKind};
+use crate::record::WaapRecordKind;
 use crate::toml::current_toml_datetime;
 
 pub(crate) fn print_created_agent_report(
@@ -62,8 +62,6 @@ pub(crate) fn create_agent_with_markdown(
     name: Option<&str>,
     markdown: &str,
 ) -> io::Result<AgentReport> {
-    require_initialized_project(waap_root)?;
-
     let agents_dir = WaapRecordKind::Agent.root_path(waap_root);
     let agent_id = available_agent_id(&agents_dir, name)?;
 
@@ -113,16 +111,6 @@ mod tests {
         assert!(!contents.contains("role ="));
         assert!(contents.contains("\nstatus = \"ready\"\n+++\n\n# Purpose\nPlan things\n"));
         assert!(check_waap(dir.path()).is_empty());
-    }
-
-    #[test]
-    fn create_agent_errors_when_project_not_initialized() {
-        let dir = tempdir().unwrap();
-
-        let err = create_agent_with_markdown(dir.path(), None, "# Purpose\n").unwrap_err();
-
-        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
-        assert!(err.to_string().contains("waap init"));
     }
 
     #[test]
