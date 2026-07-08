@@ -1,7 +1,7 @@
 +++
 name = "Simplify attached process output forwarding"
 creation_date = 2026-07-08T10:48:42Z
-status = "in-progress"
+status = "completed"
 +++
 
 ## Context
