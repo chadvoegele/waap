@@ -1,7 +1,7 @@
 +++
 name = "remove-initialized-project-guard"
 creation_date = 2026-07-08T14:13:40Z
-status = "running"
+status = "completed"
 session_id = "019f4213-d8bf-76f3-9601-4cee9b6f4913"
 system = "codex"
 +++
