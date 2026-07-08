@@ -1,9 +1,7 @@
 use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, ExitStatus};
-
-use crate::process::run_forwarding;
+use std::process::{Child, Command as ProcessCommand, Stdio};
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct ClaudeRunConfig {
@@ -41,21 +39,16 @@ pub(super) fn kill_claude_session(session_id: &str) -> io::Result<()> {
     }
 }
 
-/// Run the Claude system in the foreground, forwarding its stdout and stderr to
-/// this process's stdout and stderr, and return its exit status. `on_started`
-/// runs once the process has been launched.
-pub(super) fn run_claude_attached<F>(
-    command: &ClaudeRunCommand,
-    on_started: F,
-) -> io::Result<ExitStatus>
-where
-    F: FnOnce() -> io::Result<()>,
-{
+/// Spawn Claude with output attached to this process and stdin disconnected.
+pub(super) fn spawn_claude_attached(command: &ClaudeRunCommand) -> io::Result<Child> {
     let mut process = ProcessCommand::new(&command.program);
     process
         .args(&command.args)
-        .current_dir(&command.working_dir);
-    run_forwarding(&mut process, on_started)
+        .current_dir(&command.working_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
 }
 
 pub(super) fn build_claude_run_command(
@@ -95,25 +88,35 @@ pub(super) fn build_claude_run_command(
 mod tests {
     use std::path::PathBuf;
 
-    use super::{build_claude_run_command, run_claude_attached, ClaudeRunCommand, ClaudeRunConfig};
+    use super::{
+        build_claude_run_command, spawn_claude_attached, ClaudeRunCommand, ClaudeRunConfig,
+    };
 
     #[test]
-    fn run_claude_attached_propagates_exit_code_and_marks_started() {
+    fn spawn_claude_attached_returns_child_with_exit_code() {
         let command = ClaudeRunCommand {
             program: "sh".to_string(),
             args: vec!["-c".to_string(), "exit 5".to_string()],
             working_dir: std::env::temp_dir(),
         };
 
-        let mut started = false;
-        let status = run_claude_attached(&command, || {
-            started = true;
-            Ok(())
-        })
-        .unwrap();
+        let mut child = spawn_claude_attached(&command).unwrap();
+        let status = child.wait().unwrap();
 
-        assert!(started);
         assert_eq!(status.code(), Some(5));
+    }
+
+    #[test]
+    fn spawn_claude_attached_connects_stdin_to_null() {
+        let command = ClaudeRunCommand {
+            program: "sh".to_string(),
+            args: vec!["-c".to_string(), "read value; test $? -ne 0".to_string()],
+            working_dir: std::env::temp_dir(),
+        };
+
+        let status = spawn_claude_attached(&command).unwrap().wait().unwrap();
+
+        assert!(status.success());
     }
 
     #[test]

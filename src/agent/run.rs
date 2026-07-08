@@ -4,11 +4,11 @@ use std::process::{ExitCode, ExitStatus};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use super::claude::{build_claude_run_command, claude_run_config_from_env, run_claude_attached};
+use super::claude::{build_claude_run_command, claude_run_config_from_env, spawn_claude_attached};
 use super::codex::{codex_run_config_from_env, spawn_codex_app_server, TurnStatus};
 use super::opencode::{
     build_opencode_run_command, create_opencode_session, opencode_run_config_from_env,
-    run_opencode_attached,
+    spawn_opencode_attached,
 };
 use crate::agent::{
     agent_report_json, load_agent_report, print_agent_report_human, read_agent_record,
@@ -114,7 +114,8 @@ fn run_agent_opencode(
             // Launch opencode against the prepared worktree rather than the repository root.
             config.waap_root = worktree.to_path_buf();
             let command = build_opencode_run_command(&config, agent_id, &session_id);
-            run_opencode_attached(&command, || Ok(()))
+            let mut child = spawn_opencode_attached(&command)?;
+            child.wait()
         },
     )?;
     finalize_agent_run(waap_root, output_format, agent_id, status)
@@ -140,7 +141,8 @@ fn run_agent_claude(
             // Launch claude in the prepared worktree rather than the repository root.
             config.waap_root = worktree.to_path_buf();
             let command = build_claude_run_command(&config, agent_id, &session_id);
-            run_claude_attached(&command, || Ok(()))
+            let mut child = spawn_claude_attached(&command)?;
+            child.wait()
         },
     )?;
     finalize_agent_run(waap_root, output_format, agent_id, status)

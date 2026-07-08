@@ -1,11 +1,9 @@
 use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, ExitStatus};
+use std::process::{Child, Command as ProcessCommand, Stdio};
 
 use serde_json::{json, Value as JsonValue};
-
-use crate::process::run_forwarding;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct OpencodeRunConfig {
@@ -41,19 +39,15 @@ fn required_env(name: &str) -> io::Result<String> {
     })
 }
 
-/// Run the OpenCode system in the foreground, forwarding its stdout and stderr
-/// to this process's stdout and stderr, and return its exit status.
-/// `on_started` runs once the process has been launched.
-pub(super) fn run_opencode_attached<F>(
-    command: &OpencodeRunCommand,
-    on_started: F,
-) -> io::Result<ExitStatus>
-where
-    F: FnOnce() -> io::Result<()>,
-{
+/// Spawn OpenCode with output attached to this process and stdin disconnected.
+pub(super) fn spawn_opencode_attached(command: &OpencodeRunCommand) -> io::Result<Child> {
     let mut process = ProcessCommand::new(&command.program);
-    process.args(&command.args);
-    run_forwarding(&mut process, on_started)
+    process
+        .args(&command.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
 }
 
 pub(super) fn create_opencode_session(config: &OpencodeRunConfig) -> io::Result<String> {
@@ -152,7 +146,7 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        build_opencode_run_command, create_session_payload, opencode_url, run_opencode_attached,
+        build_opencode_run_command, create_session_payload, opencode_url, spawn_opencode_attached,
         OpencodeRunCommand, OpencodeRunConfig,
     };
 
@@ -182,21 +176,28 @@ mod tests {
     }
 
     #[test]
-    fn run_opencode_attached_propagates_exit_code_and_marks_started() {
+    fn spawn_opencode_attached_returns_child_with_exit_code() {
         let command = OpencodeRunCommand {
             program: "sh".to_string(),
             args: vec!["-c".to_string(), "exit 3".to_string()],
         };
 
-        let mut started = false;
-        let status = run_opencode_attached(&command, || {
-            started = true;
-            Ok(())
-        })
-        .unwrap();
+        let mut child = spawn_opencode_attached(&command).unwrap();
+        let status = child.wait().unwrap();
 
-        assert!(started);
         assert_eq!(status.code(), Some(3));
+    }
+
+    #[test]
+    fn spawn_opencode_attached_connects_stdin_to_null() {
+        let command = OpencodeRunCommand {
+            program: "sh".to_string(),
+            args: vec!["-c".to_string(), "read value; test $? -ne 0".to_string()],
+        };
+
+        let status = spawn_opencode_attached(&command).unwrap().wait().unwrap();
+
+        assert!(status.success());
     }
 
     #[test]
