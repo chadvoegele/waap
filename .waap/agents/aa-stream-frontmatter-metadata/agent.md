@@ -1,7 +1,8 @@
 +++
 name = "stream-frontmatter-metadata"
 creation_date = 2026-07-08T13:52:15Z
-status = "ready"
+status = "running"
+system = "codex"
 +++
 
 # Purpose
