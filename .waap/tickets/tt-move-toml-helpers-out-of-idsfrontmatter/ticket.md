@@ -1,7 +1,7 @@
 +++
 name = "Move TOML helpers out of ids/frontmatter"
 creation_date = 2026-07-08T10:43:19Z
-status = "pending"
+status = "in-progress"
 +++
 
 ## Context
