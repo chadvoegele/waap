@@ -2,6 +2,7 @@
 name = "Prevent commands from invalidating waap state"
 creation_date = 2026-07-08T11:58:15Z
 status = "pending"
+depends_on = ["tt-remove-mutationerror-module", "tt-stream-frontmatter-metadata-loading"]
 +++
 
 ## Context
