@@ -6,7 +6,6 @@ mod frontmatter;
 mod git;
 mod ids;
 mod init;
-mod mutation;
 mod process;
 mod record;
 mod root;

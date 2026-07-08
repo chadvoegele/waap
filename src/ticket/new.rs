@@ -3,9 +3,8 @@ use std::io::{self, Read};
 use std::path::Path;
 
 use crate::cli::OutputFormat;
-use crate::git::commit_paths;
+use crate::git::{commit_paths, Committed};
 use crate::ids::current_toml_datetime;
-use crate::mutation::{Committed, MutationError, MutationResult};
 use crate::record::{require_initialized_project, WaapRecordKind};
 use crate::ticket::{
     available_ticket_id, is_ticket_id, print_ticket_report_human, ticket_path, ticket_report_json,
@@ -34,7 +33,7 @@ pub(crate) fn create_ticket(
     waap_root: &Path,
     name: Option<&str>,
     depends_on: &[String],
-) -> MutationResult<Committed<TicketReport>> {
+) -> io::Result<Committed<TicketReport>> {
     let mut markdown = String::new();
     io::stdin()
         .read_to_string(&mut markdown)
@@ -46,7 +45,12 @@ pub(crate) fn create_ticket(
         &[report.path.as_path()],
         &format!("waap ticket new {}", report.ticket_id),
     )
-    .map_err(MutationError::Commit)?;
+    .map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("failed to commit waap state change: {error}"),
+        )
+    })?;
 
     Ok(Committed {
         value: report,

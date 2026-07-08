@@ -3,8 +3,7 @@ use std::io;
 use std::path::Path;
 
 use crate::cli::OutputFormat;
-use crate::git::commit_paths;
-use crate::mutation::{Committed, MutationError, MutationResult};
+use crate::git::{commit_paths, Committed};
 use crate::ticket::{
     is_ticket_id, print_ticket_report_human, read_ticket_record, ticket_path, ticket_report_json,
     write_ticket_record, TicketReport, TicketStatus,
@@ -34,7 +33,7 @@ pub(crate) fn update_ticket(
     set_status: Option<&TicketStatus>,
     add_depends_on: &[String],
     remove_depends_on: &[String],
-) -> MutationResult<Committed<TicketReport>> {
+) -> io::Result<Committed<TicketReport>> {
     let report = update_ticket_record(
         waap_root,
         ticket_id,
@@ -47,7 +46,12 @@ pub(crate) fn update_ticket(
         &[report.path.as_path()],
         &format!("waap ticket update {}", report.ticket_id),
     )
-    .map_err(MutationError::Commit)?;
+    .map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("failed to commit waap state change: {error}"),
+        )
+    })?;
 
     Ok(Committed {
         value: report,

@@ -7,9 +7,8 @@ use crate::agent::{
     write_agent_record, AgentMetadata, AgentReport,
 };
 use crate::cli::OutputFormat;
-use crate::git::commit_paths;
+use crate::git::{commit_paths, Committed};
 use crate::ids::current_toml_datetime;
-use crate::mutation::{Committed, MutationError, MutationResult};
 use crate::record::{require_initialized_project, WaapRecordKind};
 
 pub(crate) fn print_created_agent_report(
@@ -33,7 +32,7 @@ pub(crate) fn print_created_agent_report(
 pub(crate) fn create_agent(
     waap_root: &Path,
     name: Option<&str>,
-) -> MutationResult<Committed<AgentReport>> {
+) -> io::Result<Committed<AgentReport>> {
     let mut markdown = String::new();
     io::stdin()
         .read_to_string(&mut markdown)
@@ -45,7 +44,12 @@ pub(crate) fn create_agent(
         &[report.path.as_path()],
         &format!("waap agent new {}", report.agent_id),
     )
-    .map_err(MutationError::Commit)?;
+    .map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("failed to commit waap state change: {error}"),
+        )
+    })?;
 
     Ok(Committed {
         value: report,

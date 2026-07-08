@@ -5,8 +5,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use crate::cli::OutputFormat;
-use crate::git::{commit_paths, is_inside_git_work_tree};
-use crate::mutation::{Committed, MutationError, MutationResult};
+use crate::git::{commit_paths, is_inside_git_work_tree, Committed};
 
 #[derive(Debug)]
 pub(crate) struct InitReport {
@@ -14,14 +13,13 @@ pub(crate) struct InitReport {
     pub(crate) marker: PathBuf,
 }
 
-pub(crate) fn init_project(waap_root: &Path) -> MutationResult<Committed<InitReport>> {
+pub(crate) fn init_project(waap_root: &Path) -> io::Result<Committed<InitReport>> {
     let waap_dir = waap_root.join(".waap");
     if waap_dir.exists() {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
             format!("{} already exists", waap_dir.display()),
-        )
-        .into());
+        ));
     }
 
     if !is_inside_git_work_tree(waap_root)? {
@@ -31,8 +29,7 @@ pub(crate) fn init_project(waap_root: &Path) -> MutationResult<Committed<InitRep
                 "{} is not inside a git repository; waap projects must be inside git",
                 waap_root.display()
             ),
-        )
-        .into());
+        ));
     }
 
     fs::create_dir_all(waap_dir.join("agents"))?;
@@ -45,8 +42,13 @@ pub(crate) fn init_project(waap_root: &Path) -> MutationResult<Committed<InitRep
         .unwrap_or_else(|_| waap_root.to_path_buf());
 
     let report = InitReport { path, marker };
-    let commit = commit_paths(waap_root, &[report.marker.as_path()], "waap init")
-        .map_err(MutationError::Commit)?;
+    let commit =
+        commit_paths(waap_root, &[report.marker.as_path()], "waap init").map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("failed to commit waap state change: {error}"),
+            )
+        })?;
 
     Ok(Committed {
         value: report,
@@ -81,7 +83,6 @@ mod tests {
 
     use super::init_project;
     use crate::check::check_waap;
-    use crate::mutation::MutationError;
     use crate::test_git::init_repo;
 
     #[test]
@@ -107,9 +108,7 @@ mod tests {
         init_repo(dir.path());
         fs::create_dir_all(dir.path().join(".waap")).unwrap();
 
-        let MutationError::Operation(err) = init_project(dir.path()).unwrap_err() else {
-            panic!("expected initialization error");
-        };
+        let err = init_project(dir.path()).unwrap_err();
 
         assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
         assert!(err.to_string().contains(".waap"));
@@ -119,9 +118,7 @@ mod tests {
     fn init_errors_outside_git_repository() {
         let dir = tempdir().unwrap();
 
-        let MutationError::Operation(err) = init_project(dir.path()).unwrap_err() else {
-            panic!("expected initialization error");
-        };
+        let err = init_project(dir.path()).unwrap_err();
 
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(!dir.path().join(".waap").exists());

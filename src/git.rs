@@ -29,11 +29,17 @@ pub(crate) fn remove_agent_worktree(waap_root: &Path, agent_id: &str) -> io::Res
         &[
             "worktree".into(),
             "remove".into(),
-            "--force".into(),  // in case an agent left uncommitted or untracked changes
+            "--force".into(), // in case an agent left uncommitted or untracked changes
             relative.as_os_str().to_os_string(),
         ],
     )?;
     Ok(())
+}
+
+#[derive(Debug)]
+pub(crate) struct Committed<T> {
+    pub(crate) value: T,
+    pub(crate) commit: String,
 }
 
 pub(crate) fn commit_paths(waap_root: &Path, paths: &[&Path], message: &str) -> io::Result<String> {

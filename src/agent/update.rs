@@ -7,8 +7,7 @@ use crate::agent::{
     AgentReport, AgentStatus,
 };
 use crate::cli::OutputFormat;
-use crate::git::commit_paths;
-use crate::mutation::{Committed, MutationError, MutationResult};
+use crate::git::{commit_paths, Committed};
 
 pub(crate) fn print_updated_agent_report(
     output_format: &OutputFormat,
@@ -33,14 +32,19 @@ pub(crate) fn update_agent(
     agent_id: &str,
     set_status: Option<&AgentStatus>,
     set_session_id: Option<&str>,
-) -> MutationResult<Committed<AgentReport>> {
+) -> io::Result<Committed<AgentReport>> {
     let report = update_agent_record(waap_root, agent_id, set_status, set_session_id)?;
     let commit = commit_paths(
         waap_root,
         &[report.path.as_path()],
         &format!("waap agent update {}", report.agent_id),
     )
-    .map_err(MutationError::Commit)?;
+    .map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("failed to commit waap state change: {error}"),
+        )
+    })?;
 
     Ok(Committed {
         value: report,

@@ -225,10 +225,9 @@ fn failed_commit_returns_error_but_keeps_state() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.starts_with("failed to commit waap state change:"),
+        stderr.starts_with("failed to create ticket: failed to commit waap state change:"),
         "{stderr}"
     );
-    assert!(!stderr.contains("failed to create ticket"), "{stderr}");
     assert!(output.stdout.is_empty());
     // State update is intact on disk despite the commit failure.
     assert!(dir.path().join(".waap/tickets/tt-task/ticket.md").is_file());

@@ -13,7 +13,6 @@ use crate::agent::{
 };
 use crate::cli::OutputFormat;
 use crate::git::commit_paths;
-use crate::mutation::{MutationError, MutationResult};
 use crate::record::{list_record_ids, WaapRecordKind};
 
 #[derive(Debug)]
@@ -46,7 +45,7 @@ pub(crate) fn agent_stop_json(report: &AgentStopReport) -> serde_json::Value {
 pub(crate) fn stop_agents_with_systems(
     waap_root: &Path,
     agent_id: Option<&str>,
-) -> MutationResult<AgentStopReport> {
+) -> io::Result<AgentStopReport> {
     let mut config = None;
     // The abort closure receives both `agent_id` and `session_id`: claude/opencode key their stop on
     // the `session_id`, while codex keys on the `agent_id` because `turn/interrupt` requires the live
@@ -85,7 +84,12 @@ pub(crate) fn stop_agents_with_systems(
                 &paths,
                 &format!("waap agent stop {}", ids.join(" ")),
             )
-            .map_err(MutationError::Commit)?,
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("failed to commit waap state change: {error}"),
+                )
+            })?,
         )
     };
 

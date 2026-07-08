@@ -1,4 +1,5 @@
 use std::env;
+use std::io;
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -13,20 +14,14 @@ use crate::agent::{
 use crate::check::{check_waap, print_check_errors, print_check_result};
 use crate::cli::{AgentCommand, Cli, Command, TicketCommand};
 use crate::init::{init_project, print_init_report};
-use crate::mutation::MutationError;
 use crate::root::resolve_waap_root;
 use crate::ticket::{
     create_ticket, get_ticket, list_tickets, print_ticket_get_report, print_ticket_list,
     print_ticket_report, print_updated_ticket_report, update_ticket,
 };
 
-fn mutation_error(context: &str, error: MutationError) -> ExitCode {
-    match error {
-        MutationError::Operation(error) => eprintln!("{context}: {error}"),
-        MutationError::Commit(error) => {
-            eprintln!("failed to commit waap state change: {error}");
-        }
-    }
+fn command_error(context: &str, error: io::Error) -> ExitCode {
+    eprintln!("{context}: {error}");
     ExitCode::from(1)
 }
 
@@ -76,7 +71,7 @@ pub(crate) fn run() -> ExitCode {
                 print_init_report(&cli.output_format, &report);
                 ExitCode::SUCCESS
             }
-            Err(error) => mutation_error("failed to initialize waap project", error),
+            Err(error) => command_error("failed to initialize waap project", error),
         },
         Command::Check => {
             let errors = check_waap(waap_root);
@@ -93,7 +88,7 @@ pub(crate) fn run() -> ExitCode {
                     print_created_agent_report(&cli.output_format, &report);
                     ExitCode::SUCCESS
                 }
-                Err(error) => mutation_error("failed to create agent", error),
+                Err(error) => command_error("failed to create agent", error),
             },
             // `agent run` commits the running-state change from inside the attached
             // run's on_started hook, then forwards the system's exit code.
@@ -122,7 +117,7 @@ pub(crate) fn run() -> ExitCode {
                         print_agent_stop_report(&cli.output_format, &report);
                         ExitCode::SUCCESS
                     }
-                    Err(error) => mutation_error("failed to stop agent", error),
+                    Err(error) => command_error("failed to stop agent", error),
                 }
             }
             AgentCommand::Update {
@@ -139,7 +134,7 @@ pub(crate) fn run() -> ExitCode {
                     print_updated_agent_report(&cli.output_format, &report);
                     ExitCode::SUCCESS
                 }
-                Err(error) => mutation_error("failed to update agent", error),
+                Err(error) => command_error("failed to update agent", error),
             },
             AgentCommand::List { status } => match list_agents(waap_root, status.as_ref()) {
                 Ok(reports) => {
@@ -159,7 +154,7 @@ pub(crate) fn run() -> ExitCode {
                         print_ticket_report(&cli.output_format, &report);
                         ExitCode::SUCCESS
                     }
-                    Err(error) => mutation_error("failed to create ticket", error),
+                    Err(error) => command_error("failed to create ticket", error),
                 }
             }
             TicketCommand::Get { ticket_id } => match get_ticket(waap_root, &ticket_id) {
@@ -194,7 +189,7 @@ pub(crate) fn run() -> ExitCode {
                         print_updated_ticket_report(&cli.output_format, &report);
                         ExitCode::SUCCESS
                     }
-                    Err(error) => mutation_error("failed to update ticket", error),
+                    Err(error) => command_error("failed to update ticket", error),
                 }
             }
             TicketCommand::List {
