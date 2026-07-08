@@ -8,3 +8,4 @@
 - Installed a temporary Rust 1.96.1 toolchain under `/tmp` because the host had no `cargo` executable.
 - Ran targeted Git and agent worktree tests; all passed.
 - Ran `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, debug and release builds, and the full test suite. All passed; the suite contained 223 unit and 23 integration tests.
+- Rebased onto current `main`, reran all required validations successfully, and fast-forward merged the feature commit.
