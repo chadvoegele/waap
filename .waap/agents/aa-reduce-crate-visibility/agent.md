@@ -1,7 +1,7 @@
 +++
 name = "reduce-crate-visibility"
 creation_date = 2026-07-08T14:36:38Z
-status = "running"
+status = "completed"
 session_id = "019f4228-e1d7-7c90-ab11-b7045a2dd4b8"
 system = "codex"
 +++
