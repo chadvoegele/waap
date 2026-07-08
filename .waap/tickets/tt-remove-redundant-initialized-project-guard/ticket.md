@@ -1,7 +1,7 @@
 +++
 name = "Remove redundant initialized project guard"
 creation_date = 2026-07-08T10:55:40Z
-status = "in-progress"
+status = "completed"
 +++
 
 ## Context
