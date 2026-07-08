@@ -1,5 +1,5 @@
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{ExitCode, ExitStatus};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -15,7 +15,7 @@ use crate::agent::{
     write_agent_record, AgentMetadata, AgentReport, AgentSystem,
 };
 use crate::cli::OutputFormat;
-use crate::git::{commit_paths, create_agent_worktree, remove_agent_worktree};
+use crate::git::{commit_paths, create_worktree, remove_worktree};
 use uuid::Uuid;
 
 pub(crate) fn print_run_agent_report(
@@ -57,6 +57,10 @@ pub(crate) fn run_agent(
     }
 }
 
+fn agent_worktree_dir(agent_id: &str) -> PathBuf {
+    Path::new("worktrees").join(agent_id)
+}
+
 /// Own the agent worktree lifecycle around a system run.
 ///
 /// `prepare` runs first, *before* the worktree is cut. It commits the agent's `running` status to
@@ -79,9 +83,10 @@ where
     F: FnOnce(&Path) -> io::Result<R>,
 {
     prepare()?;
-    let worktree = create_agent_worktree(waap_root, agent_id)?;
+    let relative_path = agent_worktree_dir(agent_id);
+    let worktree = create_worktree(waap_root, agent_id, &relative_path)?;
     let run_result = run(&worktree);
-    let cleanup_result = remove_agent_worktree(waap_root, agent_id);
+    let cleanup_result = remove_worktree(waap_root, &relative_path);
     let outcome = run_result?;
     cleanup_result?;
     Ok(outcome)
@@ -363,12 +368,13 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        finalize_agent_run, finalize_codex_run, run_in_agent_worktree, update_codex_session,
+        agent_worktree_dir, finalize_agent_run, finalize_codex_run, run_in_agent_worktree,
+        update_codex_session,
     };
     use crate::agent::codex::TurnStatus;
     use crate::agent::{agent_report_json, AgentMetadata, AgentReport};
     use crate::cli::OutputFormat;
-    use crate::git::{create_agent_worktree, remove_agent_worktree};
+    use crate::git::{create_worktree, remove_worktree};
     use crate::test_git::{init_repo_with_commit, run as git};
 
     #[test]
@@ -494,7 +500,8 @@ mod tests {
             dir.path(),
             &["commit", "-q", "-m", "waap agent run aa-00000001"],
         );
-        let worktree = create_agent_worktree(dir.path(), "aa-00000001").unwrap();
+        let relative_path = agent_worktree_dir("aa-00000001");
+        let worktree = create_worktree(dir.path(), "aa-00000001", &relative_path).unwrap();
 
         // The agent commits its work on its branch.
         fs::write(worktree.join("feature.txt"), "feature\n").unwrap();
@@ -517,7 +524,7 @@ mod tests {
         assert!(dir.path().join("other.txt").exists());
         assert!(dir.path().join("feature.txt").exists());
 
-        remove_agent_worktree(dir.path(), "aa-00000001").unwrap();
+        remove_worktree(dir.path(), &relative_path).unwrap();
     }
 
     #[test]
