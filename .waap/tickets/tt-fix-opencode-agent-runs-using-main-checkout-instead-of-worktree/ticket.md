@@ -2,6 +2,7 @@
 name = "Fix OpenCode agent runs using main checkout instead of worktree"
 creation_date = 2026-07-08T13:21:17Z
 status = "pending"
+depends_on = ["tt-generalize-git-worktree-helpers", "tt-simplify-attached-process-output-forwarding"]
 +++
 
 # Problem
