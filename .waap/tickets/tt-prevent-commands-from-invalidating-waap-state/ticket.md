@@ -16,6 +16,8 @@ One current example is ticket dependencies:
 
 We want a stronger command invariant: successful waap mutation commands should not invalidate waap state.
 
+This ticket implements that invariant for the known ticket-dependency gap. Do not broaden it into an audit or rewrite of every mutation command.
+
 ## Proposed Spec Change
 
 Update `specs/spec.md` to state that waap mutation commands must not leave `.waap/` invalid when they return success.

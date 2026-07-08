@@ -27,4 +27,5 @@ Validation:
 - Run `cargo fmt --check`.
 - Run `cargo clippy --all-targets -- -D warnings`.
 - Run `cargo build`.
+- Run `cargo build --release`.
 - Run `cargo test`.

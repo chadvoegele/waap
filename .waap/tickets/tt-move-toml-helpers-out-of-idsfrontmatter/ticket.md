@@ -14,12 +14,12 @@ During inspection, TOML serialization helpers were found in modules that do not 
 
 ## Proposed Change
 
-Create a focused `src/toml.rs` module for shared TOML helpers, then move the generic TOML functions there:
+Create a focused `src/toml_util.rs` module for shared TOML helpers. Avoid `src/toml.rs`, which would collide with the external `toml` crate name. Move the generic TOML functions there:
 
-- Move `current_toml_datetime()` from `ids.rs` to `toml.rs`.
-- Move `toml_string()` from `ids.rs` to `toml.rs`.
-- Move `datetime_string()` from `frontmatter.rs` to `toml.rs` if the final inspection still confirms it is not frontmatter-specific.
-- Add `mod toml;` in `src/main.rs`.
+- Move `current_toml_datetime()` from `ids.rs` to `toml_util.rs`.
+- Move `toml_string()` from `ids.rs` to `toml_util.rs`.
+- Move `datetime_string()` from `frontmatter.rs` to `toml_util.rs` if the final inspection still confirms it is not frontmatter-specific.
+- Add `mod toml_util;` in `src/main.rs`.
 - Update imports in agent and ticket modules.
 
 Keep `src/frontmatter.rs` responsible for TOML frontmatter delimiters, parsing, error construction, and field validation.

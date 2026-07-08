@@ -25,9 +25,9 @@ Simplify `src/process.rs`:
 - Replace `.stdout(Stdio::piped())` with `.stdout(Stdio::inherit())`.
 - Replace `.stderr(Stdio::piped())` with `.stderr(Stdio::inherit())`.
 - Remove the manual pipe-draining/copy code and stderr forwarding thread.
-- Replace the callback-oriented `run_forwarding(command, on_started)` API with a spawn-now/wait-later shape so lifecycle sequencing is explicit at the call site.
-- Prefer configuring the existing `Command` and calling `command.spawn()` directly instead of adding a new helper or wrapper unless implementation proves one is useful.
-- Callers should mark the agent running only after spawn succeeds, then wait for completion.
+- Replace the callback-oriented `run_forwarding(command, on_started)` API with a spawn-now/wait-later shape so lifecycle sequencing is explicit.
+- Prefer configuring the existing `Command` directly. An adapter-specific spawn helper returning `std::process::Child` is acceptable when command fields remain private to the adapter.
+- Preserve the current lifecycle: `run_in_agent_worktree` commits the running state before creating the worktree, then the run closure spawns the system and waits. Do not move `mark_running` after spawn; that would break the worktree branch-base invariant.
 
 The intended call-site shape is:
 
@@ -37,7 +37,6 @@ let mut child = process
     .stdout(Stdio::inherit())
     .stderr(Stdio::inherit())
     .spawn()?;
-mark_running()?;
 let status = child.wait()?;
 ```
 
@@ -50,7 +49,7 @@ Update or remove tests that depend on custom `Vec<u8>` capture via the private `
 Keep coverage for:
 
 - Child exit status is propagated.
-- The call path can mark the agent running after successful spawn and before waiting.
+- The adapter returns a synchronous child handle that the run path waits on.
 - stdin is connected to null so stdin-reading commands do not block.
 
 ## Validation

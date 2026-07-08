@@ -62,7 +62,7 @@ This intentionally accepts a second read in the full-record path because metadat
 
 Add or update tests for:
 
-- `parse_frontmatter(path, errors)` stops after the closing frontmatter delimiter and succeeds even if the body contains content that would be problematic to parse as TOML.
+- `parse_frontmatter(path, errors)` stops after the closing delimiter. Prove this with invalid UTF-8 bytes after a valid frontmatter section, or an equally direct read-boundary test; merely putting non-TOML Markdown in the body does not prove streaming.
 - Missing opening delimiter still reports the current missing-frontmatter error.
 - Missing closing delimiter still reports the current missing-closing-delimiter error.
 - Agent and ticket metadata loading still works.

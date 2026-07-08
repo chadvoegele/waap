@@ -6,6 +6,8 @@ status = "pending"
 
 Tighten Rust visibility by making private-only helpers and modules private instead of `pub(crate)`.
 
+Run this as the final cleanup after the pending structural refactors. The candidates below describe the current baseline: if an earlier ticket removed or renamed one, audit its replacement instead of restoring the old item solely to satisfy this list.
+
 Scope:
 
 - Change private-only helper functions from `pub(crate)` to private where they are only used in their defining module or child tests.
@@ -33,4 +35,5 @@ Validation:
 - Run `cargo fmt --check`.
 - Run `cargo clippy --all-targets -- -D warnings`.
 - Run `cargo build`.
+- Run `cargo build --release`.
 - Run `cargo test`.
