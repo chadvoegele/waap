@@ -1,6 +1,7 @@
 +++
 creation_date = 2026-07-09T19:50:03Z
-status = "ready"
+status = "running"
+system = "codex"
 +++
 
 # Purpose
