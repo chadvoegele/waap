@@ -6,7 +6,6 @@ use std::process::{Child, Command as ProcessCommand, Stdio};
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct ClaudeRunConfig {
     model: Option<String>,
-    pub(super) waap_root: PathBuf,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -16,13 +15,12 @@ pub(super) struct ClaudeRunCommand {
     working_dir: PathBuf,
 }
 
-pub(super) fn claude_run_config_from_env(waap_root: &Path) -> io::Result<ClaudeRunConfig> {
-    Ok(ClaudeRunConfig {
+pub(super) fn claude_run_config_from_env() -> ClaudeRunConfig {
+    ClaudeRunConfig {
         model: env::var("CLAUDE_MODEL")
             .ok()
             .filter(|model| !model.is_empty()),
-        waap_root: waap_root.canonicalize()?,
-    })
+    }
 }
 
 pub(super) fn kill_claude_session(session_id: &str) -> io::Result<()> {
@@ -55,6 +53,7 @@ pub(super) fn build_claude_run_command(
     config: &ClaudeRunConfig,
     agent_id: &str,
     session_id: &str,
+    worktree_dir: &Path,
 ) -> ClaudeRunCommand {
     let mut args = vec![
         "-p".to_string(),
@@ -80,7 +79,7 @@ pub(super) fn build_claude_run_command(
     ClaudeRunCommand {
         program: "claude".to_string(),
         args,
-        working_dir: config.waap_root.clone(),
+        working_dir: worktree_dir.to_path_buf(),
     }
 }
 
@@ -127,6 +126,7 @@ mod tests {
             &config,
             "aa-3881fda0",
             "11111111-2222-4333-8444-555555555555",
+            &PathBuf::from("/repo/with space"),
         );
 
         assert_eq!(
@@ -157,7 +157,12 @@ mod tests {
     fn claude_run_command_omits_model_when_unset() {
         let config = test_claude_config(None);
 
-        let command = build_claude_run_command(&config, "aa-3881fda0", "ses-uuid");
+        let command = build_claude_run_command(
+            &config,
+            "aa-3881fda0",
+            "ses-uuid",
+            &PathBuf::from("/repo/with space"),
+        );
 
         assert!(!command.args.iter().any(|arg| arg == "--model"));
         assert_eq!(
@@ -169,7 +174,6 @@ mod tests {
     fn test_claude_config(model: Option<&str>) -> ClaudeRunConfig {
         ClaudeRunConfig {
             model: model.map(str::to_string),
-            waap_root: PathBuf::from("/repo/with space"),
         }
     }
 }

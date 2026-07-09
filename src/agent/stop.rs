@@ -6,6 +6,7 @@ use serde_json::json;
 use super::claude::kill_claude_session;
 use super::codex::signal_codex_run;
 use super::opencode::{abort_opencode_session, opencode_run_config_from_env};
+use super::run::agent_worktree_dir;
 use crate::agent::get::load_agent_report;
 use crate::agent::{
     agent_report_json, print_agent_report_human, read_agent_record, write_agent_record,
@@ -58,9 +59,14 @@ pub(crate) fn stop_agents_with_systems(
             |system, agent_id, session_id| match system {
                 AgentSystem::Opencode => {
                     if config.is_none() {
-                        config = Some(opencode_run_config_from_env(waap_root)?);
+                        config = Some(opencode_run_config_from_env()?);
                     }
-                    abort_opencode_session(config.as_ref().expect("config initialized"), session_id)
+                    let worktree_dir = waap_root.join(agent_worktree_dir(agent_id));
+                    abort_opencode_session(
+                        config.as_ref().expect("config initialized"),
+                        session_id,
+                        &worktree_dir,
+                    )
                 }
                 AgentSystem::Claude => kill_claude_session(session_id),
                 AgentSystem::Codex => signal_codex_run(agent_id),

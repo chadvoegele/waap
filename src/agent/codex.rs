@@ -6,7 +6,7 @@
 
 use std::env;
 use std::io::{self, BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -36,18 +36,23 @@ const SANDBOX_DANGER_FULL_ACCESS: &str = "danger-full-access";
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct CodexRunConfig {
     model: Option<String>,
-    pub(super) waap_root: PathBuf,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CodexAppServerCommand {
+    program: String,
+    args: Vec<String>,
+    working_dir: std::path::PathBuf,
 }
 
 /// Read codex run configuration from the environment. Has no required vars, so
 /// it never fails for missing config (mirrors /specs/codex-agent-system.md §7).
-pub(super) fn codex_run_config_from_env(waap_root: &Path) -> io::Result<CodexRunConfig> {
-    Ok(CodexRunConfig {
+pub(super) fn codex_run_config_from_env() -> CodexRunConfig {
+    CodexRunConfig {
         model: env::var("CODEX_MODEL")
             .ok()
             .filter(|model| !model.is_empty()),
-        waap_root: waap_root.canonicalize()?,
-    })
+    }
 }
 
 /// Send `SIGTERM` to the `waap agent run` process (R) driving the codex agent,
@@ -232,15 +237,16 @@ pub(super) struct CodexClient<R, W, O> {
 }
 
 /// Spawn `codex app-server --stdio` with piped stdin+stdout and a JSON-RPC
-/// client over it, running in `config.waap_root` (the worktree). No prompt on
+/// client over it, running in `worktree_dir`. No prompt on
 /// the argv — the prompt is sent as turn input.
 pub(super) fn spawn_codex_app_server(
     config: &CodexRunConfig,
+    worktree_dir: &Path,
 ) -> io::Result<CodexClient<BufReader<ChildStdout>, ChildStdin, io::Stdout>> {
-    let mut child = ProcessCommand::new("codex")
-        .arg("app-server")
-        .arg("--stdio")
-        .current_dir(&config.waap_root)
+    let command = build_codex_app_server_command(worktree_dir);
+    let mut child = ProcessCommand::new(&command.program)
+        .args(&command.args)
+        .current_dir(&command.working_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -263,6 +269,14 @@ pub(super) fn spawn_codex_app_server(
         model: config.model.clone(),
         child: Some(child),
     })
+}
+
+fn build_codex_app_server_command(worktree_dir: &Path) -> CodexAppServerCommand {
+    CodexAppServerCommand {
+        program: "codex".to_string(),
+        args: vec!["app-server".to_string(), "--stdio".to_string()],
+        working_dir: worktree_dir.to_path_buf(),
+    }
 }
 
 impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
@@ -475,6 +489,20 @@ mod tests {
             Vec::new(),
             None,
         )
+    }
+
+    #[test]
+    fn codex_app_server_command_uses_worktree_directory() {
+        let worktree_dir = PathBuf::from("/repo/worktrees/aa-3881fda0");
+
+        assert_eq!(
+            build_codex_app_server_command(&worktree_dir),
+            CodexAppServerCommand {
+                program: "codex".to_string(),
+                args: vec!["app-server".to_string(), "--stdio".to_string()],
+                working_dir: worktree_dir,
+            }
+        );
     }
 
     #[test]
