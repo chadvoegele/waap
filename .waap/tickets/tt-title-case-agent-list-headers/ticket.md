@@ -1,7 +1,7 @@
 +++
 name = "Title Case Agent List Headers"
 creation_date = 2026-07-09T02:35:23Z
-status = "in-progress"
+status = "completed"
 +++
 
 # Summary
