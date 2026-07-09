@@ -1,7 +1,7 @@
 +++
 name = "Reuse Agent Record Metadata For Content Reports"
 creation_date = 2026-07-09T02:33:56Z
-status = "in-progress"
+status = "completed"
 +++
 
 # Summary
