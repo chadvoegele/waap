@@ -1,19 +1,12 @@
 # waap
 
-waap Agent Automation Platform
+`waap` Agent Automation Platform
 
 ## Description
 
-waap leverages agents to transform specifications into a tested, production-ready application. waap works by using agents to automate the software development lifecycle:
+`waap` is an agent automation platform that structures execution of disposable AI agents. Tickets are used to describe work, and agents are used to perform work. It provides scaffolding and parallelization for sub-agents.
 
-1. Product specifications
-1. Backlog curation
-1. Implementation
-1. Review
-1. Testing
-1. Release
-
-waap is an attempt at building an "AI software factory".
+`waap` can be used to build an "AI software factory".
 
 ## Conventions
 
