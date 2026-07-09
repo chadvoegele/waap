@@ -63,9 +63,10 @@ Config:
 ```rust
 pub(crate) struct CodexRunConfig {
     pub(crate) model: Option<String>,   // from CODEX_MODEL (optional)
-    pub(crate) repo_root: PathBuf,       // set to the worktree at run time
 }
 ```
+
+Pass `worktree_dir` separately to the app-server spawn and `thread/start`.
 
 A minimal JSON-RPC client over the child's stdin/stdout:
 
@@ -79,45 +80,40 @@ full sandbox access.
 
 ## 3. Driving a run (`run_agent_codex` in `src/agent/run.rs`)
 
-codex does not reuse `run_forwarding`. Add `run_agent_codex`, modeled
-structurally on `run_agent_opencode`:
+codex does not reuse `run_forwarding`. Its lifecycle matches the other agent
+systems:
 
 ```rust
-fn run_agent_codex(repo_root, output_format, agent_id) -> io::Result<ExitCode> {
-    let mut config = codex_run_config_from_env(repo_root)?;
+fn run_agent_codex(waap_root, output_format, agent_id) -> io::Result<ExitCode> {
+    let config = codex_run_config_from_env();
 
-    let (mut metadata, body) = read_agent_record(repo_root, agent_id)?;
+    let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
     metadata.system = Some(AgentSystem::Codex);
     // session_id (ThreadId) is unknown until thread/start returns.
 
-    let outcome = run_in_agent_worktree(
-        repo_root, agent_id,
-        || mark_running(repo_root, output_format, agent_id, &mut metadata, &body),
-        |worktree| {
-            config.repo_root = worktree.to_path_buf();
-            let mut client = spawn_codex_app_server(&config)?;   // child + JSON-RPC
-            client.initialize()?;
-            let thread_id = client.thread_start(worktree)?;       // real id, synchronous
+    mark_running(waap_root, output_format, agent_id, &mut metadata, &body)?;
+    let mut worktree = AgentWorktree::create(waap_root, agent_id)?;
+    let worktree_dir = worktree.dir().to_path_buf();
 
-            // Persist the authentic ThreadId as session_id, then commit.
-            update_codex_session(repo_root, output_format, agent_id, &thread_id)?;
+    let mut client = spawn_codex_app_server(&config, &worktree_dir)?;
+    client.initialize()?;
+    let thread_id = client.thread_start(&worktree_dir)?;
+    update_agent_session(waap_root, output_format, agent_id, &thread_id, Codex)?;
 
-            let prompt = format!(
-                "Complete when instructions in /.waap/agents/{agent_id}/agent.md are satisfied"
-            );
-            let turn_id = client.turn_start(&thread_id, &prompt)?;
-            // Forward agentMessage deltas to waap stdout; return the final turn status.
-            client.pump_until_turn_completed(&thread_id, &turn_id)   // -> TurnStatus
-        },
-    )?;
-
-    finalize_codex_run(repo_root, output_format, agent_id, outcome)
+    let turn_id = client.turn_start(&thread_id, prompt)?;
+    let outcome = client.pump_until_turn_completed(&thread_id, &turn_id)?;
+    drop(client);
+    worktree.cleanup()?;
+    finalize_codex_run(waap_root, output_format, agent_id, outcome)
 }
 ```
 
+The production flow routes each fallible operation through the guard's error
+cleanup method; the abbreviated example above omits that repetition.
+
 Extend the `run_agent` dispatch with `AgentSystem::Codex =>
-run_agent_codex(...)`. The worktree lifecycle (`run_in_agent_worktree`,
-`mark_running`) is reused verbatim.
+run_agent_codex(...)`. `AgentWorktree` removes the checkout explicitly on the
+normal path and from `Drop` after early errors.
 
 `mark_running` commits `running` before the worktree is cut, so `session_id` is
 not known yet; `thread/start` returns the `ThreadId` once the server is up
@@ -155,8 +151,8 @@ interrupt gracefully:
 app-server --stdio` child (which lacks the agent id), and is independent of
 whether R runs in the foreground or backgrounded (`nohup`/`setsid`).
 - R's `SIGTERM` handler calls `turn/interrupt(thread_id, turn_id)`, closes the
-connection, and returns through `run_in_agent_worktree` so the worktree is
-cleaned up. The interrupted turn yields a non-`Completed` status, so
+connection, and cleans up the owned `AgentWorktree`. The interrupted turn
+yields a non-`Completed` status, so
 `finalize_codex_run` leaves the agent `running` and never overwrites the
 `aborted` status `waap agent stop` writes to the record.
 - In `src/agent/stop.rs::stop_agents_with_systems`, the `AgentSystem::Codex`
@@ -171,10 +167,9 @@ waap implements.
 
 ## 6. Worktree integration
 
-`run_in_agent_worktree` cuts `worktrees/<agent-id>` from the `running` commit,
-runs inside it, and removes it afterward (even on error). codex reuses this
-unchanged: spawn `codex app-server --stdio` with `current_dir = worktree` and
-pass that `cwd` to `thread/start` so the model's tools operate in the worktree.
+`AgentWorktree` cuts `worktrees/<agent-id>` from the `running` commit and owns
+its cleanup. Spawn `codex app-server --stdio` with `current_dir = worktree_dir`
+and pass that `cwd` to `thread/start` so the model's tools operate there.
 `CODEX_HOME` (auth/config/sessions, default `~/.codex`) is inherited from the
 environment, is not the worktree, and is neither set nor relocated by waap.
 

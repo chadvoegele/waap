@@ -38,13 +38,6 @@ pub(super) struct CodexRunConfig {
     model: Option<String>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct CodexAppServerCommand {
-    program: String,
-    args: Vec<String>,
-    working_dir: std::path::PathBuf,
-}
-
 /// Read codex run configuration from the environment. Has no required vars, so
 /// it never fails for missing config (mirrors /specs/codex-agent-system.md §7).
 pub(super) fn codex_run_config_from_env() -> CodexRunConfig {
@@ -243,10 +236,8 @@ pub(super) fn spawn_codex_app_server(
     config: &CodexRunConfig,
     worktree_dir: &Path,
 ) -> io::Result<CodexClient<BufReader<ChildStdout>, ChildStdin, io::Stdout>> {
-    let command = build_codex_app_server_command(worktree_dir);
-    let mut child = ProcessCommand::new(&command.program)
-        .args(&command.args)
-        .current_dir(&command.working_dir)
+    let mut command = codex_app_server_command(worktree_dir);
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -271,12 +262,13 @@ pub(super) fn spawn_codex_app_server(
     })
 }
 
-fn build_codex_app_server_command(worktree_dir: &Path) -> CodexAppServerCommand {
-    CodexAppServerCommand {
-        program: "codex".to_string(),
-        args: vec!["app-server".to_string(), "--stdio".to_string()],
-        working_dir: worktree_dir.to_path_buf(),
-    }
+fn codex_app_server_command(worktree_dir: &Path) -> ProcessCommand {
+    let mut command = ProcessCommand::new("codex");
+    command
+        .arg("app-server")
+        .arg("--stdio")
+        .current_dir(worktree_dir);
+    command
 }
 
 impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
@@ -533,12 +525,20 @@ mod tests {
 
     #[test]
     fn thread_start_params_encode_never_approvals_and_full_access() {
-        let params = thread_start_params(&PathBuf::from("/repo/with space"), Some("o3"));
+        let worktree_dir = PathBuf::from("/repo/with space");
+        let params = thread_start_params(&worktree_dir, Some("o3"));
+        let command = codex_app_server_command(&worktree_dir);
 
         assert_eq!(params["approvalPolicy"], json!("never"));
         assert_eq!(params["sandbox"], json!("danger-full-access"));
         assert_eq!(params["cwd"], json!("/repo/with space"));
         assert_eq!(params["model"], json!("o3"));
+        assert_eq!(command.get_program(), "codex");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["app-server", "--stdio"]
+        );
+        assert_eq!(command.get_current_dir(), Some(worktree_dir.as_path()));
     }
 
     #[test]

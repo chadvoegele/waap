@@ -1,5 +1,5 @@
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
@@ -61,11 +61,10 @@ pub(crate) fn stop_agents_with_systems(
                     if config.is_none() {
                         config = Some(opencode_run_config_from_env()?);
                     }
-                    let worktree_dir = waap_root.join(agent_worktree_dir(agent_id));
                     abort_opencode_session(
                         config.as_ref().expect("config initialized"),
                         session_id,
-                        &worktree_dir,
+                        &agent_worktree_dir(waap_root, agent_id)?,
                     )
                 }
                 AgentSystem::Claude => kill_claude_session(session_id),
@@ -103,6 +102,10 @@ pub(crate) fn stop_agents_with_systems(
         stopped_agents,
         commit,
     })
+}
+
+fn agent_worktree_dir(waap_root: &Path, agent_id: &str) -> io::Result<PathBuf> {
+    Ok(waap_root.canonicalize()?.join("worktrees").join(agent_id))
 }
 
 pub(super) fn stop_agents(
@@ -156,9 +159,22 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{agent_stop_json, stop_agents, AgentStopReport};
+    use super::{agent_stop_json, agent_worktree_dir, stop_agents, AgentStopReport};
     use crate::agent::get::load_agent_report;
     use crate::agent::{AgentMetadata, AgentReport, AgentSystem};
+
+    #[test]
+    fn opencode_stop_derives_agent_worktree_directory() {
+        let dir = tempdir().unwrap();
+
+        assert_eq!(
+            agent_worktree_dir(dir.path(), "aa-3881fda0").unwrap(),
+            dir.path()
+                .canonicalize()
+                .unwrap()
+                .join("worktrees/aa-3881fda0")
+        );
+    }
 
     #[test]
     fn agent_stop_stops_one_running_agent() {

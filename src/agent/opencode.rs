@@ -66,7 +66,7 @@ pub(super) fn create_opencode_session(
     let response: JsonValue = reqwest::blocking::Client::new()
         .post(opencode_url(config, "/session"))
         .basic_auth(&config.username, Some(&config.password))
-        .query(&[("directory", opencode_directory(worktree_dir))])
+        .query(&opencode_directory_query(worktree_dir))
         .json(&create_session_payload())
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
@@ -97,12 +97,16 @@ pub(super) fn abort_opencode_session(
             &format!("/session/{session_id}/abort"),
         ))
         .basic_auth(&config.username, Some(&config.password))
-        .query(&[("directory", opencode_directory(worktree_dir))])
+        .query(&opencode_directory_query(worktree_dir))
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
         .map_err(opencode_http_error)?;
 
     Ok(())
+}
+
+fn opencode_directory_query(worktree_dir: &Path) -> [(&'static str, String); 1] {
+    [("directory", worktree_dir.display().to_string())]
 }
 
 fn opencode_http_error(error: reqwest::Error) -> io::Error {
@@ -144,7 +148,7 @@ pub(super) fn build_opencode_run_command(
             "--model".to_string(),
             config.model.clone(),
             "--dir".to_string(),
-            opencode_directory(worktree_dir),
+            worktree_dir.display().to_string(),
             "--agent".to_string(),
             "build".to_string(),
             "--command".to_string(),
@@ -165,7 +169,7 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        build_opencode_run_command, create_session_payload, opencode_directory, opencode_url,
+        build_opencode_run_command, create_session_payload, opencode_directory_query, opencode_url,
         spawn_opencode_attached, OpencodeRunCommand, OpencodeRunConfig,
     };
 
@@ -222,13 +226,9 @@ mod tests {
     #[test]
     fn opencode_run_command_matches_spec() {
         let config = test_opencode_config();
+        let worktree_dir = PathBuf::from("/repo/with space");
 
-        let command = build_opencode_run_command(
-            &config,
-            "aa-3881fda0",
-            "ses_123",
-            &PathBuf::from("/repo/with space"),
-        );
+        let command = build_opencode_run_command(&config, "aa-3881fda0", "ses_123", &worktree_dir);
 
         assert_eq!(command.program, "opencode");
         assert_eq!(
@@ -252,6 +252,10 @@ mod tests {
                 "Complete when instructions in /.waap/agents/aa-3881fda0/agent.md are satisfied"
                     .to_string(),
             ]
+        );
+        assert_eq!(
+            opencode_directory_query(&worktree_dir),
+            [("directory", "/repo/with space".to_string())]
         );
     }
 

@@ -126,7 +126,7 @@ mod tests {
             &config,
             "aa-3881fda0",
             "11111111-2222-4333-8444-555555555555",
-            &PathBuf::from("/repo/with space"),
+            PathBuf::from("/repo/with space").as_path(),
         );
 
         assert_eq!(
@@ -161,7 +161,7 @@ mod tests {
             &config,
             "aa-3881fda0",
             "ses-uuid",
-            &PathBuf::from("/repo/with space"),
+            PathBuf::from("/repo/with space").as_path(),
         );
 
         assert!(!command.args.iter().any(|arg| arg == "--model"));
