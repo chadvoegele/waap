@@ -37,11 +37,8 @@ fn print_run_agent_report(
     }
 }
 
-/// Map a finished process's exit status to a CLI exit code so `waap agent run`
-/// exits with the same code as the system it ran. Processes terminated by a
-/// signal have no exit code; report a generic failure for those.
 fn exit_code_from_status(status: ExitStatus) -> ExitCode {
-    ExitCode::from(status.code().unwrap_or(1) as u8)
+    ExitCode::from(status.code().unwrap_or(1) as u8)   // if no exit code, report generic failure
 }
 
 pub(crate) fn run_agent(

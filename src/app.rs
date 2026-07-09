@@ -90,8 +90,6 @@ pub(crate) fn run() -> ExitCode {
                 }
                 Err(error) => command_error("failed to create agent", error),
             },
-            // `agent run` commits the running-state change from inside the attached
-            // run's on_started hook, then forwards the system's exit code.
             AgentCommand::Run { agent_id, system } => {
                 match run_agent(waap_root, &cli.output_format, &agent_id, &system) {
                     Ok(status) => status,

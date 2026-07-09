@@ -52,7 +52,6 @@ fn required_env(name: &str) -> io::Result<String> {
     })
 }
 
-/// Spawn OpenCode with output attached to this process and stdin disconnected.
 pub(super) fn spawn_opencode_attached(command: &OpencodeRunCommand) -> io::Result<Child> {
     let mut process = ProcessCommand::new(&command.program);
     process
