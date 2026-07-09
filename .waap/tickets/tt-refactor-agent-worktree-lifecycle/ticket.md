@@ -1,7 +1,7 @@
 +++
 name = "Refactor Agent Worktree Lifecycle"
 creation_date = 2026-07-09T12:07:18Z
-status = "pending"
+status = "in-progress"
 +++
 
 # Refactor Agent Worktree Lifecycle
