@@ -1,7 +1,7 @@
 +++
 name = "Refactor agent worktree cleanup"
 creation_date = 2026-07-09T19:49:45Z
-status = "in-progress"
+status = "completed"
 +++
 
 # Refactor Agent Worktree Cleanup
