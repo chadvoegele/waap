@@ -38,7 +38,7 @@ fn print_run_agent_report(
 }
 
 fn exit_code_from_status(status: ExitStatus) -> ExitCode {
-    ExitCode::from(status.code().unwrap_or(1) as u8)   // if no exit code, report generic failure
+    ExitCode::from(status.code().unwrap_or(1) as u8) // if no exit code, report generic failure
 }
 
 pub(crate) fn run_agent(
