@@ -6,7 +6,6 @@ use serde_json::json;
 use super::claude::kill_claude_session;
 use super::codex::signal_codex_run;
 use super::opencode::{abort_opencode_session, opencode_run_config_from_env};
-use super::run::agent_worktree_dir;
 use crate::agent::get::load_agent_report;
 use crate::agent::{
     agent_report_json, print_agent_report_human, read_agent_record, write_agent_record,

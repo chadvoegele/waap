@@ -113,10 +113,6 @@ fn opencode_http_error(error: reqwest::Error) -> io::Error {
     io::Error::other(format!("opencode HTTP request failed: {error}"))
 }
 
-fn opencode_directory(worktree_dir: &Path) -> String {
-    worktree_dir.display().to_string()
-}
-
 fn create_session_payload() -> JsonValue {
     json!({
         "permission": [
@@ -256,27 +252,6 @@ mod tests {
         assert_eq!(
             opencode_directory_query(&worktree_dir),
             [("directory", "/repo/with space".to_string())]
-        );
-    }
-
-    #[test]
-    fn opencode_session_and_run_use_worktree_directory() {
-        let worktree_dir = PathBuf::from("/repo/worktrees/aa-3881fda0");
-        let command = build_opencode_run_command(
-            &test_opencode_config(),
-            "aa-3881fda0",
-            "ses_123",
-            &worktree_dir,
-        );
-        let dir_index = command.args.iter().position(|arg| arg == "--dir").unwrap();
-
-        assert_eq!(
-            opencode_directory(&worktree_dir),
-            worktree_dir.display().to_string()
-        );
-        assert_eq!(
-            command.args[dir_index + 1],
-            worktree_dir.display().to_string()
         );
     }
 

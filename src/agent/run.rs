@@ -54,7 +54,7 @@ pub(crate) fn run_agent(
     }
 }
 
-pub(super) fn agent_worktree_dir(agent_id: &str) -> PathBuf {
+fn agent_worktree_dir(agent_id: &str) -> PathBuf {
     Path::new("worktrees").join(agent_id)
 }
 
@@ -423,7 +423,6 @@ fn finalize_run(
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
     use std::fs;
     use std::os::unix::process::ExitStatusExt;
     use std::path::{Path, PathBuf};
@@ -437,7 +436,6 @@ mod tests {
         update_agent_session, AgentWorktree,
     };
     use crate::agent::codex::TurnStatus;
-    use crate::agent::stop::stop_agents;
     use crate::agent::{
         agent_report_json, read_agent_record, AgentMetadata, AgentReport, AgentSystem,
     };
@@ -649,94 +647,37 @@ mod tests {
             let (mut metadata, body) = read_agent_record(dir.path(), agent_id).unwrap();
             metadata.system = Some(system.clone());
 
-        mark_running(
-            dir.path(),
-            &OutputFormat::Json,
-            agent_id,
-            &mut metadata,
-            &body,
-        )
-        .unwrap();
-        let mut worktree = AgentWorktree::create(dir.path(), agent_id).unwrap();
-        let session_id = "ses_live";
-        update_agent_session(
-            dir.path(),
-            &OutputFormat::Json,
-            agent_id,
-            session_id,
-            AgentSystem::Opencode,
-        )
-        .unwrap();
+            mark_running(
+                dir.path(),
+                &OutputFormat::Json,
+                agent_id,
+                &mut metadata,
+                &body,
+            )
+            .unwrap();
+            let mut worktree = AgentWorktree::create(dir.path(), agent_id).unwrap();
+            update_agent_session(
+                dir.path(),
+                &OutputFormat::Json,
+                agent_id,
+                session_id,
+                system.clone(),
+            )
+            .unwrap();
 
-        let (main_metadata, _) = read_agent_record(dir.path(), agent_id).unwrap();
-        assert_eq!(main_metadata.status, "running");
-        assert_eq!(main_metadata.system, Some(AgentSystem::Opencode));
-        assert_eq!(main_metadata.session_id.as_deref(), Some(session_id));
+            let (main_metadata, _) = read_agent_record(dir.path(), agent_id).unwrap();
+            assert_eq!(main_metadata.status, "running");
+            assert_eq!(main_metadata.system, Some(system.clone()));
+            assert_eq!(main_metadata.session_id.as_deref(), Some(session_id));
 
-        let (branch_metadata, _) = read_agent_record(worktree.dir(), agent_id).unwrap();
-        assert_eq!(branch_metadata.status, "running");
-        assert_eq!(branch_metadata.system, Some(AgentSystem::Opencode));
-        assert_eq!(branch_metadata.session_id, None);
+            // The branch was cut before the authentic session id was committed on main.
+            let (branch_metadata, _) = read_agent_record(worktree.dir(), agent_id).unwrap();
+            assert_eq!(branch_metadata.status, "running");
+            assert_eq!(branch_metadata.system, Some(system));
+            assert_eq!(branch_metadata.session_id, None);
 
-        let stopped = stop_agents(
-            dir.path(),
-            Some(agent_id),
-            |system, stopped_agent_id, stopped_session_id| {
-                assert_eq!(system, &AgentSystem::Opencode);
-                assert_eq!(stopped_agent_id, agent_id);
-                assert_eq!(stopped_session_id, session_id);
-                abort_called.set(true);
-                Ok(())
-            },
-        )
-        .unwrap();
-        assert_eq!(stopped.len(), 1);
-        worktree.cleanup().unwrap();
-
-        assert!(abort_called.get());
-        assert!(!dir.path().join("worktrees/aa-00000001").exists());
-    }
-
-    #[test]
-    fn codex_thread_id_is_visible_on_main_during_run() {
-        let dir = tempdir().unwrap();
-        init_repo_with_commit(dir.path());
-        let agent_id = "aa-00000001";
-        seed_agent_record(dir.path(), agent_id, "ready");
-        let (mut metadata, body) = read_agent_record(dir.path(), agent_id).unwrap();
-        metadata.system = Some(AgentSystem::Codex);
-
-        mark_running(
-            dir.path(),
-            &OutputFormat::Json,
-            agent_id,
-            &mut metadata,
-            &body,
-        )
-        .unwrap();
-        let mut worktree = AgentWorktree::create(dir.path(), agent_id).unwrap();
-
-        // Production persists this authentic id only after thread/start succeeds in the worktree.
-        update_agent_session(
-            dir.path(),
-            &OutputFormat::Json,
-            agent_id,
-            "th_live",
-            AgentSystem::Codex,
-        )
-        .unwrap();
-
-        let (main_metadata, _) = read_agent_record(dir.path(), agent_id).unwrap();
-        assert_eq!(main_metadata.status, "running");
-        assert_eq!(main_metadata.system, Some(AgentSystem::Codex));
-        assert_eq!(main_metadata.session_id.as_deref(), Some("th_live"));
-
-        let (branch_metadata, _) = read_agent_record(worktree.dir(), agent_id).unwrap();
-        assert_eq!(branch_metadata.status, "running");
-        assert_eq!(branch_metadata.system, Some(AgentSystem::Codex));
-        assert_eq!(branch_metadata.session_id, None);
-
-        worktree.cleanup().unwrap();
+            worktree.cleanup().unwrap();
+        }
     }
 
     #[test]

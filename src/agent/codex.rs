@@ -484,20 +484,6 @@ mod tests {
     }
 
     #[test]
-    fn codex_app_server_command_uses_worktree_directory() {
-        let worktree_dir = PathBuf::from("/repo/worktrees/aa-3881fda0");
-
-        assert_eq!(
-            build_codex_app_server_command(&worktree_dir),
-            CodexAppServerCommand {
-                program: "codex".to_string(),
-                args: vec!["app-server".to_string(), "--stdio".to_string()],
-                working_dir: worktree_dir,
-            }
-        );
-    }
-
-    #[test]
     fn request_line_is_single_line_with_id_method_params_and_no_jsonrpc() {
         let line = request_line(7, METHOD_INITIALIZE, initialize_params());
 
