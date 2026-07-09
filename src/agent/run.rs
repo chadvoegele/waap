@@ -4,11 +4,13 @@ use std::process::{ExitCode, ExitStatus};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use super::claude::{build_claude_run_command, claude_run_config_from_env, spawn_claude_attached};
-use super::codex::{codex_run_config_from_env, spawn_codex_app_server, TurnStatus};
+use super::claude::{
+    build_claude_run_command, claude_run_config_from_env, spawn_claude_attached, ClaudeRunConfig,
+};
+use super::codex::{codex_run_config_from_env, spawn_codex_app_server, CodexRunConfig, TurnStatus};
 use super::opencode::{
     build_opencode_run_command, create_opencode_session, opencode_run_config_from_env,
-    spawn_opencode_attached,
+    spawn_opencode_attached, OpencodeRunConfig,
 };
 use crate::agent::{
     agent_report_json, load_agent_report, print_agent_report_human, read_agent_record,
@@ -91,15 +93,13 @@ impl AgentWorktree {
         Ok(())
     }
 
-    /// Clean up before returning a run error. A simultaneous cleanup failure is attached to the
-    /// original error without changing its kind, so the run failure retains precedence.
-    fn cleanup_on_error<T>(&mut self, result: io::Result<T>) -> io::Result<T> {
-        let Err(run_error) = result else {
-            return result;
-        };
-        match self.cleanup() {
-            Ok(()) => Err(run_error),
-            Err(cleanup_error) => Err(io::Error::new(
+    /// Combine a completed run with explicit cleanup, retaining a run failure as the primary error.
+    fn finish<T>(&mut self, result: io::Result<T>) -> io::Result<T> {
+        match (result, self.cleanup()) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
+            (Err(run_error), Ok(())) => Err(run_error),
+            (Err(run_error), Err(cleanup_error)) => Err(io::Error::new(
                 run_error.kind(),
                 format!("{run_error}; worktree cleanup also failed: {cleanup_error}"),
             )),
@@ -131,27 +131,31 @@ fn run_agent_opencode(
     mark_running(waap_root, output_format, agent_id, &mut metadata, &body)?;
     let mut worktree = AgentWorktree::create(waap_root, agent_id)?;
     let worktree_dir = worktree.dir().to_path_buf();
+    let result =
+        run_opencode_in_worktree(waap_root, output_format, agent_id, &config, &worktree_dir);
+    let status = worktree.finish(result)?;
 
-    let session_id = worktree.cleanup_on_error(create_opencode_session(&config, &worktree_dir))?;
-    worktree.cleanup_on_error(update_agent_session(
+    finalize_agent_run(waap_root, output_format, agent_id, status)
+}
+
+fn run_opencode_in_worktree(
+    waap_root: &Path,
+    output_format: &OutputFormat,
+    agent_id: &str,
+    config: &OpencodeRunConfig,
+    worktree_dir: &Path,
+) -> io::Result<ExitStatus> {
+    let session_id = create_opencode_session(config, worktree_dir)?;
+    update_agent_session(
         waap_root,
         output_format,
         agent_id,
         &session_id,
         AgentSystem::Opencode,
-    ))?;
-    let command = build_opencode_run_command(&config, agent_id, &session_id, &worktree_dir);
-    let mut child = worktree.cleanup_on_error(spawn_opencode_attached(&command))?;
-    let status = match child.wait() {
-        Ok(status) => status,
-        Err(error) => {
-            drop(child);
-            return worktree.cleanup_on_error(Err(error));
-        }
-    };
-    worktree.cleanup()?;
-
-    finalize_agent_run(waap_root, output_format, agent_id, status)
+    )?;
+    let command = build_opencode_run_command(config, agent_id, &session_id, worktree_dir);
+    let mut child = spawn_opencode_attached(&command)?;
+    child.wait()
 }
 
 fn run_agent_claude(
@@ -168,18 +172,21 @@ fn run_agent_claude(
 
     mark_running(waap_root, output_format, agent_id, &mut metadata, &body)?;
     let mut worktree = AgentWorktree::create(waap_root, agent_id)?;
-    let command = build_claude_run_command(&config, agent_id, &session_id, worktree.dir());
-    let mut child = worktree.cleanup_on_error(spawn_claude_attached(&command))?;
-    let status = match child.wait() {
-        Ok(status) => status,
-        Err(error) => {
-            drop(child);
-            return worktree.cleanup_on_error(Err(error));
-        }
-    };
-    worktree.cleanup()?;
+    let result = run_claude_in_worktree(&config, agent_id, &session_id, worktree.dir());
+    let status = worktree.finish(result)?;
 
     finalize_agent_run(waap_root, output_format, agent_id, status)
+}
+
+fn run_claude_in_worktree(
+    config: &ClaudeRunConfig,
+    agent_id: &str,
+    session_id: &str,
+    worktree_dir: &Path,
+) -> io::Result<ExitStatus> {
+    let command = build_claude_run_command(config, agent_id, session_id, worktree_dir);
+    let mut child = spawn_claude_attached(&command)?;
+    child.wait()
 }
 
 /// Drive a `codex` run via the `codex app-server --stdio` JSON-RPC client (see
@@ -210,52 +217,44 @@ fn run_agent_codex(
     mark_running(waap_root, output_format, agent_id, &mut metadata, &body)?;
     let mut worktree = AgentWorktree::create(waap_root, agent_id)?;
     let worktree_dir = worktree.dir().to_path_buf();
+    let result = run_codex_in_worktree(
+        waap_root,
+        output_format,
+        agent_id,
+        &config,
+        &worktree_dir,
+        &interrupt,
+    );
+    let status = worktree.finish(result)?;
 
-    let mut client = worktree.cleanup_on_error(spawn_codex_app_server(&config, &worktree_dir))?;
-    if let Err(error) = client.initialize() {
-        drop(client);
-        return worktree.cleanup_on_error(Err(error));
-    }
-    let thread_id = match client.thread_start(&worktree_dir) {
-        Ok(thread_id) => thread_id,
-        Err(error) => {
-            drop(client);
-            return worktree.cleanup_on_error(Err(error));
-        }
-    };
+    finalize_codex_run(waap_root, output_format, agent_id, status)
+}
+
+fn run_codex_in_worktree(
+    waap_root: &Path,
+    output_format: &OutputFormat,
+    agent_id: &str,
+    config: &CodexRunConfig,
+    worktree_dir: &Path,
+    interrupt: &AtomicBool,
+) -> io::Result<TurnStatus> {
+    let mut client = spawn_codex_app_server(config, worktree_dir)?;
+    client.initialize()?;
+    let thread_id = client.thread_start(worktree_dir)?;
 
     // Persist the authentic ThreadId on main only after thread/start succeeds in the worktree.
-    if let Err(error) = update_agent_session(
+    update_agent_session(
         waap_root,
         output_format,
         agent_id,
         &thread_id,
         AgentSystem::Codex,
-    ) {
-        drop(client);
-        return worktree.cleanup_on_error(Err(error));
-    }
+    )?;
 
     let prompt =
         format!("Complete when instructions in /.waap/agents/{agent_id}/agent.md are satisfied");
-    let turn_id = match client.turn_start(&thread_id, &prompt) {
-        Ok(turn_id) => turn_id,
-        Err(error) => {
-            drop(client);
-            return worktree.cleanup_on_error(Err(error));
-        }
-    };
-    let status = match client.pump_until_turn_completed(&thread_id, &turn_id, &interrupt) {
-        Ok(status) => status,
-        Err(error) => {
-            drop(client);
-            return worktree.cleanup_on_error(Err(error));
-        }
-    };
-    drop(client);
-    worktree.cleanup()?;
-
-    finalize_codex_run(waap_root, output_format, agent_id, status)
+    let turn_id = client.turn_start(&thread_id, &prompt)?;
+    client.pump_until_turn_completed(&thread_id, &turn_id, interrupt)
 }
 
 /// Mark the agent as running, commit the state change to `main`, and report it.
@@ -481,7 +480,7 @@ mod tests {
         let hidden_git_dir = dir.path().join(".git-hidden");
         fs::rename(&git_dir, &hidden_git_dir).unwrap();
 
-        let error = worktree.cleanup().unwrap_err();
+        let error = worktree.finish(Ok(())).unwrap_err();
 
         fs::rename(hidden_git_dir, git_dir).unwrap();
         assert!(error.to_string().contains("git worktree failed"));
@@ -499,7 +498,7 @@ mod tests {
         fs::rename(&git_dir, &hidden_git_dir).unwrap();
 
         let error = worktree
-            .cleanup_on_error(Err::<(), _>(std::io::Error::new(
+            .finish(Err::<(), _>(std::io::Error::new(
                 std::io::ErrorKind::ConnectionAborted,
                 "run failed",
             )))
