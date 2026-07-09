@@ -8,8 +8,8 @@ use crate::agent::{AgentReport, AgentStatus};
 use crate::cli::OutputFormat;
 use crate::record::{list_record_ids, WaapRecordKind};
 
-const AGENT_ID_HEADER: &str = "AGENT ID";
-const STATUS_HEADER: &str = "STATUS";
+const AGENT_ID_HEADER: &str = "Agent ID";
+const STATUS_HEADER: &str = "Status";
 
 pub(crate) fn print_agent_list(output_format: &OutputFormat, reports: &[AgentReport]) {
     match output_format {
@@ -34,8 +34,12 @@ fn agent_list_human_lines(reports: &[AgentReport]) -> Vec<String> {
         .unwrap_or(0)
         .max(AGENT_ID_HEADER.len());
 
-    let mut lines = Vec::with_capacity(reports.len() + 1);
+    let id_separator = "-".repeat(AGENT_ID_HEADER.len());
+    let status_separator = "-".repeat(STATUS_HEADER.len());
+
+    let mut lines = Vec::with_capacity(reports.len() + 2);
     lines.push(format!("{AGENT_ID_HEADER:id_width$}  {STATUS_HEADER}"));
+    lines.push(format!("{id_separator:id_width$}  {status_separator}"));
     lines.extend(reports.iter().map(|report| {
         let id = &report.agent_id;
         let status = &report.metadata.status;
@@ -225,7 +229,8 @@ status = \"pending\"
         assert_eq!(
             lines,
             vec![
-                "AGENT ID      STATUS".to_string(),
+                "Agent ID      Status".to_string(),
+                "--------      ------".to_string(),
                 "aa-00000001   ready".to_string(),
                 "aa-000000002  completed".to_string(),
             ]
@@ -241,7 +246,8 @@ status = \"pending\"
         assert_eq!(
             lines,
             vec![
-                "AGENT ID  STATUS".to_string(),
+                "Agent ID  Status".to_string(),
+                "--------  ------".to_string(),
                 "aa-1      ready".to_string()
             ]
         );
