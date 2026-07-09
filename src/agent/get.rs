@@ -6,7 +6,7 @@ use serde_json::json;
 
 use crate::agent::{
     agent_path, agent_report_json, load_agent_metadata, print_agent_report_human,
-    read_agent_record, AgentReport,
+    read_agent_record, AgentMetadata, AgentReport,
 };
 use crate::cli::OutputFormat;
 
@@ -32,8 +32,16 @@ fn agent_content_report_json(report: &AgentReport, content: &str) -> serde_json:
 }
 
 pub(crate) fn load_agent_report(waap_root: &Path, agent_id: &str) -> io::Result<AgentReport> {
-    let path = agent_path(waap_root, agent_id);
     let metadata = load_agent_metadata(waap_root, agent_id)?;
+    agent_report_from_metadata(waap_root, agent_id, metadata)
+}
+
+fn agent_report_from_metadata(
+    waap_root: &Path,
+    agent_id: &str,
+    metadata: AgentMetadata,
+) -> io::Result<AgentReport> {
+    let path = agent_path(waap_root, agent_id);
     let file_size = fs::metadata(&path)?.len();
 
     Ok(AgentReport {
@@ -48,8 +56,8 @@ pub(crate) fn load_agent_content(
     waap_root: &Path,
     agent_id: &str,
 ) -> io::Result<(AgentReport, String)> {
-    let report = load_agent_report(waap_root, agent_id)?;
-    let (_, body) = read_agent_record(waap_root, agent_id)?;
+    let (metadata, body) = read_agent_record(waap_root, agent_id)?;
+    let report = agent_report_from_metadata(waap_root, agent_id, metadata)?;
 
     Ok((report, body))
 }
