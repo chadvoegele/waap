@@ -36,7 +36,7 @@ const AGENT_ID_HEADER: &str = "Agent ID";
 const STATUS_HEADER: &str = "Status";
 ```
 
-Also review the human-readable agent list alignment and apply the same header alignment fix used for ticket list if needed.
+Also use the same separator-row behavior as ticket list so the human-readable list formats remain consistent.
 
 # Suggested Implementation
 
@@ -44,14 +44,14 @@ In `src/agent/list.rs`:
 
 - Update `AGENT_ID_HEADER` from `"AGENT ID"` to `"Agent ID"`.
 - Update `STATUS_HEADER` from `"STATUS"` to `"Status"`.
-- If agent list should include a separator row like ticket list, ensure the separator is based on the header label widths and is padded to the computed column widths.
+- Add a separator row like ticket list. Base it on the header label widths and pad it to the computed column widths.
 - Update affected tests in `src/agent/list.rs`.
 
 # Acceptance Criteria
 
 - Human-readable `waap agent list` displays title-case headers.
 - Column alignment remains correct when agent IDs are shorter or longer than the header.
-- Any separator/header alignment behavior matches ticket list where applicable.
+- A separator row and header alignment match ticket list behavior.
 - JSON output is unchanged.
 - Existing tests pass; update or add focused tests as needed.
 

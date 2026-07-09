@@ -34,6 +34,7 @@ This supersedes `tt-clarify-agent-worktree-directory-naming`.
   - opencode session creation and run command,
   - claude run command,
   - codex app-server spawn and `thread_start`.
+- Keep agent-system configs limited to durable settings such as credentials, endpoint, and model. For stop operations, derive or pass the agent's `worktree_dir` explicitly rather than representing it as `waap_root` in a config.
 - Preserve lifecycle ordering:
   - update/commit running state on `waap_root`,
   - create the agent worktree from that commit,
@@ -46,6 +47,10 @@ This supersedes `tt-clarify-agent-worktree-directory-naming`.
 - Preserve codex behavior where the authentic thread id is persisted only after `thread/start` succeeds inside the worktree.
 - Preserve claude behavior where the UUID session id is available before the worktree and included in the running-state commit.
 - Update comments to distinguish main state operations from worktree execution.
+- Define cleanup error precedence:
+  - if the agent run fails and cleanup also fails, return the run error and retain cleanup failure context for diagnostics;
+  - if the agent run succeeds and cleanup fails, return the cleanup error;
+  - never silently discard cleanup failures.
 
 ## Testing
 
@@ -59,6 +64,8 @@ Update or replace existing callback-oriented tests with tests for the new struct
 - claude command working directory uses `worktree_dir`,
 - codex app-server and `thread_start` use `worktree_dir`,
 - session ids are visible on `waap_root` while an opencode/codex run is active.
+- a run failure combined with a cleanup failure preserves the run failure while retaining cleanup diagnostics.
+- a successful run combined with a cleanup failure returns the cleanup error.
 
 ## Validation
 
