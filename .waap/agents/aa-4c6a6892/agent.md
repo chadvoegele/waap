@@ -1,6 +1,7 @@
 +++
 creation_date = 2026-07-09T16:45:23Z
-status = "ready"
+status = "running"
+system = "opencode"
 +++
 
 # Purpose
