@@ -1,7 +1,7 @@
 +++
 name = "Clarify Agent Worktree Directory Naming"
 creation_date = 2026-07-09T10:55:49Z
-status = "pending"
+status = "abandoned"
 +++
 
 # Clarify Agent Worktree Directory Naming
