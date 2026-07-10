@@ -1,7 +1,7 @@
 +++
 name = "Simplify Codex JSON-RPC client"
 creation_date = 2026-07-10T02:43:53Z
-status = "pending"
+status = "in-progress"
 +++
 
 # Problem
