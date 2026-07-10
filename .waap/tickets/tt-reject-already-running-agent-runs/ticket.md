@@ -1,7 +1,7 @@
 +++
 name = "Reject hidden agent run lifecycle no-ops"
 creation_date = 2026-07-10T02:19:48Z
-status = "pending"
+status = "in-progress"
 +++
 
 # Problem
