@@ -48,12 +48,6 @@ fn run_agent_with_backend(
     backend: &mut dyn AgentSystemBackend,
 ) -> io::Result<ExitCode> {
     let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
-    if metadata.status == "running" {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("agent {agent_id} is already running"),
-        ));
-    }
     metadata.system = Some(system.clone());
 
     mark_running(waap_root, output_format, agent_id, &mut metadata, &body)?;
@@ -168,16 +162,6 @@ fn mark_running(
     body: &str,
 ) -> io::Result<()> {
     metadata.status = "running".to_string();
-
-    // Re-read immediately before writing so concurrent attempts cannot both start this agent.
-    let (current, _) = read_agent_record(waap_root, agent_id)?;
-    if current.status == "running" {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("agent {agent_id} is already running"),
-        ));
-    }
-
     write_agent_record(waap_root, agent_id, metadata, body)?;
 
     let report = load_agent_report(waap_root, agent_id)?;
@@ -267,8 +251,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        agent_worktree_dir, collapse_errors, mark_completed, mark_running, run_agent,
-        run_agent_with_backend, update_agent_session, AgentWorktree,
+        agent_worktree_dir, collapse_errors, mark_completed, mark_running, reject_running_agent,
+        run_agent, run_agent_with_backend, update_agent_session, AgentWorktree,
     };
     use crate::agent::backend::{fake::FakeBackend, RunOutcome};
     use crate::agent::{
@@ -464,37 +448,19 @@ mod tests {
     }
 
     #[test]
-    fn run_agent_rejects_running_before_using_backend() {
-        for system in [
-            AgentSystem::Opencode,
-            AgentSystem::Claude,
-            AgentSystem::Codex,
-        ] {
-            let dir = tempdir().unwrap();
-            init_repo_with_commit(dir.path());
-            let agent_id = "aa-00000001";
-            seed_agent_record(dir.path(), agent_id, "running");
-            let head_before = git(dir.path(), &["rev-parse", "HEAD"]);
-            let mut backend = FakeBackend::default();
+    fn reject_running_agent_rejects_running_status() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let agent_id = "aa-00000001";
+        seed_agent_record(dir.path(), agent_id, "running");
 
-            let error = run_agent_with_backend(
-                dir.path(),
-                &OutputFormat::Json,
-                agent_id,
-                &system,
-                &mut backend,
-            )
-            .unwrap_err();
+        let error = reject_running_agent(dir.path(), agent_id).unwrap_err();
 
-            assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
-            assert_eq!(
-                error.to_string(),
-                format!("agent {agent_id} is already running")
-            );
-            assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), head_before);
-            assert!(!dir.path().join(agent_worktree_dir(agent_id)).exists());
-            assert!(backend.start_calls.is_empty());
-        }
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            error.to_string(),
+            format!("agent {agent_id} is already running")
+        );
     }
 
     #[test]
@@ -722,28 +688,31 @@ mod tests {
     }
 
     #[test]
-    fn mark_running_rejects_a_concurrent_running_transition() {
+    fn mark_running_persists_and_commits_running_transition() {
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path());
         let agent_id = "aa-00000001";
-        seed_agent_record(dir.path(), agent_id, "running");
+        seed_agent_record(dir.path(), agent_id, "ready");
         let (mut metadata, body) = read_agent_record(dir.path(), agent_id).unwrap();
-        let head_before = git(dir.path(), &["rev-parse", "HEAD"]);
 
-        let error = mark_running(
+        mark_running(
             dir.path(),
             &OutputFormat::Json,
             agent_id,
             &mut metadata,
             &body,
         )
-        .unwrap_err();
+        .unwrap();
 
+        assert_eq!(metadata.status, "running");
         assert_eq!(
-            error.to_string(),
-            format!("agent {agent_id} is already running")
+            read_agent_record(dir.path(), agent_id).unwrap().0.status,
+            "running"
         );
-        assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), head_before);
+        assert_eq!(
+            git(dir.path(), &["log", "-1", "--format=%s"]),
+            format!("waap agent run {agent_id}")
+        );
     }
 
     #[test]
