@@ -1,7 +1,7 @@
 +++
 name = "Remove redundant running state checks"
 creation_date = 2026-07-10T16:39:48Z
-status = "in-progress"
+status = "completed"
 +++
 
 # Goal
