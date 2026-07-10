@@ -8,34 +8,25 @@
 
 `waap` can be used to build an "AI software factory".
 
-## Conventions
-
-All paths in the specification are relative to the application's repository root.
-
-## Specifications
-
-The application specifications are defined in the `/specs/` directory, typically as Markdown files and optionally diagrams, schemas, or other related resources.
-
-Example:
-```
-- /specs/spec.md
-- /specs/spec.png
-```
-
-## Datastore
-
-waap maintains its own datastore within the application's repository at `/.waap/`.
-
 ## Agent Purposes
 
-waap uses agents with different purposes to perform each stage of the software development lifecycle. An agent's purpose is carried by its instructions/content, not by a separate metadata field.
+You may give `waap` agents different roles to solve your problem. An agent's purpose is carried by its instructions/content, not by a separate metadata field.
 
+For a software development project, consider
 - Planner
-	- Translates application specifications into an implementation plan via tickets.
+	- Translates application specifications, e.g. `specs.md`, into an implementation plan via tickets.
 - Developer
 	- Implements their assigned ticket.
     - Merges their changes into the application repository.
     - Tests the application meets the specification for the ticket scope.
+
+## Conventions
+
+All paths in the specification are relative to the application's repository root.
+
+## Datastore
+
+waap maintains its own datastore within the application's repository at `/.waap/`.
 
 ## Agents
 
@@ -60,12 +51,12 @@ Implement code for `tt-list-tickets`
 ```
 
 Example:
-`/.waap/agents/aa-3881fda0/agent.md`
+`/.waap/agents/aa-list-tickets-developer/agent.md`
 
 Agents should also keep a work log, recording any work done. 
 
 Example:
-`/.waap/agents/aa-3881fda0/work_log.md`
+`/.waap/agents/aa-list-tickets-developer/work_log.md`
 
 ## Tickets
 
@@ -252,11 +243,11 @@ Agents can be run with different agent systems, selected with `waap agent run --
 
 ### Worktree Lifecycle
 
-`waap agent run` owns the agent worktree lifecycle so it does not depend on the agent following its prompt. It first commits the agent's `running` status and chosen system to `main`, then creates an isolated git worktree at `worktrees/$agent_id` (a fresh branch named after the agent, checked out from the current `HEAD`) and launches the system inside it. Session ids known in advance may be included in the running-state commit. Authentic ids returned only after creating a session inside the worktree are committed separately to `main` before agent work starts. The branch therefore contains the running-state commit while `waap agent list` and `waap agent stop` can read the live session id from `main`. An `AgentWorktree` guard removes the worktree explicitly before finalizing the agent and attempts removal from `Drop` after early errors. A cleanup error is returned after a successful run; after a failed run, the run error remains primary and includes cleanup failure context. Agents rebase their branch onto the current `main` `HEAD` and merge with `--ff-only` before finishing.
+`waap agent run` owns the agent worktree lifecycle. It first commits the agent's `running` status and chosen system to `main`, then creates an isolated git worktree at `worktrees/$agent_id` (a fresh branch named after the agent) and launches the system inside it. Agents rebase their branch onto the current `main` `HEAD` and merge with `--ff-only` before finishing. Finally, the worktree is removed.
 
 ### opencode (default)
 
-opencode runs against a remote server. After cutting the worktree from the running-state commit, waap creates the session with the canonical worktree as its persisted directory and commits the returned id to the agent record on `main`. It then sends the goal command with the same worktree as `--dir`. The session directory is authoritative; `--dir` does not retarget an existing session.
+opencode runs against a remote server. `waap` creates the session, then sends the goal command.
 
 ```
 opencode run --attach "$OPENCODE_SERVER_URL" \
@@ -270,23 +261,18 @@ opencode run --attach "$OPENCODE_SERVER_URL" \
   "Complete when instructions in /.waap/agents/${agent_id}/agent.md are satisfied"
 ```
 
-Extract the opencode session id from the response and record it in the agent metadata.
-
 ### claude
 
-claude runs as a local headless process (`claude -p`) in the prepared agent worktree. There is no remote server: waap mints the session id itself (a UUID) and passes it via `--session-id`, so the same id can be recorded in the agent metadata. The goal is passed directly as the prompt. `--permission-mode auto` lets the agent act without interactive prompts. The model is optional and read from `$CLAUDE_MODEL`; claude handles its own authentication.
+claude runs as a local headless process (`claude -p`). `waap` mints the session id itself and passes it via `--session-id`. The goal is passed directly as the prompt. The model is optional and read from `$CLAUDE_MODEL`.
 
 ```
 claude -p \
   --session-id "$session_id" \
   --output-format json \
-  --permission-mode auto \
+  --permission-mode bypassPermissions \
   --model "$CLAUDE_MODEL" \
   "Complete when instructions in /.waap/agents/${agent_id}/agent.md are satisfied"
 ```
-
-claude has no remote session to abort, but the session id is part of the local process's command line (`--session-id <uuid>`), so `waap agent stop` aborts a claude agent by signalling the matching local process (e.g. `pkill -TERM -f <session_id>`) before marking it `aborted`.
-
 
 ## waap Skill
 
@@ -298,40 +284,7 @@ In addition to the CLI, waap also includes an agent skill that tells a (non-waap
 - .agents/skills/waap/roles/developer/agent.md
 ```
 
-### .agents/skills/waap/roles/planner/agent.md
-
-Your role is to develop a plan to implement the application according to its specifications, captured in `/specs`. The plan should be captured as tickets in `/.waap/tickets/` directory.
-
-Begin by reviewing the application's source code and tests, as well as previously completed tickets. Then review the application's specifications. Where some application functionality is described in the specifications but absent in the application's implementation, create tickets to implement the missing functionality. The tickets should divide the work into manageable sections that fit within the developer agent's context window (~128K tokens), will be merge-able without unresolvable conflicts, and should resolve some ambiguity in the specification as needed to make a cohesive application.
-
-**Ticket Schema**
-...    # replace with ticket schema described above
-
-Verify the ticket.md syntax with `waap check`.
-
-If the application is fully implemented, consider whether it is also fully tested with appropriate unit test, and end-to-end tests. Ticket can also be used to ensure appropriate test coverage.
-
-If the application is fully implemented and tested, complete your `/goal`.
-
-`waap agent run` marks this agent 'completed' automatically when your process exits successfully, so you do not need to mark your own agent status.
-
-### .agents/skills/waap/roles/developer/agent.md
-
-Your role is to implement code for the functionality described in `/.waap/tickets/${ticket_id}/ticket.md`. After implementing the code, write adequate unit tests, and end-to-end tests if appropriate. Once the code is tested, merge it, resolving conflicts as necessary.
-
-Be aware that many agents are editing the code simultaneously. `waap agent run` prepares an isolated git worktree for you and runs you inside it, then removes it after you exit, so you do not need to create or delete a worktree yourself. Make your changes in the current working directory, commit them on your branch, and merge to main.
-
-Before you start, mark your ticket as in-progress with `waap ticket update --ticket-id $ticket_id --set-status in-progress`.
-
-Include your agent id and the ticket id your worked on in your commit message. Your branch already descends from the `running` commit `waap agent run` made on `main`; rebase your branch onto the current `main` `HEAD` and merge with `--ff-only` to keep a linear history.
-
-When your code is merged and tested, complete your `/goal`.
-
-If the ticket is already completed or abandoned, complete your `/goal`.
-
-After completing your `/goal`, mark your ticket as 'completed' with `waap ticket update --ticket-id $ticket_id --set-status completed`. `waap agent run` marks this agent 'completed' for you on a successful exit, so do not mark your own agent status.
-
-### Bootstrap
+### Software Development Bootstrap
 
 To start the waap software lifecyle, first run a planner agent to create tickets as needed.
 
