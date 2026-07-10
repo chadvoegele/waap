@@ -1,7 +1,7 @@
 +++
 name = "Plan agent system backend trait"
 creation_date = 2026-07-10T14:04:59Z
-status = "pending"
+status = "in-progress"
 depends_on = ["tt-refactor-agent-run-cleanup-and-completion", "tt-reject-already-running-agent-runs", "tt-trim-agent-run-comments", "tt-simplify-codex-json-rpc-client"]
 +++
 
