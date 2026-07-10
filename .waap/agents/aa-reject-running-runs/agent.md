@@ -1,7 +1,7 @@
 +++
 name = "reject-running-runs"
 creation_date = 2026-07-10T14:36:08Z
-status = "running"
+status = "completed"
 session_id = "ses_0b389538dffeMxTR2b3VIz0jNr"
 system = "opencode"
 +++
