@@ -13,3 +13,4 @@
 - Repeated all five required validations on merged `main`; all passed with 226 unit and 21 integration tests.
 - Reopened the ticket after the completion audit found missing direct coverage for initialization and server error propagation.
 - Added client-level tests for response correlation, delta forwarding during initialization, the initialized notification, and server error propagation; all 18 Codex client tests passed.
+- Rebasing over another concurrent `main` update completed cleanly, the test commit merged with `--ff-only`, and all five validations passed on merged `main` with 227 unit and 21 integration tests.
