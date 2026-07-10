@@ -1,10 +1,16 @@
 +++
 name = "Reject duplicate agent session assignment"
 creation_date = 2026-07-10T02:20:48Z
-status = "pending"
+status = "abandoned"
 +++
 
 # Problem
+
+This ticket has been folded into `.waap/tickets/tt-reject-already-running-agent-runs/ticket.md`, which now covers hidden no-op handling for already-running agents, duplicate session assignment, and already-completed finalization.
+
+The original details are kept below for history.
+
+---
 
 `src/agent/run.rs` currently treats an agent session update as a no-op when the agent record already has the same `session_id` and `system`:
 
