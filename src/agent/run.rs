@@ -49,6 +49,14 @@ pub(crate) fn run_agent(
     agent_id: &str,
     system: &AgentSystem,
 ) -> io::Result<ExitCode> {
+    let (metadata, _) = read_agent_record(waap_root, agent_id)?;
+    if metadata.status == "running" {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("agent {agent_id} is already running"),
+        ));
+    }
+
     match system {
         AgentSystem::Opencode => run_agent_opencode(waap_root, output_format, agent_id),
         AgentSystem::Claude => run_agent_claude(waap_root, output_format, agent_id),
@@ -270,12 +278,13 @@ fn mark_running(
 ) -> io::Result<()> {
     metadata.status = "running".to_string();
 
-    // Re-read main to observe concurrent agent merges and avoid an empty commit.
+    // Re-read immediately before writing so concurrent attempts cannot both start this agent.
     let (current, _) = read_agent_record(waap_root, agent_id)?;
     if current.status == "running" {
-        let report = load_agent_report(waap_root, agent_id)?;
-        print_run_agent_report(output_format, "Running agent", &report, "");
-        return Ok(());
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("agent {agent_id} is already running"),
+        ));
     }
 
     write_agent_record(waap_root, agent_id, metadata, body)?;
@@ -298,14 +307,26 @@ fn update_agent_session(
     system: AgentSystem,
 ) -> io::Result<()> {
     let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
-    let header = format!("{} session", system.as_str());
-    if metadata.session_id.as_deref() == Some(session_id)
-        && metadata.system.as_ref() == Some(&system)
-    {
-        let report = load_agent_report(waap_root, agent_id)?;
-        print_run_agent_report(output_format, &header, &report, "");
-        return Ok(());
+    if let Some(existing_session_id) = &metadata.session_id {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("agent {agent_id} already has session id {existing_session_id}"),
+        ));
     }
+    if let Some(existing_system) = &metadata.system {
+        if existing_system != &system {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "agent {agent_id} system mismatch: expected {}, got {}",
+                    existing_system.as_str(),
+                    system.as_str()
+                ),
+            ));
+        }
+    }
+
+    let header = format!("{} session", system.as_str());
     metadata.session_id = Some(session_id.to_string());
     metadata.system = Some(system.clone());
     write_agent_record(waap_root, agent_id, &metadata, &body)?;
@@ -327,9 +348,10 @@ fn mark_completed(
 ) -> io::Result<()> {
     let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
     if metadata.status == "completed" {
-        let report = load_agent_report(waap_root, agent_id)?;
-        print_run_agent_report(output_format, "Completed agent", &report, "");
-        return Ok(());
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("agent {agent_id} is already completed"),
+        ));
     }
     metadata.status = "completed".to_string();
     write_agent_record(waap_root, agent_id, &metadata, &body)?;
@@ -356,7 +378,7 @@ mod tests {
 
     use super::{
         agent_worktree_dir, collapse_errors, exit_code_from_status, mark_completed, mark_running,
-        update_agent_session, AgentWorktree,
+        run_agent, update_agent_session, AgentWorktree,
     };
     use crate::agent::{
         agent_report_json, read_agent_record, AgentMetadata, AgentReport, AgentSystem,
@@ -551,6 +573,56 @@ mod tests {
     }
 
     #[test]
+    fn run_agent_rejects_running_before_system_dispatch() {
+        for system in [
+            AgentSystem::Opencode,
+            AgentSystem::Claude,
+            AgentSystem::Codex,
+        ] {
+            let dir = tempdir().unwrap();
+            init_repo_with_commit(dir.path());
+            let agent_id = "aa-00000001";
+            seed_agent_record(dir.path(), agent_id, "running");
+            let head_before = git(dir.path(), &["rev-parse", "HEAD"]);
+
+            let error = run_agent(dir.path(), &OutputFormat::Json, agent_id, &system).unwrap_err();
+
+            assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+            assert_eq!(
+                error.to_string(),
+                format!("agent {agent_id} is already running")
+            );
+            assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), head_before);
+            assert!(!dir.path().join(agent_worktree_dir(agent_id)).exists());
+        }
+    }
+
+    #[test]
+    fn mark_running_rejects_a_concurrent_running_transition() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let agent_id = "aa-00000001";
+        seed_agent_record(dir.path(), agent_id, "running");
+        let (mut metadata, body) = read_agent_record(dir.path(), agent_id).unwrap();
+        let head_before = git(dir.path(), &["rev-parse", "HEAD"]);
+
+        let error = mark_running(
+            dir.path(),
+            &OutputFormat::Json,
+            agent_id,
+            &mut metadata,
+            &body,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            format!("agent {agent_id} is already running")
+        );
+        assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), head_before);
+    }
+
+    #[test]
     fn generated_session_ids_are_visible_on_main_during_runs() {
         for (system, session_id) in [
             (AgentSystem::Opencode, "ses_live"),
@@ -613,15 +685,20 @@ mod tests {
     }
 
     #[test]
-    fn mark_completed_skips_commit_when_already_completed() {
+    fn mark_completed_rejects_already_completed() {
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path());
         let agent_id = "aa-00000001";
         let path = seed_agent_record(dir.path(), agent_id, "completed");
         let head_before = git(dir.path(), &["rev-parse", "HEAD"]);
 
-        mark_completed(dir.path(), &OutputFormat::Json, agent_id).unwrap();
+        let error = mark_completed(dir.path(), &OutputFormat::Json, agent_id).unwrap_err();
 
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            error.to_string(),
+            format!("agent {agent_id} is already completed")
+        );
         let contents = fs::read_to_string(&path).unwrap();
         assert!(contents.contains("status = \"completed\"\n"));
         let head_after = git(dir.path(), &["rev-parse", "HEAD"]);
@@ -715,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn update_agent_session_skips_commit_when_already_set() {
+    fn update_agent_session_rejects_any_existing_session_id_without_committing() {
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path());
         let agent_id = "aa-00000001";
@@ -731,6 +808,69 @@ mod tests {
         .unwrap();
         let head_after_first = git(dir.path(), &["rev-parse", "HEAD"]);
 
+        let error = update_agent_session(
+            dir.path(),
+            &OutputFormat::Json,
+            agent_id,
+            "th_different",
+            AgentSystem::Codex,
+        )
+        .unwrap_err();
+        let head_after_second = git(dir.path(), &["rev-parse", "HEAD"]);
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            error.to_string(),
+            format!("agent {agent_id} already has session id th_abc123")
+        );
+        assert_eq!(head_after_first, head_after_second);
+    }
+
+    #[test]
+    fn update_agent_session_rejects_conflicting_system_without_committing() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let agent_id = "aa-00000001";
+        seed_agent_record(dir.path(), agent_id, "running");
+        let (mut metadata, body) = read_agent_record(dir.path(), agent_id).unwrap();
+        metadata.system = Some(AgentSystem::Claude);
+        crate::agent::write_agent_record(dir.path(), agent_id, &metadata, &body).unwrap();
+        git(dir.path(), &["add", "-A"]);
+        git(dir.path(), &["commit", "-q", "-m", "seed agent system"]);
+        let head_before = git(dir.path(), &["rev-parse", "HEAD"]);
+
+        let error = update_agent_session(
+            dir.path(),
+            &OutputFormat::Json,
+            agent_id,
+            "th_abc123",
+            AgentSystem::Codex,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            error.to_string(),
+            format!("agent {agent_id} system mismatch: expected claude, got codex")
+        );
+        assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), head_before);
+        let (metadata, _) = read_agent_record(dir.path(), agent_id).unwrap();
+        assert_eq!(metadata.session_id, None);
+        assert_eq!(metadata.system, Some(AgentSystem::Claude));
+    }
+
+    #[test]
+    fn update_agent_session_accepts_matching_system_without_session_id() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let agent_id = "aa-00000001";
+        seed_agent_record(dir.path(), agent_id, "running");
+        let (mut metadata, body) = read_agent_record(dir.path(), agent_id).unwrap();
+        metadata.system = Some(AgentSystem::Codex);
+        crate::agent::write_agent_record(dir.path(), agent_id, &metadata, &body).unwrap();
+        git(dir.path(), &["add", "-A"]);
+        git(dir.path(), &["commit", "-q", "-m", "seed agent system"]);
+
         update_agent_session(
             dir.path(),
             &OutputFormat::Json,
@@ -739,8 +879,13 @@ mod tests {
             AgentSystem::Codex,
         )
         .unwrap();
-        let head_after_second = git(dir.path(), &["rev-parse", "HEAD"]);
 
-        assert_eq!(head_after_first, head_after_second);
+        let (metadata, _) = read_agent_record(dir.path(), agent_id).unwrap();
+        assert_eq!(metadata.session_id.as_deref(), Some("th_abc123"));
+        assert_eq!(metadata.system, Some(AgentSystem::Codex));
+        assert_eq!(
+            git(dir.path(), &["log", "-1", "--format=%s"]),
+            format!("waap agent codex session {agent_id}")
+        );
     }
 }
