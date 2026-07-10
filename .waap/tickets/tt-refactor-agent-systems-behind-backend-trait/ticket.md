@@ -1,7 +1,7 @@
 +++
 name = "Refactor agent systems behind backend trait"
 creation_date = 2026-07-10T14:05:18Z
-status = "in-progress"
+status = "completed"
 depends_on = ["tt-plan-agent-system-backend-trait"]
 +++
 
