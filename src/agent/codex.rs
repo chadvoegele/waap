@@ -3,8 +3,62 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{ChildStdin, ChildStdout, Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use serde_json::{json, Value as JsonValue};
+
+use super::backend::{AbortContext, AgentSystemBackend, RunContext, RunOutcome, RunPreparation};
+
+pub(super) struct CodexBackend {
+    config: CodexRunConfig,
+    interrupt: Option<Arc<AtomicBool>>,
+}
+
+impl CodexBackend {
+    pub(super) fn from_env() -> Self {
+        Self {
+            config: codex_run_config_from_env(),
+            interrupt: None,
+        }
+    }
+}
+
+impl AgentSystemBackend for CodexBackend {
+    fn prepare_run(&mut self) -> io::Result<RunPreparation> {
+        let interrupt = Arc::new(AtomicBool::new(false));
+        signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&interrupt)).map_err(
+            |error| io::Error::other(format!("failed to install SIGTERM handler: {error}")),
+        )?;
+        self.interrupt = Some(interrupt);
+        Ok(RunPreparation {
+            initial_session_id: None,
+        })
+    }
+
+    fn run(&mut self, context: RunContext<'_>) -> io::Result<RunOutcome> {
+        let interrupt = self.interrupt.take().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "codex run requires successful preparation",
+            )
+        })?;
+        let mut client = spawn_codex_app_server(&self.config, context.worktree_dir)?;
+        client.initialize()?;
+        let thread_id = client.thread_start(context.worktree_dir)?;
+        (context.publish_session)(&thread_id)?;
+        let turn_id = client.turn_start(&thread_id, context.prompt)?;
+        let status = client.pump_until_turn_completed(&thread_id, &turn_id, &interrupt)?;
+        if status.is_success() {
+            Ok(RunOutcome::Completed)
+        } else {
+            Ok(RunOutcome::Failed(std::process::ExitCode::FAILURE))
+        }
+    }
+
+    fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
+        signal_codex_run(context.agent_id)
+    }
+}
 
 const METHOD_INITIALIZE: &str = "initialize";
 const METHOD_INITIALIZED: &str = "initialized";
@@ -18,11 +72,11 @@ const APPROVAL_POLICY_NEVER: &str = "never";
 const SANDBOX_DANGER_FULL_ACCESS: &str = "danger-full-access";
 
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct CodexRunConfig {
+struct CodexRunConfig {
     model: Option<String>,
 }
 
-pub(super) fn codex_run_config_from_env() -> CodexRunConfig {
+fn codex_run_config_from_env() -> CodexRunConfig {
     CodexRunConfig {
         model: env::var("CODEX_MODEL")
             .ok()
@@ -30,7 +84,7 @@ pub(super) fn codex_run_config_from_env() -> CodexRunConfig {
     }
 }
 
-pub(super) fn signal_codex_run(agent_id: &str) -> io::Result<()> {
+fn signal_codex_run(agent_id: &str) -> io::Result<()> {
     let mut command = ProcessCommand::new("pkill");
     command
         .arg("-TERM")
@@ -49,7 +103,7 @@ fn map_pkill_status(mut command: ProcessCommand) -> io::Result<()> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TurnStatus {
+enum TurnStatus {
     Completed,
     Interrupted,
     Failed,
@@ -57,7 +111,7 @@ pub(super) enum TurnStatus {
 }
 
 impl TurnStatus {
-    pub(super) fn is_success(self) -> bool {
+    fn is_success(self) -> bool {
         matches!(self, TurnStatus::Completed)
     }
 
@@ -158,7 +212,7 @@ fn completed_status_for_turn(
     }))
 }
 
-pub(super) struct CodexClient<R, W, O> {
+struct CodexClient<R, W, O> {
     reader: R,
     writer: W,
     out: O,
@@ -166,7 +220,7 @@ pub(super) struct CodexClient<R, W, O> {
     model: Option<String>,
 }
 
-pub(super) fn spawn_codex_app_server(
+fn spawn_codex_app_server(
     config: &CodexRunConfig,
     worktree_dir: &Path,
 ) -> io::Result<CodexClient<BufReader<ChildStdout>, ChildStdin, io::Stdout>> {
@@ -272,12 +326,12 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
         Ok(())
     }
 
-    pub(super) fn initialize(&mut self) -> io::Result<()> {
+    fn initialize(&mut self) -> io::Result<()> {
         self.send_request(METHOD_INITIALIZE, initialize_params())?;
         self.write_line(&notification_line(METHOD_INITIALIZED))
     }
 
-    pub(super) fn thread_start(&mut self, cwd: &Path) -> io::Result<String> {
+    fn thread_start(&mut self, cwd: &Path) -> io::Result<String> {
         let params = thread_start_params(cwd, self.model.as_deref());
         let result = self.send_request(METHOD_THREAD_START, params)?;
         result
@@ -292,7 +346,7 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
             })
     }
 
-    pub(super) fn turn_start(&mut self, thread_id: &str, prompt: &str) -> io::Result<String> {
+    fn turn_start(&mut self, thread_id: &str, prompt: &str) -> io::Result<String> {
         let params = turn_start_params(thread_id, prompt, self.model.as_deref());
         let result = self.send_request(METHOD_TURN_START, params)?;
         result
@@ -315,7 +369,7 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
         Ok(())
     }
 
-    pub(super) fn pump_until_turn_completed(
+    fn pump_until_turn_completed(
         &mut self,
         thread_id: &str,
         turn_id: &str,
@@ -631,5 +685,30 @@ mod tests {
         command.arg("-c").arg("exit 2");
         let error = map_pkill_status(command).expect_err("exit 2 should be Err");
         assert!(error.to_string().contains("status 2"));
+    }
+
+    #[test]
+    fn backend_run_requires_preparation_before_spawning() {
+        fn publish_noop(_: &str) -> io::Result<()> {
+            Ok(())
+        }
+
+        let mut backend = CodexBackend::from_env();
+        let mut publish = publish_noop;
+
+        let error = backend
+            .run(RunContext {
+                agent_id: "aa-00000001",
+                prompt: "prompt",
+                initial_session_id: None,
+                worktree_dir: Path::new("/unused"),
+                publish_session: &mut publish,
+            })
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "codex run requires successful preparation"
+        );
     }
 }

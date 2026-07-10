@@ -5,8 +5,53 @@ use std::process::{Child, Command as ProcessCommand, Stdio};
 
 use serde_json::{json, Value as JsonValue};
 
+use super::backend::{AbortContext, AgentSystemBackend, RunContext, RunOutcome, RunPreparation};
+
+pub(super) struct OpencodeBackend {
+    config: OpencodeRunConfig,
+}
+
+impl OpencodeBackend {
+    pub(super) fn from_env() -> io::Result<Self> {
+        Ok(Self {
+            config: opencode_run_config_from_env()?,
+        })
+    }
+}
+
+impl AgentSystemBackend for OpencodeBackend {
+    fn prepare_run(&mut self) -> io::Result<RunPreparation> {
+        Ok(RunPreparation {
+            initial_session_id: None,
+        })
+    }
+
+    fn run(&mut self, context: RunContext<'_>) -> io::Result<RunOutcome> {
+        let session_id = create_opencode_session(&self.config, context.worktree_dir)?;
+        (context.publish_session)(&session_id)?;
+        let command = build_opencode_run_command(
+            &self.config,
+            context.agent_id,
+            &session_id,
+            context.worktree_dir,
+            context.prompt,
+        );
+        let status = spawn_opencode_attached(&command)?.wait()?;
+        Ok(RunOutcome::from_exit_status(status))
+    }
+
+    fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
+        let worktree_dir = opencode_worktree_dir(context.waap_root, context.agent_id)?;
+        abort_opencode_session(&self.config, context.session_id, &worktree_dir)
+    }
+}
+
+fn opencode_worktree_dir(waap_root: &Path, agent_id: &str) -> io::Result<std::path::PathBuf> {
+    Ok(waap_root.canonicalize()?.join("worktrees").join(agent_id))
+}
+
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct OpencodeRunConfig {
+struct OpencodeRunConfig {
     server_url: String,
     username: String,
     password: String,
@@ -15,7 +60,7 @@ pub(super) struct OpencodeRunConfig {
 
 #[cfg(test)]
 impl OpencodeRunConfig {
-    pub(super) fn for_test() -> Self {
+    fn for_test() -> Self {
         Self {
             server_url: "https://opencode.example".to_string(),
             username: "runner".to_string(),
@@ -26,12 +71,12 @@ impl OpencodeRunConfig {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct OpencodeRunCommand {
+struct OpencodeRunCommand {
     program: String,
     args: Vec<String>,
 }
 
-pub(super) fn opencode_run_config_from_env() -> io::Result<OpencodeRunConfig> {
+fn opencode_run_config_from_env() -> io::Result<OpencodeRunConfig> {
     Ok(OpencodeRunConfig {
         server_url: required_env("OPENCODE_SERVER_URL")?,
         username: required_env("OPENCODE_SERVER_USERNAME")?,
@@ -49,7 +94,7 @@ fn required_env(name: &str) -> io::Result<String> {
     })
 }
 
-pub(super) fn spawn_opencode_attached(command: &OpencodeRunCommand) -> io::Result<Child> {
+fn spawn_opencode_attached(command: &OpencodeRunCommand) -> io::Result<Child> {
     let mut process = ProcessCommand::new(&command.program);
     process
         .args(&command.args)
@@ -59,10 +104,7 @@ pub(super) fn spawn_opencode_attached(command: &OpencodeRunCommand) -> io::Resul
         .spawn()
 }
 
-pub(super) fn create_opencode_session(
-    config: &OpencodeRunConfig,
-    worktree_dir: &Path,
-) -> io::Result<String> {
+fn create_opencode_session(config: &OpencodeRunConfig, worktree_dir: &Path) -> io::Result<String> {
     let response: JsonValue = reqwest::blocking::Client::new()
         .post(opencode_url(config, "/session"))
         .basic_auth(&config.username, Some(&config.password))
@@ -86,7 +128,7 @@ pub(super) fn create_opencode_session(
         })
 }
 
-pub(super) fn abort_opencode_session(
+fn abort_opencode_session(
     config: &OpencodeRunConfig,
     session_id: &str,
     worktree_dir: &Path,
@@ -127,11 +169,12 @@ fn opencode_url(config: &OpencodeRunConfig, path: &str) -> String {
     format!("{}{}", config.server_url.trim_end_matches('/'), path)
 }
 
-pub(super) fn build_opencode_run_command(
+fn build_opencode_run_command(
     config: &OpencodeRunConfig,
-    agent_id: &str,
+    _agent_id: &str,
     session_id: &str,
     worktree_dir: &Path,
+    prompt: &str,
 ) -> OpencodeRunCommand {
     OpencodeRunCommand {
         program: "opencode".to_string(),
@@ -151,9 +194,7 @@ pub(super) fn build_opencode_run_command(
             "goal".to_string(),
             "--format".to_string(),
             "json".to_string(),
-            format!(
-                "Complete when instructions in /.waap/agents/{agent_id}/agent.md are satisfied"
-            ),
+            prompt.to_string(),
         ],
     }
 }
@@ -166,7 +207,7 @@ mod tests {
 
     use super::{
         build_opencode_run_command, create_session_payload, opencode_directory_query, opencode_url,
-        spawn_opencode_attached, OpencodeRunCommand, OpencodeRunConfig,
+        opencode_worktree_dir, spawn_opencode_attached, OpencodeRunCommand, OpencodeRunConfig,
     };
 
     #[test]
@@ -191,6 +232,19 @@ mod tests {
         assert_eq!(
             opencode_url(&config, "/session"),
             "https://opencode.example/session"
+        );
+    }
+
+    #[test]
+    fn opencode_abort_derives_canonical_agent_worktree_directory() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert_eq!(
+            opencode_worktree_dir(dir.path(), "aa-3881fda0").unwrap(),
+            dir.path()
+                .canonicalize()
+                .unwrap()
+                .join("worktrees/aa-3881fda0")
         );
     }
 
@@ -224,7 +278,13 @@ mod tests {
         let config = test_opencode_config();
         let worktree_dir = PathBuf::from("/repo/with space");
 
-        let command = build_opencode_run_command(&config, "aa-3881fda0", "ses_123", &worktree_dir);
+        let command = build_opencode_run_command(
+            &config,
+            "aa-3881fda0",
+            "ses_123",
+            &worktree_dir,
+            "Complete when instructions in /.waap/agents/aa-3881fda0/agent.md are satisfied",
+        );
 
         assert_eq!(command.program, "opencode");
         assert_eq!(

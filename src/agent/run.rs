@@ -1,24 +1,14 @@
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{ExitCode, ExitStatus};
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::process::ExitCode;
 
-use super::claude::{
-    build_claude_run_command, claude_run_config_from_env, spawn_claude_attached, ClaudeRunConfig,
-};
-use super::codex::{codex_run_config_from_env, spawn_codex_app_server, CodexRunConfig, TurnStatus};
-use super::opencode::{
-    build_opencode_run_command, create_opencode_session, opencode_run_config_from_env,
-    spawn_opencode_attached, OpencodeRunConfig,
-};
+use super::backend::{BackendRegistry, BackendResolver, RunContext, RunOutcome};
 use crate::agent::{
     agent_report_json, load_agent_report, print_agent_report_human, read_agent_record,
     write_agent_record, AgentMetadata, AgentReport, AgentSystem,
 };
 use crate::cli::OutputFormat;
 use crate::git::{commit_paths, create_worktree, remove_worktree};
-use uuid::Uuid;
 
 fn print_run_agent_report(
     output_format: &OutputFormat,
@@ -39,15 +29,22 @@ fn print_run_agent_report(
     }
 }
 
-fn exit_code_from_status(status: ExitStatus) -> ExitCode {
-    ExitCode::from(status.code().unwrap_or(1) as u8)
-}
-
 pub(crate) fn run_agent(
     waap_root: &Path,
     output_format: &OutputFormat,
     agent_id: &str,
     system: &AgentSystem,
+) -> io::Result<ExitCode> {
+    let mut backends = BackendRegistry::default();
+    run_agent_with_backends(waap_root, output_format, agent_id, system, &mut backends)
+}
+
+fn run_agent_with_backends(
+    waap_root: &Path,
+    output_format: &OutputFormat,
+    agent_id: &str,
+    system: &AgentSystem,
+    backends: &mut dyn BackendResolver,
 ) -> io::Result<ExitCode> {
     let (metadata, _) = read_agent_record(waap_root, agent_id)?;
     if metadata.status == "running" {
@@ -57,10 +54,43 @@ pub(crate) fn run_agent(
         ));
     }
 
-    match system {
-        AgentSystem::Opencode => run_agent_opencode(waap_root, output_format, agent_id),
-        AgentSystem::Claude => run_agent_claude(waap_root, output_format, agent_id),
-        AgentSystem::Codex => run_agent_codex(waap_root, output_format, agent_id),
+    let backend = backends.resolve(system)?;
+    let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
+    let preparation = backend.prepare_run()?;
+    metadata.system = Some(system.clone());
+    if let Some(initial_session_id) = &preparation.initial_session_id {
+        metadata.session_id = Some(initial_session_id.clone());
+    }
+
+    mark_running(waap_root, output_format, agent_id, &mut metadata, &body)?;
+    let mut worktree = AgentWorktree::create(waap_root, agent_id)?;
+    let prompt =
+        format!("Complete when instructions in /.waap/agents/{agent_id}/agent.md are satisfied");
+    let mut publish_session = |session_id: &str| {
+        update_agent_session(
+            waap_root,
+            output_format,
+            agent_id,
+            session_id,
+            system.clone(),
+        )
+    };
+    let run_result = backend.run(RunContext {
+        agent_id,
+        prompt: &prompt,
+        initial_session_id: preparation.initial_session_id.as_deref(),
+        worktree_dir: worktree.dir(),
+        publish_session: &mut publish_session,
+    });
+    let cleanup_result = worktree.cleanup();
+    let outcome = collapse_errors(run_result, cleanup_result)?;
+
+    match outcome {
+        RunOutcome::Completed => {
+            mark_completed(waap_root, output_format, agent_id)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        RunOutcome::Failed(code) => Ok(code),
     }
 }
 
@@ -123,150 +153,6 @@ impl Drop for AgentWorktree {
             );
         }
     }
-}
-
-fn run_agent_opencode(
-    waap_root: &Path,
-    output_format: &OutputFormat,
-    agent_id: &str,
-) -> io::Result<ExitCode> {
-    let config = opencode_run_config_from_env()?;
-
-    let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
-    metadata.system = Some(AgentSystem::Opencode);
-
-    mark_running(waap_root, output_format, agent_id, &mut metadata, &body)?;
-    let mut worktree = AgentWorktree::create(waap_root, agent_id)?;
-    let worktree_dir = worktree.dir().to_path_buf();
-    let run_result =
-        run_opencode_in_worktree(waap_root, output_format, agent_id, &config, &worktree_dir);
-    let cleanup_result = worktree.cleanup();
-    let status = collapse_errors(run_result, cleanup_result)?;
-
-    if status.success() {
-        mark_completed(waap_root, output_format, agent_id)?;
-    }
-    Ok(exit_code_from_status(status))
-}
-
-fn run_opencode_in_worktree(
-    waap_root: &Path,
-    output_format: &OutputFormat,
-    agent_id: &str,
-    config: &OpencodeRunConfig,
-    worktree_dir: &Path,
-) -> io::Result<ExitStatus> {
-    // OpenCode returns its authentic session id only after creation in the worktree.
-    let session_id = create_opencode_session(config, worktree_dir)?;
-    update_agent_session(
-        waap_root,
-        output_format,
-        agent_id,
-        &session_id,
-        AgentSystem::Opencode,
-    )?;
-    let command = build_opencode_run_command(config, agent_id, &session_id, worktree_dir);
-    let mut child = spawn_opencode_attached(&command)?;
-    child.wait()
-}
-
-fn run_agent_claude(
-    waap_root: &Path,
-    output_format: &OutputFormat,
-    agent_id: &str,
-) -> io::Result<ExitCode> {
-    let config = claude_run_config_from_env();
-    let session_id = Uuid::new_v4().to_string();
-
-    let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
-    metadata.session_id = Some(session_id.clone());
-    metadata.system = Some(AgentSystem::Claude);
-
-    mark_running(waap_root, output_format, agent_id, &mut metadata, &body)?;
-    let mut worktree = AgentWorktree::create(waap_root, agent_id)?;
-    let run_result = run_claude_in_worktree(&config, agent_id, &session_id, worktree.dir());
-    let cleanup_result = worktree.cleanup();
-    let status = collapse_errors(run_result, cleanup_result)?;
-
-    if status.success() {
-        mark_completed(waap_root, output_format, agent_id)?;
-    }
-    Ok(exit_code_from_status(status))
-}
-
-fn run_claude_in_worktree(
-    config: &ClaudeRunConfig,
-    agent_id: &str,
-    session_id: &str,
-    worktree_dir: &Path,
-) -> io::Result<ExitStatus> {
-    let command = build_claude_run_command(config, agent_id, session_id, worktree_dir);
-    let mut child = spawn_claude_attached(&command)?;
-    child.wait()
-}
-
-fn run_agent_codex(
-    waap_root: &Path,
-    output_format: &OutputFormat,
-    agent_id: &str,
-) -> io::Result<ExitCode> {
-    let config = codex_run_config_from_env();
-
-    let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
-    metadata.system = Some(AgentSystem::Codex);
-
-    // The signal handler cannot perform I/O; the app-server loop turns this flag into turn/interrupt.
-    let interrupt = Arc::new(AtomicBool::new(false));
-    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&interrupt))
-        .map_err(|error| io::Error::other(format!("failed to install SIGTERM handler: {error}")))?;
-
-    mark_running(waap_root, output_format, agent_id, &mut metadata, &body)?;
-    let mut worktree = AgentWorktree::create(waap_root, agent_id)?;
-    let worktree_dir = worktree.dir().to_path_buf();
-    let run_result = run_codex_in_worktree(
-        waap_root,
-        output_format,
-        agent_id,
-        &config,
-        &worktree_dir,
-        &interrupt,
-    );
-    let cleanup_result = worktree.cleanup();
-    let status = collapse_errors(run_result, cleanup_result)?;
-
-    if status.is_success() {
-        mark_completed(waap_root, output_format, agent_id)?;
-        Ok(ExitCode::SUCCESS)
-    } else {
-        Ok(ExitCode::FAILURE)
-    }
-}
-
-fn run_codex_in_worktree(
-    waap_root: &Path,
-    output_format: &OutputFormat,
-    agent_id: &str,
-    config: &CodexRunConfig,
-    worktree_dir: &Path,
-    interrupt: &AtomicBool,
-) -> io::Result<TurnStatus> {
-    let mut client = spawn_codex_app_server(config, worktree_dir)?;
-    client.initialize()?;
-    let thread_id = client.thread_start(worktree_dir)?;
-
-    // Codex does not provide its authentic session id until thread/start succeeds.
-    update_agent_session(
-        waap_root,
-        output_format,
-        agent_id,
-        &thread_id,
-        AgentSystem::Codex,
-    )?;
-
-    let prompt =
-        format!("Complete when instructions in /.waap/agents/{agent_id}/agent.md are satisfied");
-    let turn_id = client.turn_start(&thread_id, &prompt)?;
-    client.pump_until_turn_completed(&thread_id, &turn_id, interrupt)
 }
 
 fn mark_running(
@@ -369,17 +255,17 @@ fn mark_completed(
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::process::ExitStatusExt;
     use std::path::{Path, PathBuf};
-    use std::process::{ExitCode, ExitStatus};
+    use std::process::ExitCode;
 
     use serde_json::json;
     use tempfile::tempdir;
 
     use super::{
-        agent_worktree_dir, collapse_errors, exit_code_from_status, mark_completed, mark_running,
-        run_agent, update_agent_session, AgentWorktree,
+        agent_worktree_dir, collapse_errors, mark_completed, mark_running, run_agent_with_backends,
+        update_agent_session, AgentWorktree,
     };
+    use crate::agent::backend::{fake::FakeResolver, RunOutcome};
     use crate::agent::{
         agent_report_json, read_agent_record, AgentMetadata, AgentReport, AgentSystem,
     };
@@ -573,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn run_agent_rejects_running_before_system_dispatch() {
+    fn run_agent_rejects_running_before_backend_resolution() {
         for system in [
             AgentSystem::Opencode,
             AgentSystem::Claude,
@@ -584,8 +470,16 @@ mod tests {
             let agent_id = "aa-00000001";
             seed_agent_record(dir.path(), agent_id, "running");
             let head_before = git(dir.path(), &["rev-parse", "HEAD"]);
+            let mut resolver = FakeResolver::default();
 
-            let error = run_agent(dir.path(), &OutputFormat::Json, agent_id, &system).unwrap_err();
+            let error = run_agent_with_backends(
+                dir.path(),
+                &OutputFormat::Json,
+                agent_id,
+                &system,
+                &mut resolver,
+            )
+            .unwrap_err();
 
             assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
             assert_eq!(
@@ -593,6 +487,192 @@ mod tests {
                 format!("agent {agent_id} is already running")
             );
             assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), head_before);
+            assert!(!dir.path().join(agent_worktree_dir(agent_id)).exists());
+            assert!(resolver.resolved.is_empty());
+        }
+    }
+
+    #[test]
+    fn run_agent_passes_lifecycle_context_and_initial_session_to_selected_backend() {
+        for system in [
+            AgentSystem::Opencode,
+            AgentSystem::Claude,
+            AgentSystem::Codex,
+        ] {
+            let dir = tempdir().unwrap();
+            init_repo_with_commit(dir.path());
+            let agent_id = "aa-00000001";
+            seed_agent_record(dir.path(), agent_id, "ready");
+            let mut resolver = FakeResolver::default();
+            resolver.backend_mut(&system).initial_session_id = Some("ses_initial".to_string());
+
+            let code = run_agent_with_backends(
+                dir.path(),
+                &OutputFormat::Json,
+                agent_id,
+                &system,
+                &mut resolver,
+            )
+            .unwrap();
+
+            assert_eq!(code, ExitCode::SUCCESS);
+            assert_eq!(resolver.resolved, vec![system.clone()]);
+            let backend = resolver.backend_mut(&system);
+            assert_eq!(backend.prepare_calls, 1);
+            assert_eq!(backend.run_calls.len(), 1);
+            let call = &backend.run_calls[0];
+            assert_eq!(call.agent_id, agent_id);
+            assert_eq!(
+                call.prompt,
+                "Complete when instructions in /.waap/agents/aa-00000001/agent.md are satisfied"
+            );
+            assert_eq!(call.initial_session_id.as_deref(), Some("ses_initial"));
+            assert!(call.worktree_dir.ends_with("worktrees/aa-00000001"));
+            assert!(!call.worktree_dir.exists());
+
+            let (metadata, _) = read_agent_record(dir.path(), agent_id).unwrap();
+            assert_eq!(metadata.status, "completed");
+            assert_eq!(metadata.system, Some(system));
+            assert_eq!(metadata.session_id.as_deref(), Some("ses_initial"));
+            let running_record = git(
+                dir.path(),
+                &["show", "HEAD~1:.waap/agents/aa-00000001/agent.md"],
+            );
+            assert!(running_record.contains("status = \"running\""));
+            assert!(running_record.contains("session_id = \"ses_initial\""));
+        }
+    }
+
+    #[test]
+    fn run_agent_publishes_authentic_session_before_completion() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let agent_id = "aa-00000001";
+        seed_agent_record(dir.path(), agent_id, "ready");
+        let mut resolver = FakeResolver::default();
+        resolver.codex.late_session_id = Some("th_authentic".to_string());
+
+        let code = run_agent_with_backends(
+            dir.path(),
+            &OutputFormat::Json,
+            agent_id,
+            &AgentSystem::Codex,
+            &mut resolver,
+        )
+        .unwrap();
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(resolver.codex.run_calls[0].initial_session_id, None);
+        let (metadata, _) = read_agent_record(dir.path(), agent_id).unwrap();
+        assert_eq!(metadata.session_id.as_deref(), Some("th_authentic"));
+        let running_record = git(
+            dir.path(),
+            &["show", "HEAD~2:.waap/agents/aa-00000001/agent.md"],
+        );
+        assert!(running_record.contains("status = \"running\""));
+        assert!(!running_record.contains("session_id ="));
+        let subjects = git(dir.path(), &["log", "-3", "--format=%s"]);
+        assert_eq!(
+            subjects.lines().collect::<Vec<_>>(),
+            [
+                "waap agent completed aa-00000001",
+                "waap agent codex session aa-00000001",
+                "waap agent run aa-00000001"
+            ]
+        );
+    }
+
+    #[test]
+    fn run_agent_failed_outcome_cleans_worktree_and_preserves_running_status() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let agent_id = "aa-00000001";
+        seed_agent_record(dir.path(), agent_id, "ready");
+        let mut resolver = FakeResolver::default();
+        resolver.claude.outcome = Some(RunOutcome::Failed(ExitCode::from(7)));
+
+        let code = run_agent_with_backends(
+            dir.path(),
+            &OutputFormat::Json,
+            agent_id,
+            &AgentSystem::Claude,
+            &mut resolver,
+        )
+        .unwrap();
+
+        assert_eq!(code, ExitCode::from(7));
+        assert_eq!(
+            read_agent_record(dir.path(), agent_id).unwrap().0.status,
+            "running"
+        );
+        assert!(!dir.path().join(agent_worktree_dir(agent_id)).exists());
+        assert_eq!(
+            git(dir.path(), &["log", "-1", "--format=%s"]),
+            "waap agent run aa-00000001"
+        );
+    }
+
+    #[test]
+    fn run_agent_backend_error_cleans_worktree_and_propagates() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let agent_id = "aa-00000001";
+        seed_agent_record(dir.path(), agent_id, "ready");
+        let mut resolver = FakeResolver::default();
+        resolver.opencode.run_error = Some("launch failed".to_string());
+
+        let error = run_agent_with_backends(
+            dir.path(),
+            &OutputFormat::Json,
+            agent_id,
+            &AgentSystem::Opencode,
+            &mut resolver,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "launch failed");
+        assert!(!dir.path().join(agent_worktree_dir(agent_id)).exists());
+        assert_eq!(
+            read_agent_record(dir.path(), agent_id).unwrap().0.status,
+            "running"
+        );
+    }
+
+    #[test]
+    fn run_agent_resolution_and_preparation_errors_happen_before_running() {
+        for prepare_fails in [false, true] {
+            let dir = tempdir().unwrap();
+            init_repo_with_commit(dir.path());
+            let agent_id = "aa-00000001";
+            seed_agent_record(dir.path(), agent_id, "ready");
+            let head_before = git(dir.path(), &["rev-parse", "HEAD"]);
+            let mut resolver = FakeResolver::default();
+            if prepare_fails {
+                resolver.claude.prepare_error = Some("preparation failed".to_string());
+            } else {
+                resolver.resolve_error = Some(AgentSystem::Claude);
+            }
+
+            let error = run_agent_with_backends(
+                dir.path(),
+                &OutputFormat::Json,
+                agent_id,
+                &AgentSystem::Claude,
+                &mut resolver,
+            )
+            .unwrap_err();
+
+            let expected = if prepare_fails {
+                "preparation failed"
+            } else {
+                "backend resolution failed"
+            };
+            assert_eq!(error.to_string(), expected);
+            assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), head_before);
+            assert_eq!(
+                read_agent_record(dir.path(), agent_id).unwrap().0.status,
+                "ready"
+            );
             assert!(!dir.path().join(agent_worktree_dir(agent_id)).exists());
         }
     }
@@ -703,14 +783,6 @@ mod tests {
         assert!(contents.contains("status = \"completed\"\n"));
         let head_after = git(dir.path(), &["rev-parse", "HEAD"]);
         assert_eq!(head_before, head_after);
-    }
-
-    #[test]
-    fn exit_code_mirrors_nonzero_process_status() {
-        assert_eq!(
-            exit_code_from_status(ExitStatus::from_raw(7 << 8)),
-            ExitCode::from(7)
-        );
     }
 
     #[test]

@@ -15,6 +15,7 @@ use crate::ids::{available_record_id, is_record_id};
 use crate::record::{markdown_body_after_frontmatter, WaapRecordKind};
 use crate::toml::{datetime_string, toml_string};
 
+mod backend;
 mod claude;
 mod codex;
 mod get;
