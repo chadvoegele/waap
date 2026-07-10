@@ -7,3 +7,5 @@
 - Inlined successful completion handling for OpenCode, Claude, and Codex and removed the finalize helper layers.
 - Ran the focused runner tests; all passed. Removed two warnings exposed by that run.
 - Passed `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, `cargo build`, `cargo build --release`, `cargo test` (246 tests), and `waap check`.
+- Rebased onto the latest `main`, preserving concurrent comment cleanup and Codex client changes, then reran every required validation.
+- Fast-forwarded the branch into `main` and marked the ticket completed.
