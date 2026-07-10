@@ -808,22 +808,23 @@ mod tests {
         .unwrap();
         let head_after_first = git(dir.path(), &["rev-parse", "HEAD"]);
 
-        let error = update_agent_session(
-            dir.path(),
-            &OutputFormat::Json,
-            agent_id,
-            "th_different",
-            AgentSystem::Codex,
-        )
-        .unwrap_err();
-        let head_after_second = git(dir.path(), &["rev-parse", "HEAD"]);
+        for session_id in ["th_abc123", "th_different"] {
+            let error = update_agent_session(
+                dir.path(),
+                &OutputFormat::Json,
+                agent_id,
+                session_id,
+                AgentSystem::Codex,
+            )
+            .unwrap_err();
 
-        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
-        assert_eq!(
-            error.to_string(),
-            format!("agent {agent_id} already has session id th_abc123")
-        );
-        assert_eq!(head_after_first, head_after_second);
+            assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+            assert_eq!(
+                error.to_string(),
+                format!("agent {agent_id} already has session id th_abc123")
+            );
+            assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), head_after_first);
+        }
     }
 
     #[test]

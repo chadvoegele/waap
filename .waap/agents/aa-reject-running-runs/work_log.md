@@ -8,3 +8,5 @@
 - Made runner-owned completion reject an already-completed record.
 - Added tests for all requested lifecycle paths, including assertions that rejected operations do not commit or create a worktree.
 - Passed `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, `cargo build`, `cargo build --release`, and `cargo test` (230 unit, 8 root/validation, and 13 state-commit tests).
+- Rebased onto concurrent `main` changes, preserving the agent-run comment cleanup and resolving overlapping lifecycle tests.
+- Tightened duplicate-session coverage to exercise both the formerly accepted exact duplicate and a different replacement id.
