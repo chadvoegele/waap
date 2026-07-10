@@ -1,7 +1,7 @@
 +++
 name = "Trim agent run comments"
 creation_date = 2026-07-10T02:24:16Z
-status = "pending"
+status = "in-progress"
 +++
 
 # Problem
