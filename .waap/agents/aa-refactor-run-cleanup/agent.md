@@ -2,6 +2,7 @@
 name = "refactor-run-cleanup"
 creation_date = 2026-07-10T14:36:02Z
 status = "running"
+session_id = "ses_0b389770dffeVkgd8AYkFB283S"
 system = "opencode"
 +++
 
