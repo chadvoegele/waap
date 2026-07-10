@@ -1,7 +1,7 @@
 +++
 name = "Enforce agent lifecycle state graph"
 creation_date = 2026-07-10T18:50:12Z
-status = "pending"
+status = "in-progress"
 +++
 
 # Goal
