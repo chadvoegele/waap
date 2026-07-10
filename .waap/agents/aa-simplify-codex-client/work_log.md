@@ -9,3 +9,5 @@
 - Removed all comments from `src/agent/codex.rs` and added client-level coverage that rejects noncanonical turn statuses.
 - Ran the focused Codex client tests: 16 passed.
 - Passed `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, `cargo build`, `cargo build --release`, and `cargo test` (226 unit and 21 integration tests).
+- Rebasing onto current `main` completed without conflicts, and the branch merged with `--ff-only`.
+- Repeated all five required validations on merged `main`; all passed with 226 unit and 21 integration tests.
