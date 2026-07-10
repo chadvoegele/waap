@@ -1,6 +1,8 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::Mutex;
 
 use ::toml::Value;
 use clap::ValueEnum;
@@ -25,6 +27,9 @@ mod opencode;
 mod run;
 mod stop;
 mod update;
+
+#[cfg(test)]
+static OPENCODE_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 pub(crate) use get::{load_agent_content, load_agent_report, print_agent_content_report};
 pub(crate) use list::{list_agents, print_agent_list};
@@ -207,6 +212,14 @@ pub(crate) enum AgentSystem {
 }
 
 impl AgentSystem {
+    fn backend(&self) -> io::Result<Box<dyn backend::AgentSystemBackend>> {
+        match self {
+            AgentSystem::Opencode => Ok(Box::new(opencode::OpencodeBackend::from_env()?)),
+            AgentSystem::Claude => Ok(Box::new(claude::ClaudeBackend::from_env())),
+            AgentSystem::Codex => Ok(Box::new(codex::CodexBackend::from_env())),
+        }
+    }
+
     pub(crate) fn as_str(&self) -> &'static str {
         match self {
             AgentSystem::Opencode => "opencode",
@@ -268,11 +281,14 @@ pub(crate) fn agent_report_json(report: &AgentReport) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    use std::env;
     use std::path::PathBuf;
 
     use serde_json::json;
 
-    use super::{agent_report_json, is_agent_id, AgentMetadata, AgentReport, AgentSystem};
+    use super::{
+        agent_report_json, is_agent_id, AgentMetadata, AgentReport, AgentSystem, OPENCODE_ENV_LOCK,
+    };
     use crate::ids::random_hex_chars;
 
     #[test]
@@ -343,6 +359,61 @@ mod tests {
         assert_eq!(AgentSystem::parse("codex"), Some(AgentSystem::Codex));
         assert_eq!(AgentSystem::Codex.as_str(), "codex");
         assert!(AgentSystem::labels().contains(&"codex"));
+    }
+
+    #[test]
+    fn agent_system_constructs_each_selected_backend() {
+        let _lock = OPENCODE_ENV_LOCK.lock().unwrap();
+        let names = [
+            "OPENCODE_SERVER_URL",
+            "OPENCODE_SERVER_USERNAME",
+            "OPENCODE_SERVER_PASSWORD",
+            "OPENCODE_SERVER_MODEL",
+        ];
+        let previous = names.map(env::var_os);
+        for name in names {
+            env::set_var(name, "test-value");
+        }
+
+        for (system, expected_type) in [
+            (AgentSystem::Opencode, "agent::opencode::OpencodeBackend"),
+            (AgentSystem::Claude, "agent::claude::ClaudeBackend"),
+            (AgentSystem::Codex, "agent::codex::CodexBackend"),
+        ] {
+            let backend = system.backend().unwrap();
+            assert!(backend.type_name().ends_with(expected_type));
+        }
+
+        for (name, value) in names.into_iter().zip(previous) {
+            match value {
+                Some(value) => env::set_var(name, value),
+                None => env::remove_var(name),
+            }
+        }
+    }
+
+    #[test]
+    fn claude_and_codex_backend_construction_ignores_opencode_environment() {
+        let _lock = OPENCODE_ENV_LOCK.lock().unwrap();
+        let names = [
+            "OPENCODE_SERVER_URL",
+            "OPENCODE_SERVER_USERNAME",
+            "OPENCODE_SERVER_PASSWORD",
+            "OPENCODE_SERVER_MODEL",
+        ];
+        let previous = names.map(env::var_os);
+        for name in names {
+            env::remove_var(name);
+        }
+
+        AgentSystem::Claude.backend().unwrap();
+        AgentSystem::Codex.backend().unwrap();
+
+        for (name, value) in names.into_iter().zip(previous) {
+            if let Some(value) = value {
+                env::set_var(name, value);
+            }
+        }
     }
 
     #[test]

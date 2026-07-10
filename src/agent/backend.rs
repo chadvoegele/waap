@@ -2,11 +2,6 @@ use std::io;
 use std::path::Path;
 use std::process::{ExitCode, ExitStatus};
 
-use super::claude::ClaudeBackend;
-use super::codex::CodexBackend;
-use super::opencode::OpencodeBackend;
-use super::AgentSystem;
-
 #[derive(Debug, PartialEq)]
 pub(super) enum RunOutcome {
     Completed,
@@ -48,41 +43,10 @@ pub(super) trait AgentSystemBackend {
     fn start(&mut self, context: StartContext<'_>) -> io::Result<StartedRun>;
 
     fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()>;
-}
 
-pub(super) trait BackendResolver {
-    fn resolve(&mut self, system: &AgentSystem) -> io::Result<&mut (dyn AgentSystemBackend + '_)>;
-}
-
-#[derive(Default)]
-pub(super) struct BackendRegistry {
-    opencode: Option<OpencodeBackend>,
-    claude: Option<ClaudeBackend>,
-    codex: Option<CodexBackend>,
-}
-
-impl BackendResolver for BackendRegistry {
-    fn resolve(&mut self, system: &AgentSystem) -> io::Result<&mut (dyn AgentSystemBackend + '_)> {
-        match system {
-            AgentSystem::Opencode => {
-                if self.opencode.is_none() {
-                    self.opencode = Some(OpencodeBackend::from_env()?);
-                }
-                Ok(self.opencode.as_mut().expect("initialized"))
-            }
-            AgentSystem::Claude => {
-                if self.claude.is_none() {
-                    self.claude = Some(ClaudeBackend::from_env());
-                }
-                Ok(self.claude.as_mut().expect("initialized"))
-            }
-            AgentSystem::Codex => {
-                if self.codex.is_none() {
-                    self.codex = Some(CodexBackend::from_env());
-                }
-                Ok(self.codex.as_mut().expect("initialized"))
-            }
-        }
+    #[cfg(test)]
+    fn type_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
     }
 }
 
@@ -186,38 +150,6 @@ pub(super) mod fake {
             }
         }
     }
-
-    #[derive(Default)]
-    pub(crate) struct FakeResolver {
-        pub(crate) opencode: FakeBackend,
-        pub(crate) claude: FakeBackend,
-        pub(crate) codex: FakeBackend,
-        pub(crate) resolved: Vec<AgentSystem>,
-        pub(crate) resolve_error: Option<AgentSystem>,
-    }
-
-    impl FakeResolver {
-        pub(crate) fn backend_mut(&mut self, system: &AgentSystem) -> &mut FakeBackend {
-            match system {
-                AgentSystem::Opencode => &mut self.opencode,
-                AgentSystem::Claude => &mut self.claude,
-                AgentSystem::Codex => &mut self.codex,
-            }
-        }
-    }
-
-    impl BackendResolver for FakeResolver {
-        fn resolve(
-            &mut self,
-            system: &AgentSystem,
-        ) -> io::Result<&mut (dyn AgentSystemBackend + '_)> {
-            self.resolved.push(system.clone());
-            if self.resolve_error.as_ref() == Some(system) {
-                return Err(io::Error::other("backend resolution failed"));
-            }
-            Ok(self.backend_mut(system))
-        }
-    }
 }
 
 #[cfg(test)]
@@ -240,21 +172,5 @@ mod tests {
             RunOutcome::from_exit_status(ExitStatus::from_raw(9)),
             RunOutcome::Failed(ExitCode::from(1))
         );
-    }
-
-    #[test]
-    fn registry_constructs_only_selected_backend_and_reuses_it() {
-        let mut registry = BackendRegistry::default();
-
-        registry.resolve(&AgentSystem::Claude).unwrap();
-        registry.resolve(&AgentSystem::Claude).unwrap();
-
-        assert!(registry.claude.is_some());
-        assert!(registry.opencode.is_none());
-        assert!(registry.codex.is_none());
-
-        registry.resolve(&AgentSystem::Codex).unwrap();
-        assert!(registry.codex.is_some());
-        assert!(registry.opencode.is_none());
     }
 }
