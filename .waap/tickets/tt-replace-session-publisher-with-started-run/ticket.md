@@ -1,7 +1,7 @@
 +++
 name = "Replace session publisher with started run"
 creation_date = 2026-07-10T15:48:51Z
-status = "pending"
+status = "in-progress"
 +++
 
 # Goal
