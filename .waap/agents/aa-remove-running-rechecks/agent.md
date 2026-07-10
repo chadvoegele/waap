@@ -1,7 +1,7 @@
 +++
 name = "remove-running-rechecks"
 creation_date = 2026-07-10T16:39:55Z
-status = "running"
+status = "aborted"
 session_id = "ses_0b3197c13ffewHiZC1Hl8xKH1Z"
 system = "opencode"
 +++
