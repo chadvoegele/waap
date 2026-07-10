@@ -1,7 +1,7 @@
 +++
 name = "trim-run-comments"
 creation_date = 2026-07-10T14:36:14Z
-status = "running"
+status = "completed"
 session_id = "ses_0b3893579ffefyuQSoZFU1ZClz"
 system = "opencode"
 +++
