@@ -2,6 +2,7 @@
 name = "agent-state-graph"
 creation_date = 2026-07-10T18:54:03Z
 status = "running"
+session_id = "ses_0b29ea339ffeykyKI5W4NRVVq2"
 system = "opencode"
 +++
 
