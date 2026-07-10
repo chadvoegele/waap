@@ -6,8 +6,8 @@ use serde_json::json;
 use super::backend::{AbortContext, AgentSystemBackend};
 use crate::agent::get::load_agent_report;
 use crate::agent::{
-    agent_report_json, print_agent_report_human, read_agent_record, write_agent_record,
-    AgentReport, AgentStatus,
+    agent_report_json, print_agent_report_human, read_agent_record, transition_agent_status,
+    write_agent_record, AgentReport, AgentStatus,
 };
 use crate::cli::OutputFormat;
 use crate::git::commit_paths;
@@ -83,7 +83,7 @@ pub(super) fn stop_agents(
     agent_id: Option<&str>,
 ) -> io::Result<Vec<AgentReport>> {
     match agent_id {
-        Some(agent_id) => stop_agent_if_running(waap_root, agent_id)
+        Some(agent_id) => stop_explicit_agent(waap_root, agent_id)
             .map(|report| report.into_iter().collect::<Vec<AgentReport>>()),
         None => {
             let mut reports = Vec::new();
@@ -93,6 +93,18 @@ pub(super) fn stop_agents(
                 }
             }
             Ok(reports)
+        }
+    }
+}
+
+fn stop_explicit_agent(waap_root: &Path, agent_id: &str) -> io::Result<Option<AgentReport>> {
+    let report = load_agent_report(waap_root, agent_id)?;
+    match AgentStatus::parse(&report.metadata.status).expect("validated agent status") {
+        AgentStatus::Ready => mark_agent_aborted(waap_root, agent_id),
+        AgentStatus::Running => stop_agent_if_running(waap_root, agent_id),
+        status => {
+            status.validate_transition(AgentStatus::Aborted)?;
+            unreachable!("terminal agent transition unexpectedly allowed")
         }
     }
 }
@@ -135,7 +147,7 @@ fn stop_agent_with_backend(
 
 fn mark_agent_aborted(waap_root: &Path, agent_id: &str) -> io::Result<Option<AgentReport>> {
     let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
-    metadata.status = AgentStatus::Aborted.as_str().to_string();
+    transition_agent_status(&mut metadata, AgentStatus::Aborted)?;
     write_agent_record(waap_root, agent_id, &metadata, &body)?;
 
     load_agent_report(waap_root, agent_id).map(Some)
@@ -218,6 +230,7 @@ mod tests {
         write_agent(dir.path(), "aa-00000002", "running");
         write_agent(dir.path(), "aa-00000003", "completed");
         write_agent(dir.path(), "aa-00000004", "aborted");
+        write_agent(dir.path(), "aa-00000005", "failed");
 
         let reports = stop_agents(dir.path(), None).unwrap();
 
@@ -250,16 +263,27 @@ mod tests {
                 .status,
             "aborted"
         );
+        assert_eq!(
+            load_agent_report(dir.path(), "aa-00000005")
+                .unwrap()
+                .metadata
+                .status,
+            "failed"
+        );
     }
 
     #[test]
-    fn agent_stop_existing_non_running_agent_is_noop() {
+    fn agent_stop_rejects_explicit_terminal_agent() {
         let dir = tempdir().unwrap();
         write_agent(dir.path(), "aa-3881fda0", "completed");
 
-        let reports = stop_agents(dir.path(), Some("aa-3881fda0")).unwrap();
+        let error = stop_agents(dir.path(), Some("aa-3881fda0")).unwrap_err();
 
-        assert!(reports.is_empty());
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            error.to_string(),
+            "invalid agent status transition: completed -> aborted"
+        );
         assert_eq!(
             load_agent_report(dir.path(), "aa-3881fda0")
                 .unwrap()
@@ -267,6 +291,17 @@ mod tests {
                 .status,
             "completed"
         );
+    }
+
+    #[test]
+    fn agent_stop_explicitly_cancels_ready_agent() {
+        let dir = tempdir().unwrap();
+        write_agent(dir.path(), "aa-3881fda0", "ready");
+
+        let reports = stop_agents(dir.path(), Some("aa-3881fda0")).unwrap();
+
+        assert_eq!(agent_ids(&reports), vec!["aa-3881fda0"]);
+        assert_eq!(reports[0].metadata.status, "aborted");
     }
 
     #[test]

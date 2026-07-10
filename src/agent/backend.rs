@@ -78,6 +78,7 @@ pub(super) mod fake {
         pub(crate) outcome: Option<RunOutcome>,
         pub(crate) start_error: Option<String>,
         pub(crate) wait_error: Option<String>,
+        pub(crate) wait_action: Option<Box<dyn FnOnce() -> io::Result<()>>>,
         pub(crate) abort_error: Option<String>,
         pub(crate) start_calls: Vec<StartCall>,
         pub(crate) wait_calls: Rc<Cell<usize>>,
@@ -91,6 +92,7 @@ pub(super) mod fake {
                 outcome: Some(RunOutcome::Completed),
                 start_error: None,
                 wait_error: None,
+                wait_action: None,
                 abort_error: None,
                 start_calls: Vec::new(),
                 wait_calls: Rc::new(Cell::new(0)),
@@ -102,12 +104,16 @@ pub(super) mod fake {
     struct FakeRun {
         outcome: RunOutcome,
         error: Option<String>,
+        action: Option<Box<dyn FnOnce() -> io::Result<()>>>,
         wait_calls: Rc<Cell<usize>>,
     }
 
     impl RunHandle for FakeRun {
-        fn wait(self: Box<Self>) -> io::Result<RunOutcome> {
+        fn wait(mut self: Box<Self>) -> io::Result<RunOutcome> {
             self.wait_calls.set(self.wait_calls.get() + 1);
+            if let Some(action) = self.action.take() {
+                action()?;
+            }
             if let Some(error) = self.error {
                 Err(io::Error::other(error))
             } else {
@@ -132,6 +138,7 @@ pub(super) mod fake {
                 handle: Box::new(FakeRun {
                     outcome: self.outcome.take().unwrap_or(RunOutcome::Completed),
                     error: self.wait_error.take(),
+                    action: self.wait_action.take(),
                     wait_calls: Rc::clone(&self.wait_calls),
                 }),
             })

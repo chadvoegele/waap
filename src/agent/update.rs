@@ -3,8 +3,8 @@ use std::path::Path;
 
 use crate::agent::get::load_agent_report;
 use crate::agent::{
-    agent_report_json, print_agent_report_human, read_agent_record, write_agent_record,
-    AgentReport, AgentStatus,
+    agent_report_json, print_agent_report_human, read_agent_record, transition_agent_status,
+    write_agent_record, AgentReport, AgentStatus,
 };
 use crate::cli::OutputFormat;
 use crate::git::{commit_paths, Committed};
@@ -66,8 +66,24 @@ fn update_agent_record(
     }
 
     let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
+    if set_session_id.is_some()
+        && (metadata.status != AgentStatus::Running.as_str() || set_status.is_some())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("agent {agent_id} must remain running to assign a session"),
+        ));
+    }
+    if set_session_id.is_some() {
+        if let Some(existing_session_id) = &metadata.session_id {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("agent {agent_id} already has session id {existing_session_id}"),
+            ));
+        }
+    }
     if let Some(status) = set_status {
-        metadata.status = status.as_str().to_string();
+        transition_agent_status(&mut metadata, *status)?;
     }
     if let Some(session_id) = set_session_id {
         metadata.session_id = Some(session_id.to_string());
@@ -118,19 +134,19 @@ mod tests {
     }
 
     #[test]
-    fn agent_update_preserves_frontmatter_and_body() {
+    fn agent_update_valid_transition_preserves_frontmatter_and_body() {
         let dir = tempdir().unwrap();
         let path = dir.path().join(".waap/agents/aa-3881fda0/agent.md");
         write_file(
             &path,
-            "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"planner\"\nstatus = \"ready\"\n+++\n\n# Purpose\nDo work\n",
+            "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"planner\"\nstatus = \"running\"\n+++\n\n# Purpose\nDo work\n",
         );
 
         let report = update_agent_record(
             dir.path(),
             "aa-3881fda0",
             Some(&AgentStatus::Completed),
-            Some("ses_123"),
+            None,
         )
         .unwrap();
         let contents = fs::read_to_string(&path).unwrap();
@@ -138,16 +154,16 @@ mod tests {
         assert_eq!(report.agent_id, "aa-3881fda0");
         assert_eq!(report.metadata.creation_date, "2026-06-18T15:00:34Z");
         assert_eq!(report.metadata.status, "completed");
-        assert_eq!(report.metadata.session_id.as_deref(), Some("ses_123"));
+        assert_eq!(report.metadata.session_id, None);
         assert_eq!(report.file_size, contents.len() as u64);
         assert!(contents.contains("creation_date = 2026-06-18T15:00:34Z\n"));
         assert!(!contents.contains("role ="));
         assert!(contents.contains("status = \"completed\"\n"));
-        assert!(contents.contains("session_id = \"ses_123\"\n+++\n\n# Purpose\nDo work\n"));
+        assert!(contents.contains("status = \"completed\"\n+++\n\n# Purpose\nDo work\n"));
     }
 
     #[test]
-    fn agent_update_replaces_existing_session_id() {
+    fn agent_update_rejects_existing_session_id() {
         let dir = tempdir().unwrap();
         let path = dir.path().join(".waap/agents/aa-3881fda0/agent.md");
         write_file(
@@ -155,13 +171,82 @@ mod tests {
             "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"running\"\nsession_id = \"ses_old\"\n+++\n\n# Purpose\n",
         );
 
-        let report = update_agent_record(dir.path(), "aa-3881fda0", None, Some("ses_new")).unwrap();
+        let error =
+            update_agent_record(dir.path(), "aa-3881fda0", None, Some("ses_new")).unwrap_err();
         let contents = fs::read_to_string(&path).unwrap();
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert!(error.to_string().contains("already has session id ses_old"));
+        assert!(contents.contains("session_id = \"ses_old\"\n"));
+    }
+
+    #[test]
+    fn agent_update_rejects_invalid_same_and_terminal_transitions() {
+        for (current, next) in [
+            ("ready", AgentStatus::Ready),
+            ("ready", AgentStatus::Completed),
+            ("running", AgentStatus::Running),
+            ("completed", AgentStatus::Failed),
+            ("failed", AgentStatus::Aborted),
+            ("aborted", AgentStatus::Running),
+        ] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join(".waap/agents/aa-3881fda0/agent.md");
+            write_file(
+                &path,
+                &format!(
+                    "+++\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"{current}\"\n+++\n\n# Purpose\n"
+                ),
+            );
+
+            let error =
+                update_agent_record(dir.path(), "aa-3881fda0", Some(&next), None).unwrap_err();
+
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(
+                fs::read_to_string(path).unwrap(),
+                format!(
+                    "+++\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"{current}\"\n+++\n\n# Purpose\n"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn agent_update_assigns_session_only_to_running_agent_without_session() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".waap/agents/aa-3881fda0/agent.md");
+        write_file(
+            &path,
+            "+++\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"running\"\n+++\n\n# Purpose\n",
+        );
+
+        let report = update_agent_record(dir.path(), "aa-3881fda0", None, Some("ses_new")).unwrap();
 
         assert_eq!(report.metadata.status, "running");
         assert_eq!(report.metadata.session_id.as_deref(), Some("ses_new"));
-        assert!(contents.contains("session_id = \"ses_new\"\n"));
-        assert!(!contents.contains("ses_old"));
+    }
+
+    #[test]
+    fn agent_update_rejects_session_assignment_when_status_changes() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".waap/agents/aa-3881fda0/agent.md");
+        write_file(
+            &path,
+            "+++\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"running\"\n+++\n\n# Purpose\n",
+        );
+
+        let error = update_agent_record(
+            dir.path(),
+            "aa-3881fda0",
+            Some(&AgentStatus::Completed),
+            Some("ses_new"),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("must remain running"));
+        assert!(!fs::read_to_string(path).unwrap().contains("session_id"));
     }
 
     #[test]

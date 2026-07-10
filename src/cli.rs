@@ -418,6 +418,39 @@ mod tests {
     }
 
     #[test]
+    fn parses_failed_agent_status_for_list_and_update() {
+        let list = Cli::try_parse_from(["waap", "agent", "list", "--status", "failed"]).unwrap();
+        let update = Cli::try_parse_from([
+            "waap",
+            "agent",
+            "update",
+            "--agent-id",
+            "aa-3881fda0",
+            "--set-status",
+            "failed",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            list.command,
+            Command::Agent {
+                command: AgentCommand::List {
+                    status: Some(AgentStatus::Failed)
+                }
+            }
+        ));
+        assert!(matches!(
+            update.command,
+            Command::Agent {
+                command: AgentCommand::Update {
+                    set_status: Some(AgentStatus::Failed),
+                    ..
+                }
+            }
+        ));
+    }
+
+    #[test]
     fn parses_agent_run_arguments() {
         let cli = Cli::try_parse_from([
             "waap",

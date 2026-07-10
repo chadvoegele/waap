@@ -67,13 +67,7 @@ impl AgentMetadata {
         require_datetime(value, "creation_date", path, &mut errors);
         // `role` is a deprecated field; tolerate it when present for backward compatibility.
         require_optional_string(value, "role", path, &mut errors);
-        require_string_choice(
-            value,
-            "status",
-            &["ready", "running", "completed", "aborted"],
-            path,
-            &mut errors,
-        );
+        require_string_choice(value, "status", &AgentStatus::labels(), path, &mut errors);
         require_optional_string(value, "session_id", path, &mut errors);
         require_optional_string_choice(value, "system", &AgentSystem::labels(), path, &mut errors);
         if !errors.is_empty() {
@@ -184,11 +178,12 @@ pub(crate) struct AgentReport {
     pub(crate) file_size: u64,
 }
 
-#[derive(Clone, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum AgentStatus {
     Ready,
     Running,
     Completed,
+    Failed,
     Aborted,
 }
 
@@ -198,9 +193,59 @@ impl AgentStatus {
             AgentStatus::Ready => "ready",
             AgentStatus::Running => "running",
             AgentStatus::Completed => "completed",
+            AgentStatus::Failed => "failed",
             AgentStatus::Aborted => "aborted",
         }
     }
+
+    pub(crate) fn parse(label: &str) -> Option<Self> {
+        Self::value_variants()
+            .iter()
+            .find(|status| status.as_str() == label)
+            .copied()
+    }
+
+    fn labels() -> Vec<&'static str> {
+        Self::value_variants().iter().map(Self::as_str).collect()
+    }
+
+    pub(crate) fn validate_transition(self, next: Self) -> io::Result<()> {
+        let allowed = matches!(
+            (self, next),
+            (Self::Ready, Self::Running | Self::Aborted)
+                | (
+                    Self::Running,
+                    Self::Completed | Self::Failed | Self::Aborted
+                )
+        );
+        if allowed {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "invalid agent status transition: {} -> {}",
+                    self.as_str(),
+                    next.as_str()
+                ),
+            ))
+        }
+    }
+}
+
+pub(crate) fn transition_agent_status(
+    metadata: &mut AgentMetadata,
+    next: AgentStatus,
+) -> io::Result<()> {
+    let current = AgentStatus::parse(&metadata.status).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid agent status {:?}", metadata.status),
+        )
+    })?;
+    current.validate_transition(next)?;
+    metadata.status = next.as_str().to_string();
+    Ok(())
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -287,7 +332,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        agent_report_json, is_agent_id, AgentMetadata, AgentReport, AgentSystem, OPENCODE_ENV_LOCK,
+        agent_report_json, is_agent_id, transition_agent_status, AgentMetadata, AgentReport,
+        AgentStatus, AgentSystem, OPENCODE_ENV_LOCK,
     };
     use crate::ids::random_hex_chars;
 
@@ -352,6 +398,65 @@ mod tests {
         let value: ::toml::Value = toml.parse().unwrap();
 
         assert!(AgentMetadata::from_frontmatter(&value, &path).is_ok());
+    }
+
+    #[test]
+    fn agent_metadata_failed_status_passes() {
+        let path = PathBuf::from("agent.md");
+        let toml =
+            "creation_date = 2026-06-18T15:00:34Z\nstatus = \"failed\"\nsystem = \"codex\"\n";
+        let value: ::toml::Value = toml.parse().unwrap();
+
+        assert!(AgentMetadata::from_frontmatter(&value, &path).is_ok());
+    }
+
+    #[test]
+    fn agent_status_transition_graph_accepts_only_documented_edges() {
+        let statuses = [
+            AgentStatus::Ready,
+            AgentStatus::Running,
+            AgentStatus::Completed,
+            AgentStatus::Failed,
+            AgentStatus::Aborted,
+        ];
+        let allowed = [
+            (AgentStatus::Ready, AgentStatus::Running),
+            (AgentStatus::Ready, AgentStatus::Aborted),
+            (AgentStatus::Running, AgentStatus::Completed),
+            (AgentStatus::Running, AgentStatus::Failed),
+            (AgentStatus::Running, AgentStatus::Aborted),
+        ];
+
+        for current in statuses {
+            for next in statuses {
+                let expected = allowed.contains(&(current, next));
+                assert_eq!(
+                    current.validate_transition(next).is_ok(),
+                    expected,
+                    "{} -> {}",
+                    current.as_str(),
+                    next.as_str()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transition_agent_status_updates_only_allowed_transitions() {
+        let mut metadata = AgentMetadata {
+            name: None,
+            creation_date: "2026-06-18T15:00:34Z".to_string(),
+            status: "ready".to_string(),
+            session_id: None,
+            system: None,
+        };
+
+        transition_agent_status(&mut metadata, AgentStatus::Running).unwrap();
+        assert_eq!(metadata.status, "running");
+
+        let error = transition_agent_status(&mut metadata, AgentStatus::Ready).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(metadata.status, "running");
     }
 
     #[test]

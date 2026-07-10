@@ -41,7 +41,7 @@ Agent metadata is stored in TOML frontmatter.
 +++
 name = "List Tickets Developer"
 creation_date = 2026-06-18T15:00:34Z
-status = "ready"  # ready, running, completed, aborted
+status = "ready"  # ready, running, completed, failed, aborted
 session_id = "ses_9032dd..."  # add after agent is started
 system = "opencode"  # opencode, claude; add after agent is started
 +++

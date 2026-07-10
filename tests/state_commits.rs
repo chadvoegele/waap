@@ -143,7 +143,7 @@ fn agent_new_then_update_each_create_one_commit() {
             "--agent-id",
             &agent_id,
             "--set-status",
-            "completed",
+            "running",
         ],
     );
     assert!(output.status.success());
@@ -154,6 +154,39 @@ fn agent_new_then_update_each_create_one_commit() {
         last_subject(dir.path()),
         format!("waap agent update {agent_id}")
     );
+}
+
+#[test]
+fn agent_update_rejects_invalid_lifecycle_transition_without_commit() {
+    let dir = tempdir().unwrap();
+    init_repo_with_waap_project(dir.path());
+    let output = waap(
+        dir.path(),
+        "# Purpose\n",
+        &["--output-format", "json", "agent", "new"],
+    );
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let agent_id = value["agent_id"].as_str().unwrap();
+    let before = commit_count(dir.path());
+
+    let output = waap(
+        dir.path(),
+        "",
+        &[
+            "agent",
+            "update",
+            "--agent-id",
+            agent_id,
+            "--set-status",
+            "completed",
+        ],
+    );
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("invalid agent status transition: ready -> completed"));
+    assert_eq!(commit_count(dir.path()), before);
 }
 
 #[test]

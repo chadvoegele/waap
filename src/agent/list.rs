@@ -131,6 +131,18 @@ mod tests {
     }
 
     #[test]
+    fn agent_list_filters_failed_status() {
+        let dir = tempdir().unwrap();
+        write_agent(dir.path(), "aa-00000001", "failed");
+        write_agent(dir.path(), "aa-00000002", "completed");
+
+        let reports = list_agents(dir.path(), Some(&AgentStatus::Failed)).unwrap();
+
+        assert_eq!(agent_ids(&reports), vec!["aa-00000001"]);
+        assert_eq!(reports[0].metadata.status, "failed");
+    }
+
+    #[test]
     fn agent_list_handles_empty_agent_directories() {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join(".waap/agents")).unwrap();
