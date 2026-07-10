@@ -5,7 +5,9 @@ use std::process::{Child, Command as ProcessCommand, Stdio};
 
 use serde_json::{json, Value as JsonValue};
 
-use super::backend::{AbortContext, AgentSystemBackend, RunContext, RunOutcome, RunPreparation};
+use super::backend::{
+    AbortContext, AgentSystemBackend, RunHandle, RunOutcome, StartContext, StartedRun,
+};
 
 pub(super) struct OpencodeBackend {
     config: OpencodeRunConfig,
@@ -20,15 +22,8 @@ impl OpencodeBackend {
 }
 
 impl AgentSystemBackend for OpencodeBackend {
-    fn prepare_run(&mut self) -> io::Result<RunPreparation> {
-        Ok(RunPreparation {
-            initial_session_id: None,
-        })
-    }
-
-    fn run(&mut self, context: RunContext<'_>) -> io::Result<RunOutcome> {
+    fn start(&mut self, context: StartContext<'_>) -> io::Result<StartedRun> {
         let session_id = create_opencode_session(&self.config, context.worktree_dir)?;
-        (context.publish_session)(&session_id)?;
         let command = build_opencode_run_command(
             &self.config,
             context.agent_id,
@@ -36,13 +31,27 @@ impl AgentSystemBackend for OpencodeBackend {
             context.worktree_dir,
             context.prompt,
         );
-        let status = spawn_opencode_attached(&command)?.wait()?;
-        Ok(RunOutcome::from_exit_status(status))
+        Ok(StartedRun {
+            session_id,
+            handle: Box::new(OpencodeRun {
+                child: spawn_opencode_attached(&command)?,
+            }),
+        })
     }
 
     fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
         let worktree_dir = opencode_worktree_dir(context.waap_root, context.agent_id)?;
         abort_opencode_session(&self.config, context.session_id, &worktree_dir)
+    }
+}
+
+struct OpencodeRun {
+    child: Child,
+}
+
+impl RunHandle for OpencodeRun {
+    fn wait(mut self: Box<Self>) -> io::Result<RunOutcome> {
+        Ok(RunOutcome::from_exit_status(self.child.wait()?))
     }
 }
 

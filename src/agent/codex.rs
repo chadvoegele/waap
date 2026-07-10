@@ -7,56 +7,65 @@ use std::sync::Arc;
 
 use serde_json::{json, Value as JsonValue};
 
-use super::backend::{AbortContext, AgentSystemBackend, RunContext, RunOutcome, RunPreparation};
+use super::backend::{
+    AbortContext, AgentSystemBackend, RunHandle, RunOutcome, StartContext, StartedRun,
+};
 
 pub(super) struct CodexBackend {
     config: CodexRunConfig,
-    interrupt: Option<Arc<AtomicBool>>,
 }
 
 impl CodexBackend {
     pub(super) fn from_env() -> Self {
         Self {
             config: codex_run_config_from_env(),
-            interrupt: None,
         }
     }
 }
 
 impl AgentSystemBackend for CodexBackend {
-    fn prepare_run(&mut self) -> io::Result<RunPreparation> {
+    fn start(&mut self, context: StartContext<'_>) -> io::Result<StartedRun> {
         let interrupt = Arc::new(AtomicBool::new(false));
         signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&interrupt)).map_err(
             |error| io::Error::other(format!("failed to install SIGTERM handler: {error}")),
         )?;
-        self.interrupt = Some(interrupt);
-        Ok(RunPreparation {
-            initial_session_id: None,
-        })
-    }
-
-    fn run(&mut self, context: RunContext<'_>) -> io::Result<RunOutcome> {
-        let interrupt = self.interrupt.take().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "codex run requires successful preparation",
-            )
-        })?;
         let mut client = spawn_codex_app_server(&self.config, context.worktree_dir)?;
         client.initialize()?;
         let thread_id = client.thread_start(context.worktree_dir)?;
-        (context.publish_session)(&thread_id)?;
-        let turn_id = client.turn_start(&thread_id, context.prompt)?;
-        let status = client.pump_until_turn_completed(&thread_id, &turn_id, &interrupt)?;
+        Ok(StartedRun {
+            session_id: thread_id.clone(),
+            handle: Box::new(CodexRun {
+                client,
+                interrupt,
+                thread_id,
+                prompt: context.prompt.to_string(),
+            }),
+        })
+    }
+
+    fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
+        signal_codex_run(context.agent_id)
+    }
+}
+
+struct CodexRun {
+    client: CodexClient<BufReader<ChildStdout>, ChildStdin, io::Stdout>,
+    interrupt: Arc<AtomicBool>,
+    thread_id: String,
+    prompt: String,
+}
+
+impl RunHandle for CodexRun {
+    fn wait(mut self: Box<Self>) -> io::Result<RunOutcome> {
+        let turn_id = self.client.turn_start(&self.thread_id, &self.prompt)?;
+        let status =
+            self.client
+                .pump_until_turn_completed(&self.thread_id, &turn_id, &self.interrupt)?;
         if status.is_success() {
             Ok(RunOutcome::Completed)
         } else {
             Ok(RunOutcome::Failed(std::process::ExitCode::FAILURE))
         }
-    }
-
-    fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
-        signal_codex_run(context.agent_id)
     }
 }
 
@@ -685,30 +694,5 @@ mod tests {
         command.arg("-c").arg("exit 2");
         let error = map_pkill_status(command).expect_err("exit 2 should be Err");
         assert!(error.to_string().contains("status 2"));
-    }
-
-    #[test]
-    fn backend_run_requires_preparation_before_spawning() {
-        fn publish_noop(_: &str) -> io::Result<()> {
-            Ok(())
-        }
-
-        let mut backend = CodexBackend::from_env();
-        let mut publish = publish_noop;
-
-        let error = backend
-            .run(RunContext {
-                agent_id: "aa-00000001",
-                prompt: "prompt",
-                initial_session_id: None,
-                worktree_dir: Path::new("/unused"),
-                publish_session: &mut publish,
-            })
-            .unwrap_err();
-
-        assert_eq!(
-            error.to_string(),
-            "codex run requires successful preparation"
-        );
     }
 }

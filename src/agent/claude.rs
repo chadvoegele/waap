@@ -5,7 +5,9 @@ use std::process::{Child, Command as ProcessCommand, ExitStatus, Stdio};
 
 use uuid::Uuid;
 
-use super::backend::{AbortContext, AgentSystemBackend, RunContext, RunOutcome, RunPreparation};
+use super::backend::{
+    AbortContext, AgentSystemBackend, RunHandle, RunOutcome, StartContext, StartedRun,
+};
 
 pub(super) struct ClaudeBackend {
     config: ClaudeRunConfig,
@@ -20,32 +22,35 @@ impl ClaudeBackend {
 }
 
 impl AgentSystemBackend for ClaudeBackend {
-    fn prepare_run(&mut self) -> io::Result<RunPreparation> {
-        Ok(RunPreparation {
-            initial_session_id: Some(Uuid::new_v4().to_string()),
-        })
-    }
-
-    fn run(&mut self, context: RunContext<'_>) -> io::Result<RunOutcome> {
-        let session_id = context.initial_session_id.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "claude run requires an initial session id",
-            )
-        })?;
+    fn start(&mut self, context: StartContext<'_>) -> io::Result<StartedRun> {
+        let session_id = Uuid::new_v4().to_string();
         let command = build_claude_run_command(
             &self.config,
             context.agent_id,
-            session_id,
+            &session_id,
             context.worktree_dir,
             context.prompt,
         );
-        let status = spawn_claude_attached(&command)?.wait()?;
-        Ok(RunOutcome::from_exit_status(status))
+        Ok(StartedRun {
+            session_id,
+            handle: Box::new(ClaudeRun {
+                child: spawn_claude_attached(&command)?,
+            }),
+        })
     }
 
     fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
         kill_claude_session(context.session_id)
+    }
+}
+
+struct ClaudeRun {
+    child: Child,
+}
+
+impl RunHandle for ClaudeRun {
+    fn wait(mut self: Box<Self>) -> io::Result<RunOutcome> {
+        Ok(RunOutcome::from_exit_status(self.child.wait()?))
     }
 }
 
@@ -134,13 +139,12 @@ fn build_claude_run_command(
 
 #[cfg(test)]
 mod tests {
-    use std::io;
     use std::os::unix::process::ExitStatusExt;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     use super::{
-        build_claude_run_command, map_pkill_status, spawn_claude_attached, AgentSystemBackend,
-        ClaudeBackend, ClaudeRunCommand, ClaudeRunConfig, RunContext,
+        build_claude_run_command, map_pkill_status, spawn_claude_attached, ClaudeRunCommand,
+        ClaudeRunConfig,
     };
 
     #[test]
@@ -186,33 +190,6 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             "pkill terminated by signal"
-        );
-    }
-
-    #[test]
-    fn backend_prepares_uuid_session_and_requires_it_for_run() {
-        fn publish_noop(_: &str) -> io::Result<()> {
-            Ok(())
-        }
-
-        let mut backend = ClaudeBackend::from_env();
-        let preparation = backend.prepare_run().unwrap();
-        let session_id = preparation.initial_session_id.unwrap();
-        assert!(uuid::Uuid::parse_str(&session_id).is_ok());
-
-        let mut publish = publish_noop;
-        let error = backend
-            .run(RunContext {
-                agent_id: "aa-00000001",
-                prompt: "prompt",
-                initial_session_id: None,
-                worktree_dir: Path::new("/unused"),
-                publish_session: &mut publish,
-            })
-            .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "claude run requires an initial session id"
         );
     }
 

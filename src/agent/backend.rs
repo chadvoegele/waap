@@ -7,10 +7,6 @@ use super::codex::CodexBackend;
 use super::opencode::OpencodeBackend;
 use super::AgentSystem;
 
-pub(super) struct RunPreparation {
-    pub(super) initial_session_id: Option<String>,
-}
-
 #[derive(Debug, PartialEq)]
 pub(super) enum RunOutcome {
     Completed,
@@ -27,12 +23,19 @@ impl RunOutcome {
     }
 }
 
-pub(super) struct RunContext<'a> {
+pub(super) struct StartContext<'a> {
     pub(super) agent_id: &'a str,
     pub(super) prompt: &'a str,
-    pub(super) initial_session_id: Option<&'a str>,
     pub(super) worktree_dir: &'a Path,
-    pub(super) publish_session: &'a mut dyn FnMut(&str) -> io::Result<()>,
+}
+
+pub(super) struct StartedRun {
+    pub(super) session_id: String,
+    pub(super) handle: Box<dyn RunHandle>,
+}
+
+pub(super) trait RunHandle {
+    fn wait(self: Box<Self>) -> io::Result<RunOutcome>;
 }
 
 pub(super) struct AbortContext<'a> {
@@ -42,9 +45,7 @@ pub(super) struct AbortContext<'a> {
 }
 
 pub(super) trait AgentSystemBackend {
-    fn prepare_run(&mut self) -> io::Result<RunPreparation>;
-
-    fn run(&mut self, context: RunContext<'_>) -> io::Result<RunOutcome>;
+    fn start(&mut self, context: StartContext<'_>) -> io::Result<StartedRun>;
 
     fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()>;
 }
@@ -87,16 +88,18 @@ impl BackendResolver for BackendRegistry {
 
 #[cfg(test)]
 pub(super) mod fake {
+    use std::cell::Cell;
     use std::path::PathBuf;
+    use std::rc::Rc;
 
     use super::*;
 
     #[derive(Debug, PartialEq, Eq)]
-    pub(crate) struct RunCall {
+    pub(crate) struct StartCall {
         pub(crate) agent_id: String,
         pub(crate) prompt: String,
-        pub(crate) initial_session_id: Option<String>,
         pub(crate) worktree_dir: PathBuf,
+        pub(crate) worktree_existed: bool,
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -107,58 +110,67 @@ pub(super) mod fake {
     }
 
     pub(crate) struct FakeBackend {
-        pub(crate) initial_session_id: Option<String>,
-        pub(crate) late_session_id: Option<String>,
+        pub(crate) session_id: String,
         pub(crate) outcome: Option<RunOutcome>,
-        pub(crate) prepare_error: Option<String>,
-        pub(crate) run_error: Option<String>,
+        pub(crate) start_error: Option<String>,
+        pub(crate) wait_error: Option<String>,
         pub(crate) abort_error: Option<String>,
-        pub(crate) prepare_calls: usize,
-        pub(crate) run_calls: Vec<RunCall>,
+        pub(crate) start_calls: Vec<StartCall>,
+        pub(crate) wait_calls: Rc<Cell<usize>>,
         pub(crate) abort_calls: Vec<AbortCall>,
     }
 
     impl Default for FakeBackend {
         fn default() -> Self {
             Self {
-                initial_session_id: None,
-                late_session_id: None,
+                session_id: "ses_fake".to_string(),
                 outcome: Some(RunOutcome::Completed),
-                prepare_error: None,
-                run_error: None,
+                start_error: None,
+                wait_error: None,
                 abort_error: None,
-                prepare_calls: 0,
-                run_calls: Vec::new(),
+                start_calls: Vec::new(),
+                wait_calls: Rc::new(Cell::new(0)),
                 abort_calls: Vec::new(),
             }
         }
     }
 
-    impl AgentSystemBackend for FakeBackend {
-        fn prepare_run(&mut self) -> io::Result<RunPreparation> {
-            self.prepare_calls += 1;
-            if let Some(error) = self.prepare_error.take() {
-                return Err(io::Error::other(error));
-            }
-            Ok(RunPreparation {
-                initial_session_id: self.initial_session_id.clone(),
-            })
-        }
+    struct FakeRun {
+        outcome: RunOutcome,
+        error: Option<String>,
+        wait_calls: Rc<Cell<usize>>,
+    }
 
-        fn run(&mut self, context: RunContext<'_>) -> io::Result<RunOutcome> {
-            self.run_calls.push(RunCall {
+    impl RunHandle for FakeRun {
+        fn wait(self: Box<Self>) -> io::Result<RunOutcome> {
+            self.wait_calls.set(self.wait_calls.get() + 1);
+            if let Some(error) = self.error {
+                Err(io::Error::other(error))
+            } else {
+                Ok(self.outcome)
+            }
+        }
+    }
+
+    impl AgentSystemBackend for FakeBackend {
+        fn start(&mut self, context: StartContext<'_>) -> io::Result<StartedRun> {
+            self.start_calls.push(StartCall {
                 agent_id: context.agent_id.to_string(),
                 prompt: context.prompt.to_string(),
-                initial_session_id: context.initial_session_id.map(str::to_string),
                 worktree_dir: context.worktree_dir.to_path_buf(),
+                worktree_existed: context.worktree_dir.is_dir(),
             });
-            if let Some(error) = self.run_error.take() {
+            if let Some(error) = self.start_error.take() {
                 return Err(io::Error::other(error));
             }
-            if let Some(session_id) = &self.late_session_id {
-                (context.publish_session)(session_id)?;
-            }
-            Ok(self.outcome.take().unwrap_or(RunOutcome::Completed))
+            Ok(StartedRun {
+                session_id: self.session_id.clone(),
+                handle: Box::new(FakeRun {
+                    outcome: self.outcome.take().unwrap_or(RunOutcome::Completed),
+                    error: self.wait_error.take(),
+                    wait_calls: Rc::clone(&self.wait_calls),
+                }),
+            })
         }
 
         fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
