@@ -11,3 +11,5 @@
 - Passed `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, `cargo build`, `cargo build --release`, and `cargo test` (226 unit and 21 integration tests).
 - Rebasing onto current `main` completed without conflicts, and the branch merged with `--ff-only`.
 - Repeated all five required validations on merged `main`; all passed with 226 unit and 21 integration tests.
+- Reopened the ticket after the completion audit found missing direct coverage for initialization and server error propagation.
+- Added client-level tests for response correlation, delta forwarding during initialization, the initialized notification, and server error propagation; all 18 Codex client tests passed.

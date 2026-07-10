@@ -399,6 +399,29 @@ mod tests {
     }
 
     #[test]
+    fn initialize_correlates_response_forwards_delta_and_notifies_server() {
+        let input = concat!(
+            "{\"id\":9,\"result\":{}}\n",
+            "{\"method\":\"item/agentMessage/delta\",\"params\":{\"delta\":\"ready\"}}\n",
+            "{\"id\":0,\"result\":{}}\n",
+        );
+        let mut client = client_over(input);
+
+        client.initialize().unwrap();
+
+        assert_eq!(String::from_utf8(client.out.clone()).unwrap(), "ready");
+        let lines = String::from_utf8(client.writer.clone()).unwrap();
+        let mut lines = lines.lines();
+        let request = parse(lines.next().unwrap());
+        assert_eq!(request["id"], json!(0));
+        assert_eq!(request["method"], json!("initialize"));
+        assert!(request.get("params").is_some());
+        let notification = parse(lines.next().unwrap());
+        assert_eq!(notification, json!({ "method": "initialized" }));
+        assert!(lines.next().is_none());
+    }
+
+    #[test]
     fn thread_start_params_encode_never_approvals_and_full_access() {
         let worktree_dir = PathBuf::from("/repo/with space");
         let params = thread_start_params(&worktree_dir, Some("o3"));
@@ -456,6 +479,18 @@ mod tests {
         assert_eq!(thread_id, "th_abc");
         let request = parse(&String::from_utf8(client.writer.clone()).unwrap());
         assert_eq!(request["method"], json!("thread/start"));
+    }
+
+    #[test]
+    fn thread_start_propagates_server_error() {
+        let input = "{\"id\":0,\"error\":{\"code\":-32603,\"message\":\"boom\"}}\n";
+        let mut client = client_over(input);
+
+        let error = client
+            .thread_start(&PathBuf::from("/repo"))
+            .expect_err("server error must propagate");
+
+        assert!(error.to_string().contains("boom"));
     }
 
     #[test]
