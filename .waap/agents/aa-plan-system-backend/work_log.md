@@ -9,3 +9,5 @@
 - Added `specs/agent-system-backend.md` with concrete trait/context/outcome signatures, ownership and configuration rules, current-to-proposed backend mappings, fake-backed tests, affected files, rejected alternatives, risks, a compile-safe migration sequence, and validation gates.
 - Reviewed the draft against current code and corrected three subtle issues: only Opencode may canonicalize an abort worktree, cleanup-error coverage remains at the existing helper seam, and Codex preparation remains after the runner's second record read. Added explicit Claude `pkill` mapping coverage.
 - Validation passed: `cargo run -- check`, `waap check`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo build`, `cargo build --release`, and `cargo test` (252 tests across all test binaries).
+- Committed the design with both agent and ticket IDs, rebased onto current `main`, and merged with `--ff-only`.
+- Marked `tt-plan-agent-system-backend-trait` completed. Re-ran the full validation suite successfully on final merged `main`; `cargo test` again passed all 252 tests.
