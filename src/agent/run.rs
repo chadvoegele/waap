@@ -92,17 +92,17 @@ impl AgentWorktree {
         self.cleanup_pending = false;
         Ok(())
     }
+}
 
-    fn finish<T>(&mut self, result: io::Result<T>) -> io::Result<T> {
-        match (result, self.cleanup()) {
-            (Ok(value), Ok(())) => Ok(value),
-            (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
-            (Err(run_error), Ok(())) => Err(run_error),
-            (Err(run_error), Err(cleanup_error)) => Err(io::Error::new(
-                run_error.kind(),
-                format!("{run_error}; worktree cleanup also failed: {cleanup_error}"),
-            )),
-        }
+fn collapse_errors<T>(run_result: io::Result<T>, cleanup_result: io::Result<()>) -> io::Result<T> {
+    match (run_result, cleanup_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
+        (Err(run_error), Ok(())) => Err(run_error),
+        (Err(run_error), Err(cleanup_error)) => Err(io::Error::new(
+            run_error.kind(),
+            format!("{run_error}; worktree cleanup also failed: {cleanup_error}"),
+        )),
     }
 }
 
@@ -130,11 +130,15 @@ fn run_agent_opencode(
     mark_running(waap_root, output_format, agent_id, &mut metadata, &body)?;
     let mut worktree = AgentWorktree::create(waap_root, agent_id)?;
     let worktree_dir = worktree.dir().to_path_buf();
-    let result =
+    let run_result =
         run_opencode_in_worktree(waap_root, output_format, agent_id, &config, &worktree_dir);
-    let status = worktree.finish(result)?;
+    let cleanup_result = worktree.cleanup();
+    let status = collapse_errors(run_result, cleanup_result)?;
 
-    finalize_agent_run(waap_root, output_format, agent_id, status)
+    if status.success() {
+        mark_completed(waap_root, output_format, agent_id)?;
+    }
+    Ok(exit_code_from_status(status))
 }
 
 fn run_opencode_in_worktree(
@@ -172,10 +176,14 @@ fn run_agent_claude(
 
     mark_running(waap_root, output_format, agent_id, &mut metadata, &body)?;
     let mut worktree = AgentWorktree::create(waap_root, agent_id)?;
-    let result = run_claude_in_worktree(&config, agent_id, &session_id, worktree.dir());
-    let status = worktree.finish(result)?;
+    let run_result = run_claude_in_worktree(&config, agent_id, &session_id, worktree.dir());
+    let cleanup_result = worktree.cleanup();
+    let status = collapse_errors(run_result, cleanup_result)?;
 
-    finalize_agent_run(waap_root, output_format, agent_id, status)
+    if status.success() {
+        mark_completed(waap_root, output_format, agent_id)?;
+    }
+    Ok(exit_code_from_status(status))
 }
 
 fn run_claude_in_worktree(
@@ -207,7 +215,7 @@ fn run_agent_codex(
     mark_running(waap_root, output_format, agent_id, &mut metadata, &body)?;
     let mut worktree = AgentWorktree::create(waap_root, agent_id)?;
     let worktree_dir = worktree.dir().to_path_buf();
-    let result = run_codex_in_worktree(
+    let run_result = run_codex_in_worktree(
         waap_root,
         output_format,
         agent_id,
@@ -215,9 +223,15 @@ fn run_agent_codex(
         &worktree_dir,
         &interrupt,
     );
-    let status = worktree.finish(result)?;
+    let cleanup_result = worktree.cleanup();
+    let status = collapse_errors(run_result, cleanup_result)?;
 
-    finalize_codex_run(waap_root, output_format, agent_id, status)
+    if status.is_success() {
+        mark_completed(waap_root, output_format, agent_id)?;
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::FAILURE)
+    }
 }
 
 fn run_codex_in_worktree(
@@ -330,59 +344,20 @@ fn mark_completed(
     Ok(())
 }
 
-fn finalize_agent_run(
-    waap_root: &Path,
-    output_format: &OutputFormat,
-    agent_id: &str,
-    status: ExitStatus,
-) -> io::Result<ExitCode> {
-    finalize_run(waap_root, output_format, agent_id, status.success())?;
-    Ok(exit_code_from_status(status))
-}
-
-// Codex app-server stays alive across turns, so the turn status determines completion.
-fn finalize_codex_run(
-    waap_root: &Path,
-    output_format: &OutputFormat,
-    agent_id: &str,
-    status: TurnStatus,
-) -> io::Result<ExitCode> {
-    let success = status.is_success();
-    finalize_run(waap_root, output_format, agent_id, success)?;
-    Ok(if success {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    })
-}
-
-fn finalize_run(
-    waap_root: &Path,
-    output_format: &OutputFormat,
-    agent_id: &str,
-    success: bool,
-) -> io::Result<()> {
-    if success {
-        mark_completed(waap_root, output_format, agent_id)?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::os::unix::process::ExitStatusExt;
     use std::path::{Path, PathBuf};
-    use std::process::ExitStatus;
+    use std::process::{ExitCode, ExitStatus};
 
     use serde_json::json;
     use tempfile::tempdir;
 
     use super::{
-        agent_worktree_dir, finalize_agent_run, finalize_codex_run, mark_running,
+        agent_worktree_dir, collapse_errors, exit_code_from_status, mark_completed, mark_running,
         update_agent_session, AgentWorktree,
     };
-    use crate::agent::codex::TurnStatus;
     use crate::agent::{
         agent_report_json, read_agent_record, AgentMetadata, AgentReport, AgentSystem,
     };
@@ -420,44 +395,49 @@ mod tests {
     }
 
     #[test]
-    fn agent_worktree_returns_cleanup_error_after_successful_run() {
-        let dir = tempdir().unwrap();
-        init_repo_with_commit(dir.path());
-        let mut worktree = AgentWorktree::create(dir.path(), "aa-00000001").unwrap();
-        let git_dir = dir.path().join(".git");
-        let hidden_git_dir = dir.path().join(".git-hidden");
-        fs::rename(&git_dir, &hidden_git_dir).unwrap();
+    fn collapse_errors_returns_cleanup_error_after_successful_run() {
+        let error =
+            collapse_errors(Ok(17), Err(std::io::Error::other("cleanup failed"))).unwrap_err();
 
-        let error = worktree.finish(Ok(())).unwrap_err();
-
-        fs::rename(hidden_git_dir, git_dir).unwrap();
-        assert!(error.to_string().contains("git worktree failed"));
-        drop(worktree);
-        assert!(!dir.path().join("worktrees/aa-00000001").exists());
+        assert_eq!(error.to_string(), "cleanup failed");
     }
 
     #[test]
-    fn agent_worktree_preserves_run_error_and_cleanup_diagnostics() {
-        let dir = tempdir().unwrap();
-        init_repo_with_commit(dir.path());
-        let mut worktree = AgentWorktree::create(dir.path(), "aa-00000001").unwrap();
-        let git_dir = dir.path().join(".git");
-        let hidden_git_dir = dir.path().join(".git-hidden");
-        fs::rename(&git_dir, &hidden_git_dir).unwrap();
+    fn collapse_errors_returns_run_value_when_both_succeed() {
+        assert_eq!(collapse_errors(Ok(17), Ok(())).unwrap(), 17);
+    }
 
-        let error = worktree
-            .finish(Err::<(), _>(std::io::Error::new(
+    #[test]
+    fn collapse_errors_returns_run_error_when_cleanup_succeeds() {
+        let error = collapse_errors::<()>(
+            Err(std::io::Error::new(
                 std::io::ErrorKind::ConnectionAborted,
                 "run failed",
-            )))
-            .unwrap_err();
+            )),
+            Ok(()),
+        )
+        .unwrap_err();
 
-        fs::rename(hidden_git_dir, git_dir).unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionAborted);
+        assert_eq!(error.to_string(), "run failed");
+    }
+
+    #[test]
+    fn collapse_errors_preserves_run_error_and_cleanup_diagnostics() {
+        let error = collapse_errors(
+            Err::<(), _>(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "run failed",
+            )),
+            Err(std::io::Error::other("cleanup failed")),
+        )
+        .unwrap_err();
+
         assert_eq!(error.kind(), std::io::ErrorKind::ConnectionAborted);
         assert!(error.to_string().starts_with("run failed;"));
-        assert!(error.to_string().contains("worktree cleanup also failed"));
-        drop(worktree);
-        assert!(!dir.path().join("worktrees/aa-00000001").exists());
+        assert!(error
+            .to_string()
+            .contains("worktree cleanup also failed: cleanup failed"));
     }
 
     #[test]
@@ -616,19 +596,13 @@ mod tests {
     }
 
     #[test]
-    fn finalize_agent_run_marks_completed_on_zero_exit() {
+    fn mark_completed_updates_status_and_commits() {
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path());
         let agent_id = "aa-00000001";
         let path = seed_agent_record(dir.path(), agent_id, "running");
 
-        finalize_agent_run(
-            dir.path(),
-            &OutputFormat::Json,
-            agent_id,
-            ExitStatus::from_raw(0),
-        )
-        .unwrap();
+        mark_completed(dir.path(), &OutputFormat::Json, agent_id).unwrap();
 
         let contents = fs::read_to_string(&path).unwrap();
         assert!(contents.contains("status = \"completed\"\n"));
@@ -639,20 +613,14 @@ mod tests {
     }
 
     #[test]
-    fn finalize_agent_run_skips_commit_when_already_completed() {
+    fn mark_completed_skips_commit_when_already_completed() {
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path());
         let agent_id = "aa-00000001";
         let path = seed_agent_record(dir.path(), agent_id, "completed");
         let head_before = git(dir.path(), &["rev-parse", "HEAD"]);
 
-        finalize_agent_run(
-            dir.path(),
-            &OutputFormat::Json,
-            agent_id,
-            ExitStatus::from_raw(0),
-        )
-        .unwrap();
+        mark_completed(dir.path(), &OutputFormat::Json, agent_id).unwrap();
 
         let contents = fs::read_to_string(&path).unwrap();
         assert!(contents.contains("status = \"completed\"\n"));
@@ -661,29 +629,15 @@ mod tests {
     }
 
     #[test]
-    fn finalize_agent_run_leaves_running_on_nonzero_exit() {
-        let dir = tempdir().unwrap();
-        init_repo_with_commit(dir.path());
-        let agent_id = "aa-00000001";
-        let path = seed_agent_record(dir.path(), agent_id, "running");
-        let head_before = git(dir.path(), &["rev-parse", "HEAD"]);
-
-        finalize_agent_run(
-            dir.path(),
-            &OutputFormat::Json,
-            agent_id,
-            ExitStatus::from_raw(7 << 8),
-        )
-        .unwrap();
-
-        let contents = fs::read_to_string(&path).unwrap();
-        assert!(contents.contains("status = \"running\"\n"));
-        let head_after = git(dir.path(), &["rev-parse", "HEAD"]);
-        assert_eq!(head_before, head_after);
+    fn exit_code_mirrors_nonzero_process_status() {
+        assert_eq!(
+            exit_code_from_status(ExitStatus::from_raw(7 << 8)),
+            ExitCode::from(7)
+        );
     }
 
     #[test]
-    fn finalize_agent_run_does_not_change_ticket_status() {
+    fn mark_completed_does_not_change_ticket_status() {
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path());
         let agent_id = "aa-00000001";
@@ -696,13 +650,7 @@ mod tests {
         );
         let ticket_before = fs::read_to_string(&ticket_path).unwrap();
 
-        finalize_agent_run(
-            dir.path(),
-            &OutputFormat::Json,
-            agent_id,
-            ExitStatus::from_raw(0),
-        )
-        .unwrap();
+        mark_completed(dir.path(), &OutputFormat::Json, agent_id).unwrap();
 
         let ticket_after = fs::read_to_string(&ticket_path).unwrap();
         assert_eq!(ticket_before, ticket_after);
@@ -737,80 +685,6 @@ mod tests {
         assert!(contents.contains("session_id = \"ses_test123\"\n"));
         assert!(contents.contains("system = \"claude\"\n"));
         assert!(contents.contains("# Purpose\nDo work\n"));
-    }
-
-    #[test]
-    fn finalize_codex_run_marks_completed_on_completed_status() {
-        let dir = tempdir().unwrap();
-        init_repo_with_commit(dir.path());
-        let agent_id = "aa-00000001";
-        let path = seed_agent_record(dir.path(), agent_id, "running");
-
-        finalize_codex_run(
-            dir.path(),
-            &OutputFormat::Json,
-            agent_id,
-            TurnStatus::Completed,
-        )
-        .unwrap();
-
-        let contents = fs::read_to_string(&path).unwrap();
-        assert!(contents.contains("status = \"completed\"\n"));
-        let subject = git(dir.path(), &["log", "-1", "--format=%s"]);
-        assert_eq!(subject, format!("waap agent completed {agent_id}"));
-        let merges = git(dir.path(), &["rev-list", "--merges", "HEAD"]);
-        assert!(merges.is_empty(), "unexpected merge commits: {merges}");
-    }
-
-    #[test]
-    fn finalize_codex_run_leaves_running_on_non_completed_status() {
-        for status in [
-            TurnStatus::Failed,
-            TurnStatus::Interrupted,
-            TurnStatus::InProgress,
-        ] {
-            let dir = tempdir().unwrap();
-            init_repo_with_commit(dir.path());
-            let agent_id = "aa-00000001";
-            let path = seed_agent_record(dir.path(), agent_id, "running");
-            let head_before = git(dir.path(), &["rev-parse", "HEAD"]);
-
-            finalize_codex_run(dir.path(), &OutputFormat::Json, agent_id, status).unwrap();
-
-            let contents = fs::read_to_string(&path).unwrap();
-            assert!(
-                contents.contains("status = \"running\"\n"),
-                "status {status:?} should leave agent running"
-            );
-            let head_after = git(dir.path(), &["rev-parse", "HEAD"]);
-            assert_eq!(head_before, head_after, "status {status:?} made a commit");
-        }
-    }
-
-    #[test]
-    fn finalize_codex_run_does_not_change_ticket_status() {
-        let dir = tempdir().unwrap();
-        init_repo_with_commit(dir.path());
-        let agent_id = "aa-00000001";
-        seed_agent_record(dir.path(), agent_id, "running");
-
-        let ticket_path = dir.path().join(".waap/tickets/tt-some-ticket/ticket.md");
-        write_file(
-            &ticket_path,
-            "+++\ntitle = \"Some ticket\"\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"in-progress\"\n+++\n\n# Problem\nstuff\n",
-        );
-        let ticket_before = fs::read_to_string(&ticket_path).unwrap();
-
-        finalize_codex_run(
-            dir.path(),
-            &OutputFormat::Json,
-            agent_id,
-            TurnStatus::Completed,
-        )
-        .unwrap();
-
-        let ticket_after = fs::read_to_string(&ticket_path).unwrap();
-        assert_eq!(ticket_before, ticket_after);
     }
 
     #[test]
