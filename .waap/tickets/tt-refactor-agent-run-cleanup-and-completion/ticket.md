@@ -1,7 +1,7 @@
 +++
 name = "Refactor agent run cleanup and completion"
 creation_date = 2026-07-10T02:16:33Z
-status = "in-progress"
+status = "completed"
 +++
 
 # Problem
