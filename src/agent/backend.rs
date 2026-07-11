@@ -21,6 +21,7 @@ impl RunOutcome {
 pub(super) struct StartContext<'a> {
     pub(super) agent_id: &'a str,
     pub(super) prompt: &'a str,
+    pub(super) repository_root: &'a Path,
     pub(super) worktree_dir: &'a Path,
 }
 
@@ -62,6 +63,7 @@ pub(super) mod fake {
     pub(crate) struct StartCall {
         pub(crate) agent_id: String,
         pub(crate) prompt: String,
+        pub(crate) repository_root: PathBuf,
         pub(crate) worktree_dir: PathBuf,
         pub(crate) worktree_existed: bool,
     }
@@ -127,6 +129,7 @@ pub(super) mod fake {
             self.start_calls.push(StartCall {
                 agent_id: context.agent_id.to_string(),
                 prompt: context.prompt.to_string(),
+                repository_root: context.repository_root.to_path_buf(),
                 worktree_dir: context.worktree_dir.to_path_buf(),
                 worktree_existed: context.worktree_dir.is_dir(),
             });

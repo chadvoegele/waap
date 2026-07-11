@@ -23,12 +23,13 @@ impl OpencodeBackend {
 
 impl AgentSystemBackend for OpencodeBackend {
     fn start(&mut self, context: StartContext<'_>) -> io::Result<StartedRun> {
-        let session_id = create_opencode_session(&self.config, context.worktree_dir)?;
+        let repository_root = opencode_repository_root(context.repository_root)?;
+        let session_id = create_opencode_session(&self.config, &repository_root)?;
         let command = build_opencode_run_command(
             &self.config,
             context.agent_id,
             &session_id,
-            context.worktree_dir,
+            &repository_root,
             context.prompt,
         );
         Ok(StartedRun {
@@ -40,8 +41,8 @@ impl AgentSystemBackend for OpencodeBackend {
     }
 
     fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
-        let worktree_dir = opencode_worktree_dir(context.waap_root, context.agent_id)?;
-        abort_opencode_session(&self.config, context.session_id, &worktree_dir)
+        let repository_root = opencode_repository_root(context.waap_root)?;
+        abort_opencode_session(&self.config, context.session_id, &repository_root)
     }
 }
 
@@ -55,8 +56,8 @@ impl RunHandle for OpencodeRun {
     }
 }
 
-fn opencode_worktree_dir(waap_root: &Path, agent_id: &str) -> io::Result<std::path::PathBuf> {
-    Ok(waap_root.canonicalize()?.join("worktrees").join(agent_id))
+fn opencode_repository_root(repository_root: &Path) -> io::Result<std::path::PathBuf> {
+    repository_root.canonicalize()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -113,11 +114,14 @@ fn spawn_opencode_attached(command: &OpencodeRunCommand) -> io::Result<Child> {
         .spawn()
 }
 
-fn create_opencode_session(config: &OpencodeRunConfig, worktree_dir: &Path) -> io::Result<String> {
+fn create_opencode_session(
+    config: &OpencodeRunConfig,
+    repository_root: &Path,
+) -> io::Result<String> {
     let response: JsonValue = reqwest::blocking::Client::new()
         .post(opencode_url(config, "/session"))
         .basic_auth(&config.username, Some(&config.password))
-        .query(&opencode_directory_query(worktree_dir))
+        .query(&opencode_directory_query(repository_root))
         .json(&create_session_payload())
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
@@ -140,7 +144,7 @@ fn create_opencode_session(config: &OpencodeRunConfig, worktree_dir: &Path) -> i
 fn abort_opencode_session(
     config: &OpencodeRunConfig,
     session_id: &str,
-    worktree_dir: &Path,
+    repository_root: &Path,
 ) -> io::Result<()> {
     reqwest::blocking::Client::new()
         .post(opencode_url(
@@ -148,7 +152,7 @@ fn abort_opencode_session(
             &format!("/session/{session_id}/abort"),
         ))
         .basic_auth(&config.username, Some(&config.password))
-        .query(&opencode_directory_query(worktree_dir))
+        .query(&opencode_directory_query(repository_root))
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
         .map_err(opencode_http_error)?;
@@ -156,8 +160,8 @@ fn abort_opencode_session(
     Ok(())
 }
 
-fn opencode_directory_query(worktree_dir: &Path) -> [(&'static str, String); 1] {
-    [("directory", worktree_dir.display().to_string())]
+fn opencode_directory_query(repository_root: &Path) -> [(&'static str, String); 1] {
+    [("directory", repository_root.display().to_string())]
 }
 
 fn opencode_http_error(error: reqwest::Error) -> io::Error {
@@ -182,7 +186,7 @@ fn build_opencode_run_command(
     config: &OpencodeRunConfig,
     _agent_id: &str,
     session_id: &str,
-    worktree_dir: &Path,
+    repository_root: &Path,
     prompt: &str,
 ) -> OpencodeRunCommand {
     OpencodeRunCommand {
@@ -196,7 +200,7 @@ fn build_opencode_run_command(
             "--model".to_string(),
             config.model.clone(),
             "--dir".to_string(),
-            worktree_dir.display().to_string(),
+            repository_root.display().to_string(),
             "--agent".to_string(),
             "build".to_string(),
             "--command".to_string(),
@@ -215,8 +219,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        build_opencode_run_command, create_session_payload, opencode_directory_query, opencode_url,
-        opencode_worktree_dir, spawn_opencode_attached, OpencodeRunCommand, OpencodeRunConfig,
+        build_opencode_run_command, create_session_payload, opencode_directory_query,
+        opencode_repository_root, opencode_url, spawn_opencode_attached, OpencodeRunCommand,
+        OpencodeRunConfig,
     };
 
     #[test]
@@ -245,15 +250,14 @@ mod tests {
     }
 
     #[test]
-    fn opencode_abort_derives_canonical_agent_worktree_directory() {
+    fn opencode_session_and_abort_use_canonical_repository_root() {
         let dir = tempfile::tempdir().unwrap();
+        let repository_root = opencode_repository_root(dir.path()).unwrap();
 
+        assert_eq!(repository_root, dir.path().canonicalize().unwrap());
         assert_eq!(
-            opencode_worktree_dir(dir.path(), "aa-3881fda0").unwrap(),
-            dir.path()
-                .canonicalize()
-                .unwrap()
-                .join("worktrees/aa-3881fda0")
+            opencode_directory_query(&repository_root),
+            [("directory", repository_root.display().to_string())]
         );
     }
 
@@ -285,14 +289,14 @@ mod tests {
     #[test]
     fn opencode_run_command_matches_spec() {
         let config = test_opencode_config();
-        let worktree_dir = PathBuf::from("/repo/with space");
+        let repository_root = PathBuf::from("/repo/with space");
 
         let command = build_opencode_run_command(
             &config,
             "aa-3881fda0",
             "ses_123",
-            &worktree_dir,
-            "Complete when instructions in /.waap/agents/aa-3881fda0/agent.md are satisfied",
+            &repository_root,
+            "Work only in the agent worktree at /repo/worktrees/aa-3881fda0. Perform all implementation, Git, and validation work there. Complete when instructions in /repo/.waap/agents/aa-3881fda0/agent.md are satisfied",
         );
 
         assert_eq!(command.program, "opencode");
@@ -314,12 +318,12 @@ mod tests {
                 "goal".to_string(),
                 "--format".to_string(),
                 "json".to_string(),
-                "Complete when instructions in /.waap/agents/aa-3881fda0/agent.md are satisfied"
+                "Work only in the agent worktree at /repo/worktrees/aa-3881fda0. Perform all implementation, Git, and validation work there. Complete when instructions in /repo/.waap/agents/aa-3881fda0/agent.md are satisfied"
                     .to_string(),
             ]
         );
         assert_eq!(
-            opencode_directory_query(&worktree_dir),
+            opencode_directory_query(&repository_root),
             [("directory", "/repo/with space".to_string())]
         );
     }

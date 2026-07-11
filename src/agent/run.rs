@@ -96,12 +96,13 @@ fn run_started_agent(
     backend: &mut dyn AgentSystemBackend,
 ) -> io::Result<RunOutcome> {
     let mut worktree = AgentWorktree::create(waap_root, agent_id)?;
-    let prompt =
-        format!("Complete when instructions in /.waap/agents/{agent_id}/agent.md are satisfied");
+    let repository_root = waap_root.canonicalize()?;
+    let prompt = build_agent_goal(system, &repository_root, agent_id, worktree.dir());
     let run_result = backend
         .start(StartContext {
             agent_id,
             prompt: &prompt,
+            repository_root: &repository_root,
             worktree_dir: worktree.dir(),
         })
         .and_then(|started| {
@@ -116,6 +117,25 @@ fn run_started_agent(
         });
     let cleanup_result = worktree.cleanup();
     collapse_errors(run_result, cleanup_result)
+}
+
+fn build_agent_goal(
+    system: &AgentSystem,
+    repository_root: &Path,
+    agent_id: &str,
+    worktree_dir: &Path,
+) -> String {
+    let instruction_path = repository_root.join(format!(".waap/agents/{agent_id}/agent.md"));
+    match system {
+        AgentSystem::Opencode => format!(
+            "Work only in the agent worktree at {}. Perform all implementation, Git, and validation work there. Complete when instructions in {} are satisfied",
+            worktree_dir.display(),
+            instruction_path.display(),
+        ),
+        AgentSystem::Claude | AgentSystem::Codex => {
+            format!("Complete when instructions in /.waap/agents/{agent_id}/agent.md are satisfied")
+        }
+    }
 }
 
 fn require_ready_agent(waap_root: &Path, agent_id: &str) -> io::Result<()> {
@@ -337,7 +357,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        agent_worktree_dir, collapse_errors, mark_completed, mark_running,
+        agent_worktree_dir, build_agent_goal, collapse_errors, mark_completed, mark_running,
         persist_failed_after_error, require_ready_agent, run_agent, run_agent_with_backend,
         transition_and_commit_status, update_agent_session, AgentWorktree,
     };
@@ -656,8 +676,9 @@ mod tests {
             assert_eq!(call.agent_id, agent_id);
             assert_eq!(
                 call.prompt,
-                "Complete when instructions in /.waap/agents/aa-00000001/agent.md are satisfied"
+                build_agent_goal(&system, dir.path(), agent_id, &call.worktree_dir)
             );
+            assert_eq!(call.repository_root, dir.path().canonicalize().unwrap());
             assert!(call.worktree_dir.ends_with("worktrees/aa-00000001"));
             assert!(call.worktree_existed);
             assert!(!call.worktree_dir.exists());
@@ -677,6 +698,35 @@ mod tests {
                 &["show", "HEAD~1:.waap/agents/aa-00000001/agent.md"],
             );
             assert!(started_record.contains("session_id = \"ses_started\""));
+        }
+    }
+
+    #[test]
+    fn opencode_goal_requires_worktree_implementation_git_and_validation() {
+        let repository_root = PathBuf::from("/repository");
+        let worktree_dir = repository_root.join("worktrees/aa-00000001");
+
+        assert_eq!(
+            build_agent_goal(
+                &AgentSystem::Opencode,
+                &repository_root,
+                "aa-00000001",
+                &worktree_dir,
+            ),
+            "Work only in the agent worktree at /repository/worktrees/aa-00000001. Perform all implementation, Git, and validation work there. Complete when instructions in /repository/.waap/agents/aa-00000001/agent.md are satisfied"
+        );
+    }
+
+    #[test]
+    fn claude_and_codex_goals_remain_unchanged() {
+        let repository_root = PathBuf::from("/repository");
+        let worktree_dir = repository_root.join("worktrees/aa-00000001");
+
+        for system in [AgentSystem::Claude, AgentSystem::Codex] {
+            assert_eq!(
+                build_agent_goal(&system, &repository_root, "aa-00000001", &worktree_dir),
+                "Complete when instructions in /.waap/agents/aa-00000001/agent.md are satisfied"
+            );
         }
     }
 

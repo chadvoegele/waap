@@ -239,7 +239,7 @@ Frontmatter is validated strictly: unknown fields outside the documented agent a
 
 ## Running Agents
 
-Agents can be run with different agent systems, selected with `waap agent run --system`. Each system is given the same goal: complete the instructions in `/.waap/agents/$agent_id/agent.md`. The chosen system and the resulting session id are recorded in the agent metadata.
+Agents can be run with different agent systems, selected with `waap agent run --system`. The chosen system and the resulting session id are recorded in the agent metadata.
 
 ### Worktree Lifecycle
 
@@ -247,18 +247,18 @@ Agents can be run with different agent systems, selected with `waap agent run --
 
 ### opencode (default)
 
-opencode runs against a remote server. `waap` creates the session, then sends the goal command.
+opencode runs against a remote server. `waap` creates the session against the canonical repository root, then sends the goal command. OpenCode is attached to the durable repository project, while the goal requires all implementation, Git, and validation work to occur in the isolated agent worktree.
 
 ```
 opencode run --attach "$OPENCODE_SERVER_URL" \
   --username "$OPENCODE_SERVER_USERNAME" \
   --password "$OPENCODE_SERVER_PASSWORD" \
   --model "$OPENCODE_SERVER_MODEL" \
-  --dir "$WORKTREE" \
+  --dir "$REPOSITORY_ROOT" \
   --agent build \
   --command goal \
   --format json \
-  "Complete when instructions in /.waap/agents/${agent_id}/agent.md are satisfied"
+  "Work only in the agent worktree at $WORKTREE. Perform all implementation, Git, and validation work there. Complete when instructions in $REPOSITORY_ROOT/.waap/agents/${agent_id}/agent.md are satisfied"
 ```
 
 ### claude
