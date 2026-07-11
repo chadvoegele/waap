@@ -659,9 +659,7 @@ mod tests {
 
     #[test]
     fn monitor_reports_matching_session_errors_as_failed_output() {
-        let input = concat!(
-            "data: {\"type\":\"session.error\",\"properties\":{\"sessionID\":\"ses_123\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"failed\"}}}}\n\n",
-        );
+        let input = "data: {\"type\":\"session.error\",\"properties\":{\"sessionID\":\"ses_123\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"failed\"}}}}\n\n";
         let mut output = Vec::new();
 
         assert_eq!(

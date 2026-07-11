@@ -4,3 +4,4 @@
 - Replaced the attached OpenCode CLI process with authenticated direct HTTP session creation, pre-prompt SSE subscription, async prompt submission, and SSE monitoring.
 - Added model/payload, SSE framing/output/failure, authenticated HTTP request ordering, and abort fixture coverage.
 - Updated the OpenCode run specification and waap skill documentation for direct async HTTP and SSE behavior.
+- Addressed a strict clippy warning in the new SSE error-output test before full validation.
