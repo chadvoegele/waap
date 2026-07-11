@@ -1,7 +1,8 @@
 +++
 name = "OpenCode Repository Root Sessions"
 creation_date = 2026-07-11T12:37:55Z
-status = "ready"
+status = "running"
+system = "opencode"
 +++
 
 Your role is to implement `.waap/tickets/tt-use-repository-root-for-opencode-sessions/ticket.md` completely.
