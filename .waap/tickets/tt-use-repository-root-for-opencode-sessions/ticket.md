@@ -1,7 +1,7 @@
 +++
 name = "Use Repository Root for OpenCode Sessions"
 creation_date = 2026-07-11T12:36:44Z
-status = "pending"
+status = "in-progress"
 +++
 
 # Problem
