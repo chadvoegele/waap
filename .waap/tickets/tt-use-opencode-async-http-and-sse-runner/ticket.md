@@ -1,7 +1,7 @@
 +++
 name = "Use OpenCode async HTTP and SSE runner"
 creation_date = 2026-07-11T21:06:04Z
-status = "pending"
+status = "in-progress"
 depends_on = ["tt-use-repository-root-for-opencode-sessions"]
 +++
 
