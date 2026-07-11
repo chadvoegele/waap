@@ -93,7 +93,7 @@ It is helpful to ensure continuity across agents, to also instruct the agent to 
 
 `waap agent run` owns the agent worktree lifecycle. Before launching the selected system, it creates an isolated git worktree (`worktrees/<agent-id>`) and runs the agent inside it; after the system process exits it removes that worktree. This isolates each agent's changes so many agents can run in parallel, without relying on the agent to create or clean up its own worktree.
 
-The agent branch includes the pre-worktree running-state commit. For OpenCode, waap creates the session with the canonical repository root and commits its authentic id to `main` before launch, so `agent list` and `agent stop` can find the live session. Its goal explicitly directs implementation, Git, and validation work to the absolute agent-worktree path.
+The agent branch includes the pre-worktree running-state commit. For OpenCode, waap creates the session and subscribes to its authenticated repository-wide SSE stream using the canonical repository root, then submits the goal through the async HTTP prompt endpoint. It commits the authentic session id to `main` before monitoring, so `agent list` and `agent stop` can find and abort the live session. Its goal explicitly directs implementation, Git, and validation work to the absolute agent-worktree path.
 
 ## Agent Frontmatter
 

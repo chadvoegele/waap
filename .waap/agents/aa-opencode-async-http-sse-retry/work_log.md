@@ -1,0 +1,6 @@
+# Work Log
+
+- Marked `tt-use-opencode-async-http-and-sse-runner` in progress.
+- Replaced the attached OpenCode CLI process with authenticated direct HTTP session creation, pre-prompt SSE subscription, async prompt submission, and SSE monitoring.
+- Added model/payload, SSE framing/output/failure, authenticated HTTP request ordering, and abort fixture coverage.
+- Updated the OpenCode run specification and waap skill documentation for direct async HTTP and SSE behavior.

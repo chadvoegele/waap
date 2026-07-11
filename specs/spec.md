@@ -247,19 +247,7 @@ Agents can be run with different agent systems, selected with `waap agent run --
 
 ### opencode (default)
 
-opencode runs against a remote server. `waap` creates the session against the canonical repository root, then sends the goal command. OpenCode is attached to the durable repository project, while the goal requires all implementation, Git, and validation work to occur in the isolated agent worktree.
-
-```
-opencode run --attach "$OPENCODE_SERVER_URL" \
-  --username "$OPENCODE_SERVER_USERNAME" \
-  --password "$OPENCODE_SERVER_PASSWORD" \
-  --model "$OPENCODE_SERVER_MODEL" \
-  --dir "$REPOSITORY_ROOT" \
-  --agent build \
-  --command goal \
-  --format json \
-  "Work only in the agent worktree at $WORKTREE. Perform all implementation, Git, and validation work there. Complete when instructions in $REPOSITORY_ROOT/.waap/agents/${agent_id}/agent.md are satisfied"
-```
+opencode runs against a remote server through its authenticated HTTP API. `waap` creates the session against the canonical repository root with denied interactive permissions, establishes the repository-wide SSE event stream, then submits the worktree-directed goal to `POST /session/{sessionID}/prompt_async`. The prompt uses `$OPENCODE_SERVER_MODEL` as `provider/model`, the `build` agent, and a text part. Matching completed text, tool, step, and error events are forwarded as JSON lines; matching idle status completes the run. OpenCode is attached to the durable repository project, while the goal requires all implementation, Git, and validation work to occur in the isolated agent worktree.
 
 ### claude
 
