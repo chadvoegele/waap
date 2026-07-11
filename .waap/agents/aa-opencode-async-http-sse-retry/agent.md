@@ -1,7 +1,8 @@
 +++
 name = "OpenCode Async HTTP SSE Retry"
 creation_date = 2026-07-11T22:00:30Z
-status = "ready"
+status = "running"
+system = "opencode"
 +++
 
 # Purpose
