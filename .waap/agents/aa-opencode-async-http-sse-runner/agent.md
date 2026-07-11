@@ -1,7 +1,8 @@
 +++
 name = "OpenCode Async HTTP SSE Runner"
 creation_date = 2026-07-11T21:32:23Z
-status = "ready"
+status = "running"
+system = "opencode"
 +++
 
 # Purpose
