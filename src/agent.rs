@@ -477,7 +477,14 @@ mod tests {
         ];
         let previous = names.map(env::var_os);
         for name in names {
-            env::set_var(name, "test-value");
+            env::set_var(
+                name,
+                if name == "OPENCODE_SERVER_MODEL" {
+                    "test-provider/test-model"
+                } else {
+                    "test-value"
+                },
+            );
         }
 
         for (system, expected_type) in [
