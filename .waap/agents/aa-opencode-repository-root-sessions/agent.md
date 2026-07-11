@@ -1,7 +1,7 @@
 +++
 name = "OpenCode Repository Root Sessions"
 creation_date = 2026-07-11T12:37:55Z
-status = "running"
+status = "failed"
 session_id = "ses_0aecfe7c5ffeiN766qsMjmyA7A"
 system = "opencode"
 +++
