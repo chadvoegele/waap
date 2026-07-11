@@ -1,7 +1,8 @@
 +++
 name = "Repository Root OpenCode Sessions"
 creation_date = 2026-07-11T21:30:46Z
-status = "ready"
+status = "running"
+system = "opencode"
 +++
 
 # Purpose
