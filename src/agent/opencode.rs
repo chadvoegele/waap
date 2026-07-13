@@ -83,6 +83,7 @@ struct OpencodeRunConfig {
 struct OpencodeModel {
     provider_id: String,
     model_id: String,
+    variant: Option<String>,
 }
 
 #[cfg(test)]
@@ -116,21 +117,38 @@ fn required_env(name: &str) -> io::Result<String> {
 }
 
 fn parse_opencode_model(model: &str) -> io::Result<OpencodeModel> {
+    const VARIANTS: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
     let Some((provider_id, model_id)) = model.split_once('/') else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "OPENCODE_SERVER_MODEL must use provider/model format",
+            "OPENCODE_SERVER_MODEL must use provider/model or provider/model/variant format",
         ));
     };
-    if provider_id.is_empty() || model_id.is_empty() {
+    if provider_id.trim().is_empty()
+        || provider_id.trim() != provider_id
+        || model_id.trim().is_empty()
+        || model_id.trim() != model_id
+        || model_id
+            .split('/')
+            .any(|segment| segment.trim().is_empty() || segment.trim() != segment)
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "OPENCODE_SERVER_MODEL must use provider/model format",
+            "OPENCODE_SERVER_MODEL must use non-empty provider/model or provider/model/variant segments",
         ));
     }
+
+    let (model_id, variant) = model_id
+        .rsplit_once('/')
+        .filter(|(_, variant)| VARIANTS.contains(variant))
+        .map_or((model_id, None), |(model_id, variant)| {
+            (model_id, Some(variant.to_string()))
+        });
     Ok(OpencodeModel {
         provider_id: provider_id.to_string(),
         model_id: model_id.to_string(),
+        variant,
     })
 }
 
@@ -242,14 +260,18 @@ fn create_session_payload() -> JsonValue {
 }
 
 fn prompt_payload(config: &OpencodeRunConfig, prompt: &str) -> JsonValue {
-    json!({
+    let mut payload = json!({
         "model": {
             "providerID": config.model.provider_id,
             "modelID": config.model.model_id,
         },
         "agent": "build",
         "parts": [{ "type": "text", "text": prompt }],
-    })
+    });
+    if let Some(variant) = &config.model.variant {
+        payload["variant"] = JsonValue::String(variant.clone());
+    }
+    payload
 }
 
 fn opencode_url(config: &OpencodeRunConfig, path: &str) -> String {
@@ -476,15 +498,40 @@ mod tests {
     }
 
     #[test]
-    fn opencode_model_parsing_preserves_nested_model_ids() {
+    fn opencode_model_parsing_supports_variants_and_nested_model_ids() {
         assert_eq!(
-            parse_opencode_model("openai/gpt-5.5/reasoning").unwrap(),
+            parse_opencode_model("openai/gpt-5.5/high").unwrap(),
             super::OpencodeModel {
                 provider_id: "openai".to_string(),
-                model_id: "gpt-5.5/reasoning".to_string(),
+                model_id: "gpt-5.5".to_string(),
+                variant: Some("high".to_string()),
             }
         );
-        for invalid in ["openai", "/gpt-5.5", "openai/"] {
+        assert_eq!(
+            parse_opencode_model("openai/gpt-5.5").unwrap(),
+            super::OpencodeModel {
+                provider_id: "openai".to_string(),
+                model_id: "gpt-5.5".to_string(),
+                variant: None,
+            }
+        );
+        assert_eq!(
+            parse_opencode_model("openrouter/anthropic/claude-sonnet-4").unwrap(),
+            super::OpencodeModel {
+                provider_id: "openrouter".to_string(),
+                model_id: "anthropic/claude-sonnet-4".to_string(),
+                variant: None,
+            }
+        );
+        for invalid in [
+            "openai",
+            "/gpt-5.5",
+            "openai/",
+            "openai/gpt-5.5/",
+            "openai/gpt-5.5/ ",
+            "openai/gpt-5.5/ high",
+            " openai/gpt-5.5",
+        ] {
             assert!(parse_opencode_model(invalid).is_err(), "{invalid}");
         }
     }
@@ -497,6 +544,22 @@ mod tests {
             prompt_payload(&config, "complete the work"),
             json!({
                 "model": { "providerID": "openai", "modelID": "gpt-5.5" },
+                "agent": "build",
+                "parts": [{ "type": "text", "text": "complete the work" }],
+            })
+        );
+    }
+
+    #[test]
+    fn opencode_prompt_payload_includes_variant_when_configured() {
+        let mut config = OpencodeRunConfig::for_test();
+        config.model = parse_opencode_model("openai/gpt-5/high").unwrap();
+
+        assert_eq!(
+            prompt_payload(&config, "complete the work"),
+            json!({
+                "model": { "providerID": "openai", "modelID": "gpt-5" },
+                "variant": "high",
                 "agent": "build",
                 "parts": [{ "type": "text", "text": "complete the work" }],
             })
