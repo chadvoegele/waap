@@ -1,7 +1,7 @@
 +++
 name = "Support OpenCode model variant via provider/model/variant in OPENCODE_SERVER_MODEL"
 creation_date = 2026-07-12T01:01:02Z
-status = "in-progress"
+status = "completed"
 +++
 
 # Problem
