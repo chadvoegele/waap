@@ -128,8 +128,10 @@ fn build_agent_goal(
     let instruction_path = repository_root.join(format!(".waap/agents/{agent_id}/agent.md"));
     match system {
         AgentSystem::Opencode => format!(
-            "Work only in the agent worktree at {}. Perform all implementation, Git, and validation work there. Complete when instructions in {} are satisfied",
+            "Use the agent worktree at {} for all work. To integrate, run `git -C {} merge --ff-only {}`. Complete when instructions in {} are satisfied",
             worktree_dir.display(),
+            repository_root.display(),
+            agent_id,
             instruction_path.display(),
         ),
         AgentSystem::Claude | AgentSystem::Codex => {
@@ -702,7 +704,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_goal_requires_worktree_implementation_git_and_validation() {
+    fn opencode_goal_allows_final_integration_from_canonical_checkout() {
         let repository_root = PathBuf::from("/repository");
         let worktree_dir = repository_root.join("worktrees/aa-00000001");
 
@@ -713,7 +715,7 @@ mod tests {
                 "aa-00000001",
                 &worktree_dir,
             ),
-            "Work only in the agent worktree at /repository/worktrees/aa-00000001. Perform all implementation, Git, and validation work there. Complete when instructions in /repository/.waap/agents/aa-00000001/agent.md are satisfied"
+            "Use the agent worktree at /repository/worktrees/aa-00000001 for all work. To integrate, run `git -C /repository merge --ff-only aa-00000001`. Complete when instructions in /repository/.waap/agents/aa-00000001/agent.md are satisfied"
         );
     }
 
