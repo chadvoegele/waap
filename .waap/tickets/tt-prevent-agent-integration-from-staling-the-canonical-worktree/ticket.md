@@ -1,7 +1,7 @@
 +++
 name = "Prevent Agent Integration from Staling the Canonical Worktree"
 creation_date = 2026-07-15T14:56:34Z
-status = "pending"
+status = "abandoned"
 +++
 
 # Bug
