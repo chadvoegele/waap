@@ -1,7 +1,7 @@
 +++
 name = "Make runner completion idempotent"
 creation_date = 2026-07-16T15:07:10Z
-status = "pending"
+status = "in-progress"
 +++
 
 # Problem
