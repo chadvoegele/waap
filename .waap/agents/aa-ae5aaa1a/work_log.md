@@ -6,3 +6,4 @@
 - Added unit and integration tests for the error, unchanged agent record, unchanged Git history, and preserved `ready -> aborted` update behavior.
 - Installed the missing Clippy and rustfmt components.
 - Passed `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, `cargo build`, `cargo build --release`, and `cargo test` (297 tests).
+- Rebased onto the latest `main` and repeated all validations successfully.
