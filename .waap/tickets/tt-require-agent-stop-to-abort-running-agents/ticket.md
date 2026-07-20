@@ -1,7 +1,7 @@
 +++
 name = "Require agent stop to abort running agents"
 creation_date = 2026-07-19T12:14:06Z
-status = "in-progress"
+status = "completed"
 +++
 
 ## Problem
