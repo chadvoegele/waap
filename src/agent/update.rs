@@ -66,6 +66,15 @@ fn update_agent_record(
     }
 
     let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
+    if metadata.status == AgentStatus::Running.as_str() && set_status == Some(&AgentStatus::Aborted)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "agent {agent_id} is running; use `waap agent stop --agent-id {agent_id}` to abort it"
+            ),
+        ));
+    }
     if set_session_id.is_some()
         && (metadata.status != AgentStatus::Running.as_str() || set_status.is_some())
     {
@@ -160,6 +169,39 @@ mod tests {
         assert!(!contents.contains("role ="));
         assert!(contents.contains("status = \"completed\"\n"));
         assert!(contents.contains("status = \"completed\"\n+++\n\n# Purpose\nDo work\n"));
+    }
+
+    #[test]
+    fn agent_update_rejects_aborting_running_agent_without_modifying_record() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".waap/agents/aa-3881fda0/agent.md");
+        let original = "+++\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"running\"\nsession_id = \"ses_123\"\n+++\n\n# Purpose\n";
+        write_file(&path, original);
+
+        let error =
+            update_agent_record(dir.path(), "aa-3881fda0", Some(&AgentStatus::Aborted), None)
+                .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error
+            .to_string()
+            .contains("waap agent stop --agent-id aa-3881fda0"));
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn agent_update_allows_aborting_ready_agent() {
+        let dir = tempdir().unwrap();
+        write_file(
+            &dir.path().join(".waap/agents/aa-3881fda0/agent.md"),
+            "+++\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"ready\"\n+++\n\n# Purpose\n",
+        );
+
+        let report =
+            update_agent_record(dir.path(), "aa-3881fda0", Some(&AgentStatus::Aborted), None)
+                .unwrap();
+
+        assert_eq!(report.metadata.status, "aborted");
     }
 
     #[test]

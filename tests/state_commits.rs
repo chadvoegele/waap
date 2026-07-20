@@ -190,6 +190,55 @@ fn agent_update_rejects_invalid_lifecycle_transition_without_commit() {
 }
 
 #[test]
+fn agent_update_rejects_aborting_running_agent_without_change_or_commit() {
+    let dir = tempdir().unwrap();
+    init_repo_with_waap_project(dir.path());
+    let output = waap(
+        dir.path(),
+        "# Purpose\n",
+        &["--output-format", "json", "agent", "new"],
+    );
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let agent_id = value["agent_id"].as_str().unwrap();
+    let output = waap(
+        dir.path(),
+        "",
+        &[
+            "agent",
+            "update",
+            "--agent-id",
+            agent_id,
+            "--set-status",
+            "running",
+        ],
+    );
+    assert!(output.status.success());
+    let before_commit = git(dir.path(), &["rev-parse", "HEAD"]);
+    let agent_path = dir.path().join(format!(".waap/agents/{agent_id}/agent.md"));
+    let before_record = std::fs::read_to_string(&agent_path).unwrap();
+
+    let output = waap(
+        dir.path(),
+        "",
+        &[
+            "agent",
+            "update",
+            "--agent-id",
+            agent_id,
+            "--set-status",
+            "aborted",
+        ],
+    );
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains(&format!("waap agent stop --agent-id {agent_id}")));
+    assert_eq!(std::fs::read_to_string(agent_path).unwrap(), before_record);
+    assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), before_commit);
+}
+
+#[test]
 fn agent_new_with_name_creates_slug_id() {
     let dir = tempdir().unwrap();
     init_repo_with_waap_project(dir.path());
