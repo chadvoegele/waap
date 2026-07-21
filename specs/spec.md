@@ -243,11 +243,11 @@ Agents can be run with different agent systems, selected with `waap agent run --
 
 ### Worktree Lifecycle
 
-`waap agent run` owns the agent worktree lifecycle. It first commits the agent's `running` status and chosen system to `main`, then creates an isolated git worktree at `worktrees/$agent_id` (a fresh branch named after the agent) and launches the system inside it. Agents rebase their branch onto the current `main` `HEAD` and merge with `--ff-only` before finishing. Finally, the worktree is removed.
+`waap agent run` owns the agent worktree lifecycle. It first commits the agent's `running` status and chosen system to `main`, then creates an isolated git worktree at `worktrees/$agent_id` (a fresh branch named after the agent). Worktree and integration policy belong to the editable detailed agent instructions. Finally, the worktree is removed.
 
 ### opencode (default)
 
-opencode runs against a remote server through its authenticated HTTP API. `waap` creates the session against the canonical repository root with denied interactive permissions, establishes the repository-wide SSE event stream, then submits the worktree-directed goal to `POST /session/{sessionID}/prompt_async`. The prompt uses `$OPENCODE_SERVER_MODEL` as `provider/model` or `provider/model/variant`, the `build` agent, and a text part. Recognized OpenCode reasoning variants (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`) are forwarded in the top-level `variant` field; without one, the field is omitted so the agent default applies. Other trailing segments remain part of slash-containing model IDs, consistent with the current models.dev catalog. Matching completed text, tool, step, and error events are forwarded as JSON lines; matching idle status completes the run. OpenCode is attached to the durable repository project, while the goal requires all implementation, Git, and validation work to occur in the isolated agent worktree.
+opencode runs against a remote server through its authenticated HTTP API. `waap` creates the session against the canonical repository root with denied interactive permissions, establishes the repository-wide SSE event stream, then submits the common detailed-instruction prompt to `POST /session/{sessionID}/prompt_async`. The prompt uses `$OPENCODE_SERVER_MODEL` as `provider/model` or `provider/model/variant`, the `build` agent, and a text part. Recognized OpenCode reasoning variants (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`) are forwarded in the top-level `variant` field; without one, the field is omitted so the agent default applies. Other trailing segments remain part of slash-containing model IDs, consistent with the current models.dev catalog. Matching completed text, tool, step, and error events are forwarded as JSON lines; matching idle status completes the run.
 
 ### claude
 
@@ -259,7 +259,7 @@ claude -p \
   --output-format json \
   --permission-mode bypassPermissions \
   --model "$CLAUDE_MODEL" \
-  "Complete when instructions in /.waap/agents/${agent_id}/agent.md are satisfied"
+  "Complete when instructions in ${repository_root}/.waap/agents/${agent_id}/agent.md are satisfied"
 ```
 
 ## waap Skill

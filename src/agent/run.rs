@@ -97,7 +97,7 @@ fn run_started_agent(
 ) -> io::Result<RunOutcome> {
     let mut worktree = AgentWorktree::create(waap_root, agent_id)?;
     let repository_root = waap_root.canonicalize()?;
-    let prompt = build_agent_goal(system, &repository_root, agent_id, worktree.dir());
+    let prompt = build_agent_goal(&repository_root, agent_id);
     let run_result = backend
         .start(StartContext {
             agent_id,
@@ -119,25 +119,12 @@ fn run_started_agent(
     collapse_errors(run_result, cleanup_result)
 }
 
-fn build_agent_goal(
-    system: &AgentSystem,
-    repository_root: &Path,
-    agent_id: &str,
-    worktree_dir: &Path,
-) -> String {
+fn build_agent_goal(repository_root: &Path, agent_id: &str) -> String {
     let instruction_path = repository_root.join(format!(".waap/agents/{agent_id}/agent.md"));
-    match system {
-        AgentSystem::Opencode => format!(
-            "Use the agent worktree at {} for all work. To integrate, run `git -C {} merge --ff-only {}`. Complete when instructions in {} are satisfied",
-            worktree_dir.display(),
-            repository_root.display(),
-            agent_id,
-            instruction_path.display(),
-        ),
-        AgentSystem::Claude | AgentSystem::Codex => {
-            format!("Complete when instructions in /.waap/agents/{agent_id}/agent.md are satisfied")
-        }
-    }
+    format!(
+        "Complete when instructions in {} are satisfied",
+        instruction_path.display()
+    )
 }
 
 fn require_ready_agent(waap_root: &Path, agent_id: &str) -> io::Result<()> {
@@ -679,10 +666,7 @@ mod tests {
             assert_eq!(backend.wait_calls.get(), 1);
             let call = &backend.start_calls[0];
             assert_eq!(call.agent_id, agent_id);
-            assert_eq!(
-                call.prompt,
-                build_agent_goal(&system, dir.path(), agent_id, &call.worktree_dir)
-            );
+            assert_eq!(call.prompt, build_agent_goal(dir.path(), agent_id));
             assert_eq!(call.repository_root, dir.path().canonicalize().unwrap());
             assert!(call.worktree_dir.ends_with("worktrees/aa-00000001"));
             assert!(call.worktree_existed);
@@ -707,32 +691,13 @@ mod tests {
     }
 
     #[test]
-    fn opencode_goal_allows_final_integration_from_canonical_checkout() {
+    fn all_systems_use_the_same_detailed_instruction_prompt() {
         let repository_root = PathBuf::from("/repository");
-        let worktree_dir = repository_root.join("worktrees/aa-00000001");
 
         assert_eq!(
-            build_agent_goal(
-                &AgentSystem::Opencode,
-                &repository_root,
-                "aa-00000001",
-                &worktree_dir,
-            ),
-            "Use the agent worktree at /repository/worktrees/aa-00000001 for all work. To integrate, run `git -C /repository merge --ff-only aa-00000001`. Complete when instructions in /repository/.waap/agents/aa-00000001/agent.md are satisfied"
+            build_agent_goal(&repository_root, "aa-00000001"),
+            "Complete when instructions in /repository/.waap/agents/aa-00000001/agent.md are satisfied"
         );
-    }
-
-    #[test]
-    fn claude_and_codex_goals_remain_unchanged() {
-        let repository_root = PathBuf::from("/repository");
-        let worktree_dir = repository_root.join("worktrees/aa-00000001");
-
-        for system in [AgentSystem::Claude, AgentSystem::Codex] {
-            assert_eq!(
-                build_agent_goal(&system, &repository_root, "aa-00000001", &worktree_dir),
-                "Complete when instructions in /.waap/agents/aa-00000001/agent.md are satisfied"
-            );
-        }
     }
 
     #[test]
