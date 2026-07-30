@@ -1,7 +1,7 @@
 +++
 name = "Handle incompatible Codex model cache schema"
 creation_date = 2026-07-30T15:25:23Z
-status = "pending"
+status = "in-progress"
 +++
 
 ## Problem
