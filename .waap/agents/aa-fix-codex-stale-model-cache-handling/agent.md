@@ -1,7 +1,8 @@
 +++
 name = "Fix Codex stale model cache handling"
 creation_date = 2026-07-30T15:25:40Z
-status = "ready"
+status = "running"
+system = "opencode"
 +++
 
 Your role is to implement `.waap/tickets/tt-handle-incompatible-codex-model-cache-schema/ticket.md`.
