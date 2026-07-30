@@ -27,3 +27,6 @@ Ticket: `tt-handle-incompatible-codex-model-cache-schema`
   `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`,
   `cargo build`, `cargo build --release`, `cargo test` (298 total unit and
   integration tests), and `waap check`.
+- Rebased onto current `origin/main`, pushed
+  `aa-fix-codex-stale-model-cache-handling-retry`, and opened
+  https://github.com/chadvoegele/waap/pull/1 against `main`.
