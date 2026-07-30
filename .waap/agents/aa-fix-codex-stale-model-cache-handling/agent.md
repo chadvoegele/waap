@@ -1,7 +1,7 @@
 +++
 name = "Fix Codex stale model cache handling"
 creation_date = 2026-07-30T15:25:40Z
-status = "running"
+status = "failed"
 system = "opencode"
 +++
 
