@@ -1,9 +1,10 @@
 use std::env;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{ChildStdin, ChildStdout, Command as ProcessCommand, Stdio};
+use std::process::{ChildStderr, ChildStdin, ChildStdout, Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread;
 
 use serde_json::{json, Value as JsonValue};
 
@@ -237,7 +238,7 @@ fn spawn_codex_app_server(
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .spawn()?;
 
     let writer = child
@@ -248,6 +249,11 @@ fn spawn_codex_app_server(
         .stdout
         .take()
         .ok_or_else(|| io::Error::other("codex app-server stdout is unavailable"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("codex app-server stderr is unavailable"))?;
+    spawn_codex_stderr_forwarder(stderr);
 
     Ok(CodexClient {
         reader: BufReader::new(stdout),
@@ -256,6 +262,39 @@ fn spawn_codex_app_server(
         next_id: 0,
         model: config.model.clone(),
     })
+}
+
+fn spawn_codex_stderr_forwarder(stderr: ChildStderr) {
+    thread::spawn(move || {
+        let result = {
+            let mut destination = io::stderr().lock();
+            forward_codex_stderr(BufReader::new(stderr), &mut destination)
+        };
+        if let Err(error) = result {
+            eprintln!("failed to forward codex app-server stderr: {error}");
+        }
+    });
+}
+
+fn forward_codex_stderr<R: BufRead, W: Write>(mut source: R, mut destination: W) -> io::Result<()> {
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if source.read_until(b'\n', &mut line)? == 0 {
+            return Ok(());
+        }
+        if !is_incompatible_model_cache_warning(&line) {
+            destination.write_all(&line)?;
+            destination.flush()?;
+        }
+    }
+}
+
+fn is_incompatible_model_cache_warning(line: &[u8]) -> bool {
+    let line = String::from_utf8_lossy(line);
+    line.contains("codex_models_manager::manager")
+        && line.contains("failed to renew cache TTL:")
+        && line.contains("missing field `supports_reasoning_summaries`")
 }
 
 fn codex_app_server_command(worktree_dir: &Path) -> ProcessCommand {
@@ -482,6 +521,41 @@ mod tests {
         let notification = parse(lines.next().unwrap());
         assert_eq!(notification, json!({ "method": "initialized" }));
         assert!(lines.next().is_none());
+    }
+
+    #[test]
+    fn normal_codex_stderr_is_forwarded_unchanged() {
+        let input = concat!(
+            "INFO codex_app_server: startup complete\n",
+            "ERROR codex_app_server: authentication failed\n",
+        );
+        let mut output = Vec::new();
+
+        forward_codex_stderr(Cursor::new(input), &mut output).unwrap();
+
+        assert_eq!(output, input.as_bytes());
+    }
+
+    #[test]
+    fn stale_model_cache_warning_is_filtered_without_hiding_other_diagnostics() {
+        let input = concat!(
+            "WARN codex_app_server: useful diagnostic\n",
+            "2026-07-30T00:00:00Z ERROR codex_models_manager::manager: ",
+            "failed to renew cache TTL: missing field `supports_reasoning_summaries` ",
+            "at line 87 column 5\n",
+            "ERROR codex_models_manager::manager: failed to renew cache TTL: permission denied\n",
+            "ERROR other_module: missing field `supports_reasoning_summaries`\n",
+        );
+        let expected = concat!(
+            "WARN codex_app_server: useful diagnostic\n",
+            "ERROR codex_models_manager::manager: failed to renew cache TTL: permission denied\n",
+            "ERROR other_module: missing field `supports_reasoning_summaries`\n",
+        );
+        let mut output = Vec::new();
+
+        forward_codex_stderr(Cursor::new(input), &mut output).unwrap();
+
+        assert_eq!(output, expected.as_bytes());
     }
 
     #[test]
