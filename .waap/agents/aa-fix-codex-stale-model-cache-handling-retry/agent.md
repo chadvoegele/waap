@@ -1,7 +1,8 @@
 +++
 name = "Fix Codex stale model cache handling retry"
 creation_date = 2026-07-30T15:26:14Z
-status = "ready"
+status = "running"
+system = "codex"
 +++
 
 Recover and complete `.waap/tickets/tt-handle-incompatible-codex-model-cache-schema/ticket.md` after agent `aa-fix-codex-stale-model-cache-handling` could not start because its OpenCode server was unavailable.
