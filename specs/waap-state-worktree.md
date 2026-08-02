@@ -4,7 +4,7 @@
 
 Store each repository's waap state in one dedicated Git worktree instead of
 copying `.waap` into every application worktree. The dedicated worktree uses a
-local orphan branch named `waap` and lives below `~/.waap/state/`.
+local orphan branch named `waap` and lives below `~/.local/state/waap/`.
 
 For example, the repository at:
 
@@ -15,7 +15,7 @@ For example, the repository at:
 uses:
 
 ```text
-~/.waap/state/home/chad/code/github.com/chadvoegele/waap/ # worktree and state directory
+~/.local/state/waap/home/chad/code/github.com/chadvoegele/waap/ # worktree and state directory
 ```
 
 This gives all `waap` commands launched from the primary checkout or any linked
@@ -37,7 +37,7 @@ This proposal intentionally chooses the following behaviors for review:
 - The canonical primary checkout path, not the remote URL, identifies a clone.
 - Migration commits removal of the unique legacy `.waap` on its application
   branch.
-- If more than one waap state directory exists, waap returns an error instead
+- If central state and legacy `.waap` coexist, waap returns an error instead
   of choosing or merging state.
 - `waap check` fails when central state has staged, unstaged, or untracked
   changes, even when their contents are otherwise valid.
@@ -51,7 +51,7 @@ This proposal intentionally chooses the following behaviors for review:
 - Synchronizing state between separate clones or hosts.
 - Automatically pushing the `waap` branch or fetching it outside
   `waap check`.
-- Automatically reconciling duplicate waap state directories.
+- Automatically reconciling central state and legacy `.waap` that coexist.
 - Preserving support for more than one waap project in a Git repository.
 
 ## Terminology
@@ -60,11 +60,12 @@ This proposal intentionally chooses the following behaviors for review:
   current directory or `--waap-root`.
 - **Primary repository root**: the canonical root whose `.git` directory is the
   common Git directory. This path identifies the repository.
-- **State worktree**: the checkout below `~/.waap/state/` on branch `waap`.
+- **State worktree**: the checkout below `~/.local/state/waap/` on branch
+  `waap`.
 - **State directory**: the state worktree root. Its `agents` and `tickets`
   directories are tracked directly, without a `.waap` wrapper.
-- **Legacy state**: a `.waap` entry in any registered application worktree
-  rather than the state worktree.
+- **Legacy state**: a `.waap` entry in the invocation worktree rather than the
+  state worktree.
 
 `--waap-root` continues to select an application checkout. It does not override
 where state is stored. The current CLI can initialize nested projects in one
@@ -88,10 +89,8 @@ Resolution must not depend on the current application branch or on finding a
    canonicalize the primary repository root. Unsupported bare repositories or
    separate-Git-dir layouts fail with a specific error.
 5. Remove the leading root separator from the primary repository path and
-   append the remaining components to `~/.waap/state`. The resulting path is
-   both the state worktree and state directory.
-6. Enumerate registered application worktrees and record each root containing
-   legacy `.waap`.
+   append the remaining components to `~/.local/state/waap`. The resulting path
+   is both the state worktree and state directory.
 
 Symlinks are resolved before deriving the path. Two clones at different paths
 therefore have independent state. `HOME` must be set and absolute.
@@ -177,22 +176,21 @@ Initialization leaves the application branch and working tree unchanged.
 
 ### Legacy migration
 
-Every command first counts existing state directories: the central state
-worktree, when present, plus legacy `.waap` roots in registered application
-worktrees.
+Every command determines whether the central state directory and legacy
+`.waap` in the invocation worktree exist.
 
-- With exactly one legacy directory and no central directory, commands other
-  than `waap init` exit unsuccessfully and instruct the caller to initialize.
-- With more than one state directory, every command, including `waap init`,
-  returns an error listing every path. Waap does not choose, compare, or merge
-  duplicate state.
+- With legacy `.waap` and no central state, commands other than `waap init`
+  exit unsuccessfully and instruct the caller to initialize.
+- With both central state and legacy `.waap`, every command, including
+  `waap init`, returns an error listing both paths. Waap does not choose,
+  compare, or merge them.
 - `waap check` reports the expected central state directory before reporting
   either error.
 
-With one legacy directory and no central directory, the legacy worktree must
-have no staged or unstaged changes outside `.waap` and no unresolved conflicts.
-Dirty legacy state is allowed; migration copies its working-tree contents.
-`waap init` then:
+With legacy `.waap` and no central state, the invocation worktree must have no
+staged or unstaged changes outside `.waap` and no unresolved conflicts. Dirty
+legacy state is allowed; migration copies its working-tree contents. `waap init`
+then:
 
 1. Validates the legacy state without modifying either checkout.
 2. Creates the orphan state branch and worktree.
@@ -203,9 +201,9 @@ Dirty legacy state is allowed; migration copies its working-tree contents.
    with subject `Remove legacy waap state`.
 
 The central commit happens before source removal so a partial failure does not
-lose state. If source cleanup fails, later commands report both directories as
-duplicates; the error instructs the user to compare them and remove the legacy
-copy manually. Waap never deletes legacy state until central state is valid and
+lose state. If source cleanup fails, later commands report central and legacy
+state together; the error instructs the user to remove the legacy copy
+manually. Waap never deletes legacy state until central state is valid and
 committed.
 
 When central state exists and no legacy state exists, `waap init` repairs a
@@ -235,7 +233,7 @@ afterward.
 `waap check` validates:
 
 - the branch, upstream, and registered-worktree invariants above;
-- that no legacy `.waap` exists in any registered application worktree;
+- that legacy `.waap` does not coexist in the invocation worktree;
 - the state root directories, frontmatter, ID, status, and dependency
   invariants;
 - the contents of files currently present in the state worktree;
@@ -258,7 +256,7 @@ when state is absent, legacy migration is required, or worktree repair is
 needed. Human-readable output starts with the path:
 
 ```text
-State directory: /home/chad/.waap/state/home/chad/code/github.com/chadvoegele/waap
+State directory: /home/chad/.local/state/waap/home/chad/code/github.com/chadvoegele/waap
 OK: waap state is valid
 ```
 
@@ -266,7 +264,7 @@ JSON output adds `state_directory` to the existing check result:
 
 ```json
 {
-  "state_directory": "/home/chad/.waap/state/home/chad/code/github.com/chadvoegele/waap",
+  "state_directory": "/home/chad/.local/state/waap/home/chad/code/github.com/chadvoegele/waap",
   "valid": true,
   "errors": []
 }
@@ -290,7 +288,7 @@ Commands must fail without modifying state when:
 - `waap` is checked out in another location and cannot be safely relocated;
 - the registered state worktree, branch, or common Git directory disagrees
   with the resolved repository;
-- multiple waap state directories exist or legacy state is invalid;
+- central state and legacy `.waap` coexist, or legacy state is invalid;
 - `waap check` cannot query or fetch `origin/waap`, or finds it ahead of local
   `waap`; or
 - the state mutation lock cannot be acquired.
@@ -325,8 +323,8 @@ agent role templates so that:
    `waap`.
 5. A repository with tracked legacy `.waap` is blocked until `waap init`
    migrates and removes it without data loss.
-6. Multiple legacy directories, or central state plus any legacy directory,
-   produce an error listing every state path and change no checkout.
+6. Central state plus legacy `.waap` in the invocation worktree produces an
+   error listing both paths and changes no checkout.
 7. `waap check` reports the resolved absolute state directory in human-readable
    and JSON formats before and after initialization.
 8. Staged, unstaged, and untracked direct edits fail `waap check`, including
