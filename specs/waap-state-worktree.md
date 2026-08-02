@@ -209,9 +209,9 @@ Every command determines whether the central state directory and legacy
 
 - With legacy `.waap` and no central state, every command except `waap repair`
   exits unsuccessfully and instructs the caller to repair the project.
-- With both central state and legacy `.waap`, every command except `waap repair`
-  returns an error listing both paths. Waap does not choose, compare, or merge
-  them automatically.
+- With both central state and legacy `.waap`, every command returns an error
+  listing both paths. Waap does not choose, compare, merge, or remove either
+  state directory.
 - `waap check` reports the expected central state directory before reporting
   either error.
 
@@ -231,11 +231,6 @@ state is allowed. It repairs these cases:
   subject `waap migrate state`, configures the upstream when `origin` exists,
   then removes legacy `.waap` and commits the deletion on its application
   branch with subject `Remove legacy waap state`.
-- **Central and legacy state coexist:** It validates both state directories and
-  compares their complete file trees. If they are byte-identical, it removes
-  legacy `.waap` and commits the deletion on its application branch. If they
-  differ, it fails without changing either directory and lists the paths for
-  manual reconciliation.
 - **The primary repository moved:** It uses the common Git directory's
   registered `waap` worktree path, runs `git worktree repair`, and moves the
   state worktree to the newly derived state directory as described above.
@@ -244,7 +239,7 @@ state is allowed. It repairs these cases:
 
 The central migration commit happens before source removal so a partial failure
 does not lose state. If source cleanup fails, later commands report central and
-legacy state together and direct the user to `waap repair`. Waap never deletes
+legacy state together as an error for manual reconciliation. Waap never deletes
 legacy state until central state is valid and committed.
 
 Repair is idempotent. It makes only the state, legacy cleanup, and Git metadata
