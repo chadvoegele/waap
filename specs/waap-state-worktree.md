@@ -74,21 +74,24 @@ This proposal intentionally chooses the following behaviors for review:
 `tickets`, never an application checkout. In a migrated project this is the
 central state worktree root; in a legacy project it is the application's
 `.waap` directory. When supplied, waap uses that directory directly and does
-not derive, relocate, or compare its path. Without it, waap derives the central
-state directory from the invocation application's common Git directory. The
-current CLI can initialize nested projects in one repository by pointing
-`--waap-root` at different application directories. This proposal intentionally
-changes that behavior: one common Git directory identifies one waap project.
+not derive, relocate, or compare its path. `waap init --waap-root <path>` treats
+`<path>` as the exact new state-directory target and creates its `agents` and
+`tickets` directories. Without it, waap derives the central state directory from
+the invocation application's common Git directory. The current CLI can
+initialize nested projects in one repository by pointing `--waap-root` at
+different application directories. This proposal intentionally changes that
+behavior: one common Git directory identifies one waap project.
 
 ## Repository and state resolution
 
 Resolution must not depend on the current application branch or on finding a
 `.waap` ancestor.
 
-1. With `--waap-root`, canonicalize the supplied state directory and use it
-   directly for all state reads, writes, validation, staging, and commits.
-   Require it to contain `agents` and `tickets`. Do not derive or validate an
-   alternative state location.
+1. With `--waap-root`, commands other than `waap init` canonicalize the
+   supplied state directory and use it directly for all state reads, writes,
+   validation, staging, and commits. Require it to contain `agents` and
+   `tickets`. Do not derive or validate an alternative state location. `waap
+   init` instead uses the supplied path as its exact state-directory target.
 2. Without `--waap-root`, canonicalize the current directory and walk upward
    to its nearest `.git` entry. This is the invocation worktree root. Resolve
    its common Git directory and derive the state directory below
@@ -183,13 +186,17 @@ the conflicting branch.
 
 ### New repository
 
-When neither central nor legacy state exists, `waap init`:
+When neither central nor legacy state exists, `waap init` uses the derived
+state directory or the explicit `--waap-root` target, then:
 
-1. Creates the state worktree's parent directories.
-2. Creates orphan branch `waap` and its worktree at the resolved path.
-3. Creates the `agents` and `tickets` skeleton at the worktree root.
-4. Creates a parentless `waap init` commit on `waap`.
-5. When `origin` exists, configures `origin/waap` as the branch upstream.
+1. When `origin` exists, queries whether `origin/waap` already exists. If it
+   does, initialization fails without changes and instructs the caller to run
+   `waap repair` to adopt remote state.
+2. Creates the state worktree's parent directories.
+3. Creates orphan branch `waap` and its worktree at the selected path.
+4. Creates the `agents` and `tickets` skeleton at the worktree root.
+5. Creates a parentless `waap init` commit on `waap`.
+6. When `origin` exists, configures `origin/waap` as the branch upstream.
 
 Initialization leaves the application branch and working tree unchanged.
 
@@ -231,6 +238,10 @@ state is allowed. It repairs these cases:
   subject `waap migrate state`, configures the upstream when `origin` exists,
   then removes legacy `.waap` and commits the deletion on its application
   branch with subject `Remove legacy waap state`.
+- **Remote state already exists:** With no local state worktree and existing
+  `origin/waap`, it fetches that branch, verifies it is an orphan waap state
+  branch, and creates the local tracking `waap` branch and state worktree at
+  the selected path.
 - **The primary repository moved:** It uses the common Git directory's
   registered `waap` worktree path, runs `git worktree repair`, and moves the
   state worktree to the newly derived state directory as described above.
@@ -373,4 +384,5 @@ agent role templates so that:
     state directory and old registered path; `waap repair` repairs and relocates
     the state worktree without changing its state or history.
 13. `waap init` fails without modifying any repository with existing central
-    or legacy state; `waap repair` handles migration and recovery.
+    or legacy state, or with existing `origin/waap`; `waap repair` handles
+    migration, remote-state adoption, and recovery.
