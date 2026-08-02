@@ -199,48 +199,37 @@ directory. Human-readable output includes:
 State directory: /home/chad/.local/state/waap/home/chad/code/github.com/chadvoegele/waap
 ```
 
-JSON output adds a `state_directory` string to the existing init report. This
-applies to fresh initialization and legacy migration.
+JSON output adds a `state_directory` string to the existing init report.
 
-### Legacy migration
+### Existing state
 
 Every command determines whether the central state directory and legacy
 `.waap` in the invocation worktree exist.
 
-- With legacy `.waap` and no central state, commands other than `waap init`
-  exit unsuccessfully and instruct the caller to initialize.
-- With both central state and legacy `.waap`, every command other than
-  `waap repair` returns an error listing both paths. Waap does not choose,
-  compare, or merge them automatically.
+- With legacy `.waap` and no central state, every command except `waap repair`
+  exits unsuccessfully and instructs the caller to repair the project.
+- With both central state and legacy `.waap`, every command except `waap repair`
+  returns an error listing both paths. Waap does not choose, compare, or merge
+  them automatically.
 - `waap check` reports the expected central state directory before reporting
   either error.
 
-With legacy `.waap` and no central state, the invocation worktree must have no
-staged or unstaged changes outside `.waap` and no unresolved conflicts. Dirty
-legacy state is allowed; migration copies its working-tree contents. `waap init`
-then:
-
-1. Validates the legacy state without modifying either checkout.
-2. Creates the orphan state branch and worktree.
-3. Copies the contents of legacy `.waap` into the central worktree root.
-4. Validates and commits central state with subject `waap migrate state`.
-5. When `origin` exists, configures `origin/waap` as the branch upstream.
-6. Removes legacy `.waap` and commits that deletion on its application branch
-   with subject `Remove legacy waap state`.
-
-The central commit happens before source removal so a partial failure does not
-lose state. If source cleanup fails, later commands report central and legacy
-state together and direct the user to `waap repair`. Waap never deletes legacy
-state until central state is valid and committed.
-
-When central state exists and no legacy state exists, `waap init` fails with
-an already-initialized error. It performs no repair.
+`waap init` fails without modifying state whenever either central or legacy
+state exists. It is setup only.
 
 ## `waap repair`
 
-`waap repair` is the explicit recovery command; `waap init` only sets up new or
-legacy state. It repairs these cases:
+`waap repair` is the explicit migration and recovery command. Any repair that
+removes legacy state requires the invocation worktree to have no staged or
+unstaged changes outside `.waap` and no unresolved conflicts. Dirty legacy
+state is allowed. It repairs these cases:
 
+- **Legacy-only state:** With legacy `.waap` and no central state, repair validates
+  legacy state, creates the orphan branch and worktree, copies the contents of
+  legacy `.waap` into the central worktree root, validates and commits it with
+  subject `waap migrate state`, configures the upstream when `origin` exists,
+  then removes legacy `.waap` and commits the deletion on its application
+  branch with subject `Remove legacy waap state`.
 - **Central and legacy state coexist:** It validates both state directories and
   compares their complete file trees. If they are byte-identical, it removes
   legacy `.waap` and commits the deletion on its application branch. If they
@@ -252,9 +241,14 @@ legacy state. It repairs these cases:
 - **An `origin` was added or upstream configuration is incorrect:** It restores
   the `origin/waap` upstream configuration.
 
-Repair is idempotent. It changes only the Git metadata and paths required to
-recover the stated condition and fails rather than guessing when more than one
-repair condition is ambiguous.
+The central migration commit happens before source removal so a partial failure
+does not lose state. If source cleanup fails, later commands report central and
+legacy state together and direct the user to `waap repair`. Waap never deletes
+legacy state until central state is valid and committed.
+
+Repair is idempotent. It makes only the state, legacy cleanup, and Git metadata
+or path changes required to recover the stated condition and fails rather than
+guessing when more than one repair condition is ambiguous.
 
 ## Command behavior
 
@@ -349,7 +343,8 @@ agent role templates so that:
 - examples use the CLI for mutations;
 - direct edits are followed by `waap check`, which reports uncommitted state as
   an error;
-- `waap init` is setup-only and `waap repair` handles recovery; and
+- `waap init` is setup-only while `waap repair` handles migration and
+  recovery; and
 - agent worktree instructions distinguish source worktrees from the state
   worktree.
 
@@ -364,7 +359,7 @@ agent role templates so that:
    state worktree pushes that ref.
 4. Agent source worktrees start from the invoking application HEAD, never from
    `waap`.
-5. A repository with tracked legacy `.waap` is blocked until `waap init`
+5. A repository with tracked legacy `.waap` is blocked until `waap repair`
    migrates and removes it without data loss.
 6. Central state plus legacy `.waap` in the invocation worktree produces an
    error listing both paths and changes no checkout.
@@ -381,5 +376,5 @@ agent role templates so that:
 12. Moving the primary repository makes `waap check` report the newly expected
     state directory and old registered path; `waap repair` repairs and relocates
     the state worktree without changing its state or history.
-13. `waap init` fails without modifying an already initialized repository;
-    `waap repair` is the recovery command.
+13. `waap init` fails without modifying any repository with existing central
+    or legacy state; `waap repair` handles migration and recovery.
