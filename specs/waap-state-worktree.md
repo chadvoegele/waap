@@ -84,20 +84,21 @@ behavior: one common Git directory identifies one waap project.
 Resolution must not depend on the current application branch or on finding a
 `.waap` ancestor.
 
-1. Canonicalize the current directory and walk upward to its nearest `.git`
-   entry. This is the invocation worktree root.
-2. Without `--waap-root`, resolve the invocation worktree's common Git
-   directory and derive the state directory below `~/.local/state/waap`.
-3. With `--waap-root`, canonicalize the supplied state directory and require
-   it to contain `agents` and `tickets`. Resolve the common Git directory by
-   walking upward from it. After migration, the supplied directory must equal
-   the path derived below `~/.local/state/waap` for that Git repository.
-4. A `.git` directory is the common directory. For a `.git` file, resolve its
+1. Without `--waap-root`, canonicalize the current directory and walk upward
+   to its nearest `.git` entry. This is the invocation worktree root. Resolve
+   its common Git directory and derive the state directory below
+   `~/.local/state/waap`.
+2. With `--waap-root`, canonicalize the supplied state directory instead of
+   using the current directory. Require it to contain `agents` and `tickets`,
+   then resolve the common Git directory by walking upward from it. After
+   migration, the supplied directory must equal the path derived below
+   `~/.local/state/waap` for that Git repository.
+3. A `.git` directory is the common directory. For a `.git` file, resolve its
    `gitdir:` target and its `commondir` file. This handles linked worktrees.
-5. Require the common directory to be `<primary repository root>/.git` and
+4. Require the common directory to be `<primary repository root>/.git` and
    canonicalize the primary repository root. Unsupported bare repositories or
    separate-Git-dir layouts fail with a specific error.
-6. Remove the leading root separator from the primary repository path and
+5. Remove the leading root separator from the primary repository path and
    append the remaining components to `~/.local/state/waap`. The resulting path
    is both the state worktree and state directory.
 
@@ -118,8 +119,10 @@ ProjectContext
 State reads, writes, validation, staging, and commits use the state worktree.
 Application source operations use the invocation worktree. In particular,
 `waap agent run` creates an agent worktree from an application invocation
-worktree's HEAD, not from the orphan `waap` branch. It rejects invocation from
-the state worktree because no application source HEAD was selected.
+worktree's HEAD, not from the orphan `waap` branch. When `--waap-root` is used,
+source operations separately resolve the application invocation worktree from
+the current directory and reject the state worktree because no source HEAD was
+selected.
 
 ### Repository relocation
 
