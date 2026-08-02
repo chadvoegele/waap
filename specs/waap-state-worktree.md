@@ -43,11 +43,14 @@ This proposal intentionally chooses the following behaviors for review:
   changes, even when their contents are otherwise valid.
 - The local `waap` branch tracks `origin/waap`; initialization configures the
   upstream but does not push it.
+- `waap check` fetches `origin/waap` and fails when the remote contains commits
+  that are not in the local `waap` branch.
 
 ## Non-goals
 
 - Synchronizing state between separate clones or hosts.
-- Automatically pushing or fetching the `waap` branch.
+- Automatically pushing the `waap` branch or fetching it outside
+  `waap check`.
 - Automatically reconciling duplicate waap state directories.
 - Preserving support for more than one waap project in a Git repository.
 
@@ -143,13 +146,16 @@ An initialized project satisfies all of these conditions:
 7. Git commits made by waap stage only explicit state paths and are created on
    `waap`.
 8. The state worktree has no staged, unstaged, or untracked changes.
+9. When `origin/waap` exists, all of its commits are reachable from local
+   `waap`.
 
 The local branch name is always `waap`; it is not configurable. Initialization
 sets `branch.waap.remote = origin` and
 `branch.waap.merge = refs/heads/waap`. A plain `git push` from the state
 worktree therefore creates or updates `origin/waap`. Waap does not automatically
-push or fetch the branch. The local branch ref prevents its commits from being
-garbage-collected.
+push the branch. `waap check` fetches the remote branch only to validate its
+relationship to local state. The local branch ref prevents its commits from
+being garbage-collected.
 
 A branch named `waap` that has application ancestry is not adopted or reset.
 Initialization fails without changing it and explains how to rename or remove
@@ -235,8 +241,20 @@ afterward.
 - that no legacy `.waap` exists in any registered application worktree;
 - the state root directories, frontmatter, ID, status, and dependency
   invariants;
-- the contents of files currently present in the state worktree; and
-- that the state worktree has no staged, unstaged, or untracked changes.
+- the contents of files currently present in the state worktree;
+- that the state worktree has no staged, unstaged, or untracked changes; and
+- that fetched `origin/waap` is not ahead of local `waap`.
+
+To check the remote relationship, `waap check` queries `origin` and fetches
+`origin/waap` when that ref exists. A missing remote branch is valid before the
+first push. A query or fetch failure makes the check fail because waap cannot
+establish whether local state is current.
+
+After fetching, the check fails when `git rev-list waap..origin/waap` contains
+any commit. This includes both a strictly-ahead remote and diverged branches.
+The error reports the number of remote-only commits and instructs the user to
+integrate remote state before retrying. A remote behind local `waap` does not
+fail the check.
 
 The command always reports the resolved absolute state directory, including
 when state is absent, legacy migration is required, or worktree repair is
@@ -275,7 +293,9 @@ Commands must fail without modifying state when:
 - `waap` is checked out in another location and cannot be safely relocated;
 - the registered state worktree, branch, or common Git directory disagrees
   with the resolved repository;
-- multiple waap state directories exist or legacy state is invalid; or
+- multiple waap state directories exist or legacy state is invalid;
+- `waap check` cannot query or fetch `origin/waap`, or finds it ahead of local
+  `waap`; or
 - the state mutation lock cannot be acquired.
 
 Errors include the conflicting path or ref and a recovery action. Waap must not
@@ -314,10 +334,12 @@ agent role templates so that:
    and JSON formats before and after initialization.
 8. Staged, unstaged, and untracked direct edits fail `waap check`, including
    edits whose contents are otherwise valid.
-9. A pre-existing non-orphan `waap` branch is preserved and causes a useful
-   error.
-10. Concurrent mutation attempts serialize or fail cleanly without leaving
+9. `waap check` passes when `origin/waap` is absent or behind local state, and
+   fails after fetching when the remote is ahead or diverged.
+10. A pre-existing non-orphan `waap` branch is preserved and causes a useful
+    error.
+11. Concurrent mutation attempts serialize or fail cleanly without leaving
     invalid or partially committed state.
-11. Moving the primary repository makes `waap check` report the newly expected
+12. Moving the primary repository makes `waap check` report the newly expected
     state directory and old registered path; `waap init` relocates and repairs
     the state worktree without changing its state or history.
