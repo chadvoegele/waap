@@ -27,7 +27,7 @@ worktree one state checkout, index, branch, and history.
 - Keep waap state commits out of application branch lineages.
 - Preserve waap state as plain files tracked by Git.
 - Migrate repositories that currently track `.waap` on application branches.
-- Expose the resolved paths through `waap status`.
+- Report the resolved state directory through `waap check`.
 - Continue validating direct state edits with `waap check`.
 
 ## Review-sensitive decisions
@@ -113,10 +113,11 @@ worktrees. Moving the primary repository therefore breaks the state worktree's
 back-link until `git worktree repair` updates it. The move also changes waap's
 path-derived state location.
 
-From the moved primary repository, `waap status` detects the registered `waap`
-worktree at its old location, reports the newly expected path, and instructs the
-caller to run `waap init`. Initialization repairs the Git linkage, moves the
-state worktree to the newly resolved path, and repairs the registration. It
+From the moved primary repository, `waap check` detects the registered `waap`
+worktree at its old location, reports the newly expected state directory, and
+instructs the caller to run `waap init`. Initialization repairs the Git linkage,
+moves the state worktree to the newly resolved path, and repairs the
+registration. It
 preserves the branch, state, dirty files, and commit history. It fails without
 moving anything if the destination is occupied or the registered worktree
 cannot be identified safely.
@@ -164,8 +165,8 @@ Initialization leaves the application branch and working tree unchanged.
 
 Every command except `waap init` first checks for legacy state. If the
 invocation worktree contains `.waap`, the command exits unsuccessfully and
-instructs the caller to run `waap init`. `waap status` still prints the expected
-central paths and reports `migration_required = true` before returning failure.
+instructs the caller to run `waap init`. `waap check` still reports the expected
+central state directory before returning failure.
 
 The invocation worktree must have no staged or unstaged changes outside
 `.waap`, and must have no unresolved conflicts. Dirty legacy state is allowed;
@@ -203,9 +204,9 @@ When central state exists and the invocation worktree has no legacy state,
 
 ## Command behavior
 
-After resolution, all agent, ticket, check, and status commands operate on the
-central state directory. Mutation reports continue returning commit hashes,
-but those hashes now belong to branch `waap`.
+After resolution, all state-aware commands operate on the central state
+worktree. Mutation reports continue returning commit hashes, but those hashes
+now belong to branch `waap`.
 
 Mutation transactions must be serialized with one per-repository lock outside
 the state worktree, such as in the common Git directory. A transaction holds
@@ -230,47 +231,28 @@ afterward.
 - the files currently present in the state worktree, including uncommitted
   direct edits.
 
-A successful check does not stage or commit direct edits. Dirty but valid state
-is valid; `waap status` exposes whether it is dirty. This preserves the plain
-file escape hatch while making the CLI the preferred mutation interface.
-
-## `waap status`
-
-Add a top-level, read-only `waap status` command. It resolves paths even when
-state is absent or migration is required.
-
-Human-readable output includes at least:
+The command always reports the resolved absolute state directory, including
+when state is absent, legacy migration is required, or worktree repair is
+needed. Human-readable output starts with the path:
 
 ```text
-Repository: /home/chad/code/github.com/chadvoegele/waap
-Invocation worktree: /home/chad/code/github.com/chadvoegele/waap/worktrees/example
-State worktree: /home/chad/.waap/state/home/chad/code/github.com/chadvoegele/waap
 State directory: /home/chad/.waap/state/home/chad/code/github.com/chadvoegele/waap
-State branch: waap
-Initialized: true
-Migration required: false
-State clean: true
+OK: waap state is valid
 ```
 
-JSON output uses stable absolute path strings:
+JSON output adds `state_directory` to the existing check result:
 
 ```json
 {
-  "repository_root": "/home/chad/code/github.com/chadvoegele/waap",
-  "invocation_worktree": "/home/chad/code/github.com/chadvoegele/waap/worktrees/example",
-  "state_worktree": "/home/chad/.waap/state/home/chad/code/github.com/chadvoegele/waap",
   "state_directory": "/home/chad/.waap/state/home/chad/code/github.com/chadvoegele/waap",
-  "state_branch": "waap",
-  "initialized": true,
-  "migration_required": false,
-  "state_clean": true
+  "valid": true,
+  "errors": []
 }
 ```
 
-`state_clean` is `null` when the state worktree is unavailable. Status exits
-successfully only when initialized, no migration is required, and the topology
-is usable. Otherwise it prints the report, emits `waap init` or repair guidance,
-and exits unsuccessfully.
+A successful check does not stage or commit direct edits. Dirty but valid state
+is valid. This preserves the plain-file escape hatch while making the CLI the
+preferred mutation interface.
 
 ## Failure and recovery
 
@@ -316,14 +298,13 @@ agent role templates so that:
    migrates and removes it without data loss.
 6. Conflicting migration from another legacy application branch lists
    conflicts and changes neither checkout.
-7. `waap status` reports resolved absolute paths in human-readable and JSON
-   formats before and after initialization.
-8. Direct valid edits pass `waap check` and make `state_clean` false; invalid
-   edits fail `waap check`.
+7. `waap check` reports the resolved absolute state directory in human-readable
+   and JSON formats before and after initialization.
+8. Direct valid edits pass `waap check`; invalid edits fail it.
 9. A pre-existing non-orphan `waap` branch is preserved and causes a useful
    error.
 10. Concurrent mutation attempts serialize or fail cleanly without leaving
     invalid or partially committed state.
-11. Moving the primary repository makes `waap status` report the old and new
-    state paths; `waap init` relocates and repairs the state worktree without
-    changing its state or history.
+11. Moving the primary repository makes `waap check` report the newly expected
+    state directory and old registered path; `waap init` relocates and repairs
+    the state worktree without changing its state or history.
