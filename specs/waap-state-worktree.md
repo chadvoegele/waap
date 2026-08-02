@@ -172,8 +172,6 @@ When neither central nor legacy state exists, `waap init`:
 3. Creates the `agents` and `tickets` skeleton at the worktree root.
 4. Creates a parentless `waap init` commit on `waap`.
 5. Configures `origin/waap` as the branch upstream.
-6. Adds the invocation-root `/.waap/` path to the repository's local exclude
-   file so accidental state is not added to application branches.
 
 Initialization leaves the application branch and working tree unchanged.
 
@@ -203,7 +201,6 @@ Dirty legacy state is allowed; migration copies its working-tree contents.
 5. Configures `origin/waap` as the branch upstream.
 6. Removes legacy `.waap` and commits that deletion on its application branch
    with subject `Remove legacy waap state`.
-7. Adds `/.waap/` to the repository's local exclude file.
 
 The central commit happens before source removal so a partial failure does not
 lose state. If source cleanup fails, later commands report both directories as
