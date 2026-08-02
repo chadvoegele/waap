@@ -37,8 +37,8 @@ This proposal intentionally chooses the following behaviors for review:
 - The canonical primary checkout path, not the remote URL, identifies a clone.
 - Migration commits removal of the unique legacy `.waap` on its application
   branch.
-- If central state and legacy `.waap` coexist, waap returns an error instead
-  of choosing or merging state.
+- During derived resolution, if central state and legacy `.waap` coexist, waap
+  returns an error instead of choosing or merging state.
 - `waap check` fails when central state has staged, unstaged, or untracked
   changes, even when their contents are otherwise valid.
 - When `origin` exists, the local `waap` branch tracks `origin/waap`;
@@ -156,8 +156,8 @@ primary move must run `waap repair` from the primary repository.
 An initialized project satisfies all of these conditions:
 
 1. `refs/heads/waap` exists.
-2. The branch has no merge base with any application branch. Its first commit
-   has no parents.
+2. Every commit reachable from the branch contains only waap state paths. Its
+   root commit or commits have no parents.
 3. The expected state worktree is registered with Git and checks out `waap`.
 4. When remote `origin` exists, branch `waap` has remote `origin` and merge
    ref `refs/heads/waap`, making `origin/waap` its upstream even before the
@@ -178,26 +178,37 @@ automatically push the branch. `waap check` fetches the remote branch only to
 warn about remote-only state. The local branch ref prevents its commits from
 being garbage-collected.
 
-A branch named `waap` that has application ancestry is not adopted or reset.
-Initialization fails without changing it and explains how to rename or remove
-the conflicting branch.
+Fresh initialization and migration establish state-only history by
+construction. Adoption and `waap check` validate the history reachable from
+`waap` directly; they do not inspect or compare non-`waap` branches.
+
+A branch named `waap` whose reachable history contains non-state paths is not
+adopted or reset. Initialization fails without changing it and explains how to
+rename or remove the conflicting branch.
 
 ## `waap init`
 
 ### New repository
 
-When neither central nor legacy state exists, `waap init` uses the derived
-state directory or the explicit `--waap-root` target, then:
+When the selected target is uninitialized and, without `--waap-root`, neither
+central nor legacy state exists, `waap init` uses the derived state directory
+or explicit target, then:
 
 1. When `origin` exists, queries whether `origin/waap` already exists.
 2. Creates the state worktree's parent directories.
-3. When `origin/waap` exists, fetches it, verifies it is an orphan waap state
-   branch, and creates the local tracking `waap` branch and state worktree at
-   the selected path.
+3. When `origin/waap` exists, fetches it, verifies its reachable history
+   contains only waap state paths, and creates the local tracking `waap` branch
+   and state worktree at the selected path.
 4. Otherwise, creates orphan branch `waap` and its worktree at the selected
    path, creates the `agents` and `tickets` skeleton at the worktree root, and
    creates a parentless `waap init` commit.
 5. When `origin` exists, configures `origin/waap` as the branch upstream.
+
+A repository without `origin`, or an `origin` confirmed not to contain
+`origin/waap`, proceeds with fresh state. When `origin` exists, waap must
+conclusively determine whether `origin/waap` exists before modifying local
+state. A query or fetch failure makes initialization fail without modification;
+it is not treated as a missing remote branch.
 
 Initialization leaves the application branch and working tree unchanged.
 
@@ -205,15 +216,16 @@ Every successful `waap init` report includes the resolved absolute state
 directory. Human-readable output includes:
 
 ```text
-State directory: /home/chad/.local/state/waap/home/chad/code/github.com/chadvoegele/waap
+State directory: /home/chad/.local/state/waap/data/home/chad/code/github.com/chadvoegele/waap
 ```
 
 JSON output adds a `state_directory` string to the existing init report.
 
 ### Existing state
 
-Every command determines whether the central state directory and legacy
-`.waap` in the invocation worktree exist.
+Without `--waap-root`, every command determines whether the derived central
+state directory and legacy `.waap` in the invocation worktree exist. Legacy
+state is inspected only to require repair or reject coexistence:
 
 - With legacy `.waap` and no central state, every command except `waap repair`
   exits unsuccessfully and instructs the caller to repair the project.
@@ -223,8 +235,12 @@ Every command determines whether the central state directory and legacy
 - `waap check` reports the expected central state directory before reporting
   either error.
 
-`waap init` fails without modifying state whenever either central or legacy
-state exists. It is setup only.
+With `--waap-root`, waap uses only the supplied state directory. It does not
+inspect derived central state or legacy `.waap`.
+
+Without `--waap-root`, `waap init` fails without modifying state whenever
+either central or legacy state exists. With `--waap-root`, it fails without
+modification when the supplied target already contains state. It is setup only.
 
 ## `waap repair`
 
@@ -268,16 +284,19 @@ each state transition is a separate transaction.
 
 Agent instructions and bundled role templates must tell agents to use the
 `waap` CLI for state changes. Runner prompts may include the absolute resolved
-path to `agent.md` for reading, but must not instruct agents to edit it. An agent
-that intentionally edits central files directly must run `waap check`
-afterward.
+path to `agent.md` for reading, but must not instruct agents to edit it. An
+agent that intentionally edits central files directly must run `waap check` to
+validate them, expecting uncommitted-state errors while the worktree is
+dirty. It must fix any content errors, commit the validated edits on `waap`,
+and run `waap check` again to confirm clean, valid state.
 
 ## `waap check`
 
 `waap check` validates:
 
 - the branch, upstream, and registered-worktree invariants above;
-- that legacy `.waap` does not coexist in the invocation worktree;
+- without `--waap-root`, that legacy `.waap` does not coexist in the
+  invocation worktree;
 - the state root directories, frontmatter, ID, status, and dependency
   invariants;
 - the contents of files currently present in the state worktree; and
@@ -299,7 +318,7 @@ when state is absent, legacy migration is required, or worktree repair is
 needed. Human-readable output starts with the path:
 
 ```text
-State directory: /home/chad/.local/state/waap/home/chad/code/github.com/chadvoegele/waap
+State directory: /home/chad/.local/state/waap/data/home/chad/code/github.com/chadvoegele/waap
 OK: waap state is valid
 ```
 
@@ -307,7 +326,7 @@ JSON output adds `state_directory` to the existing check result:
 
 ```json
 {
-  "state_directory": "/home/chad/.local/state/waap/home/chad/code/github.com/chadvoegele/waap",
+  "state_directory": "/home/chad/.local/state/waap/data/home/chad/code/github.com/chadvoegele/waap",
   "valid": true,
   "errors": []
 }
@@ -326,11 +345,12 @@ Commands must fail without modifying state when:
 - the caller is outside a supported non-bare Git repository;
 - `HOME` cannot produce the required absolute state path;
 - the expected path is occupied by an unrelated file or checkout;
-- branch `waap` exists but is not an orphan waap state branch;
+- branch `waap` exists but its reachable history contains non-state paths;
 - `waap` is checked out in another location and cannot be safely relocated;
 - the registered state worktree, branch, or common Git directory disagrees
   with the resolved repository;
-- central state and legacy `.waap` coexist, or legacy state is invalid; or
+- during derived resolution, central state and legacy `.waap` coexist, or
+  legacy state is invalid; or
 - the state mutation lock cannot be acquired.
 
 Errors include the conflicting path or ref and a recovery action. Waap must not
@@ -345,8 +365,8 @@ agent role templates so that:
 - central state paths use the state directory while `.waap` refers only to
   legacy state in an application checkout;
 - examples use the CLI for mutations;
-- direct edits are followed by `waap check`, which reports uncommitted state as
-  an error;
+- direct edits are validated with `waap check`, committed on `waap`, and
+  followed by another successful `waap check`;
 - `waap init` is setup-only while `waap repair` handles migration and
   recovery; and
 - agent worktree instructions distinguish source worktrees from the state
@@ -358,23 +378,24 @@ agent role templates so that:
    state directory and observe each other's state commits immediately.
 2. After initialization or migration, state mutations change only `waap`;
    application branch HEADs do not move.
-3. `waap` has no merge base with `main` after fresh initialization. When
-   `origin` exists, it tracks `origin/waap` and a plain `git push` from the
-   state worktree pushes that ref.
+3. After fresh initialization, `waap` begins with a parentless commit and every
+   tree in its history contains only waap state paths. When `origin` exists, it
+   tracks `origin/waap` and a plain `git push` from the state worktree pushes
+   that ref.
 4. Agent source worktrees start from the invoking application HEAD, never from
    `waap`.
 5. A repository with tracked legacy `.waap` is blocked until `waap repair`
    migrates and removes it without data loss.
-6. Central state plus legacy `.waap` in the invocation worktree produces an
-   error listing both paths and changes no checkout.
+6. Without `--waap-root`, central state plus legacy `.waap` in the invocation
+   worktree produces an error listing both paths and changes no checkout.
 7. `waap init` and `waap check` report the resolved absolute state directory in
    human-readable and JSON formats.
 8. Staged, unstaged, and untracked direct edits fail `waap check`, including
    edits whose contents are otherwise valid.
 9. `waap check` passes without `origin` and warns, without failing, when
    fetching finds `origin/waap` ahead of or diverged from local state.
-10. A pre-existing non-orphan `waap` branch is preserved and causes a useful
-    error.
+10. A pre-existing `waap` branch with non-state paths in its reachable history
+    is preserved and causes a useful error.
 11. Concurrent mutation attempts serialize or fail cleanly without leaving
     invalid or partially committed state.
 12. Moving the primary repository makes `waap check` report the newly expected
