@@ -59,7 +59,7 @@ This proposal intentionally chooses the following behaviors for review:
 - **Invocation worktree**: the checkout containing the caller's current
   directory. It is normally an application checkout, but may be the state
   worktree when the caller runs there.
-- **State override**: the state worktree root explicitly supplied through
+- **State override**: the waap state directory explicitly supplied through
   `--waap-root`.
 - **Primary repository root**: the canonical root whose `.git` directory is the
   common Git directory. This path identifies the repository.
@@ -70,11 +70,13 @@ This proposal intentionally chooses the following behaviors for review:
 - **Legacy state**: a `.waap` entry in the invocation worktree rather than the
   state worktree.
 
-`--waap-root` selects the central state directory, not an application checkout.
-It must name the exact state worktree root. Without it, waap derives the state
-directory from the invocation application's common Git directory. The current
-CLI can initialize nested projects in one repository by pointing `--waap-root`
-at different application directories. This proposal intentionally changes that
+`--waap-root` always names the state directory containing `agents` and
+`tickets`, never an application checkout. In a migrated project this is the
+central state worktree root; in a legacy project it is the application's
+`.waap` directory. Without it, waap derives the central state directory from
+the invocation application's common Git directory. The current CLI can
+initialize nested projects in one repository by pointing `--waap-root` at
+different application directories. This proposal intentionally changes that
 behavior: one common Git directory identifies one waap project.
 
 ## Repository and state resolution
@@ -86,10 +88,10 @@ Resolution must not depend on the current application branch or on finding a
    entry. This is the invocation worktree root.
 2. Without `--waap-root`, resolve the invocation worktree's common Git
    directory and derive the state directory below `~/.local/state/waap`.
-3. With `--waap-root`, canonicalize the supplied path, require it to be the
-   state worktree root on branch `waap`, and resolve its common Git directory.
-   It must equal the path derived below `~/.local/state/waap` for that Git
-   repository.
+3. With `--waap-root`, canonicalize the supplied state directory and require
+   it to contain `agents` and `tickets`. Resolve the common Git directory by
+   walking upward from it. After migration, the supplied directory must equal
+   the path derived below `~/.local/state/waap` for that Git repository.
 4. A `.git` directory is the common directory. For a `.git` file, resolve its
    `gitdir:` target and its `commondir` file. This handles linked worktrees.
 5. Require the common directory to be `<primary repository root>/.git` and
@@ -311,7 +313,7 @@ always explicit.
 Implementation must update the README, main specification, waap skill, and
 agent role templates so that:
 
-- central state paths use the state worktree root while `.waap` refers only to
+- central state paths use the state directory while `.waap` refers only to
   legacy state in an application checkout;
 - examples use the CLI for mutations;
 - direct edits are followed by `waap check`, which reports uncommitted state as
