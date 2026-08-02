@@ -4,7 +4,7 @@
 
 Store each repository's waap state in one dedicated Git worktree instead of
 copying `.waap` into every application worktree. The dedicated worktree uses a
-local orphan branch named `waap` and lives below `~/.local/state/waap/`.
+local orphan branch named `waap` and lives below `~/.local/state/waap/data/`.
 
 For example, the repository at:
 
@@ -15,7 +15,7 @@ For example, the repository at:
 uses:
 
 ```text
-~/.local/state/waap/home/chad/code/github.com/chadvoegele/waap/ # worktree and state directory
+~/.local/state/waap/data/home/chad/code/github.com/chadvoegele/waap/ # worktree and state directory
 ```
 
 This gives all `waap` commands launched from the primary checkout or any linked
@@ -63,7 +63,7 @@ This proposal intentionally chooses the following behaviors for review:
   `--waap-root`.
 - **Primary repository root**: the canonical root whose `.git` directory is the
   common Git directory. This path identifies the repository.
-- **State worktree**: the checkout below `~/.local/state/waap/` on branch
+- **State worktree**: the checkout below `~/.local/state/waap/data/` on branch
   `waap`.
 - **State directory**: the state worktree root. Its `agents` and `tickets`
   directories are tracked directly, without a `.waap` wrapper.
@@ -92,15 +92,15 @@ Resolution must not depend on the current application branch or on finding a
 2. Without `--waap-root`, canonicalize the current directory and walk upward
    to its nearest `.git` entry. This is the invocation worktree root. Resolve
    its common Git directory and derive the state directory below
-   `~/.local/state/waap`.
+   `~/.local/state/waap/data`.
 3. A `.git` directory is the common directory. For a `.git` file, resolve its
    `gitdir:` target and its `commondir` file. This handles linked worktrees.
 4. Require the common directory to be `<primary repository root>/.git` and
    canonicalize the primary repository root. Unsupported bare repositories or
    separate-Git-dir layouts fail with a specific error.
 5. Remove the leading root separator from the primary repository path and
-   append the remaining components to `~/.local/state/waap`. The resulting path
-   is both the state worktree and state directory.
+   append the remaining components to `~/.local/state/waap/data`. The resulting
+   path is both the state worktree and state directory.
 
 Symlinks are resolved before deriving the path. Two clones at different paths
 therefore have independent state. `HOME` must be set and absolute.
