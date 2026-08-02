@@ -187,6 +187,17 @@ When neither central nor legacy state exists, `waap init`:
 
 Initialization leaves the application branch and working tree unchanged.
 
+Every successful `waap init` report includes the resolved absolute state
+directory. Human-readable output includes:
+
+```text
+State directory: /home/chad/.local/state/waap/home/chad/code/github.com/chadvoegele/waap
+```
+
+JSON output adds a `state_directory` string to the existing init report. This
+applies to fresh initialization, legacy migration, and an already initialized
+project.
+
 ### Legacy migration
 
 Every command determines whether the central state directory and legacy
@@ -338,8 +349,8 @@ agent role templates so that:
    migrates and removes it without data loss.
 6. Central state plus legacy `.waap` in the invocation worktree produces an
    error listing both paths and changes no checkout.
-7. `waap check` reports the resolved absolute state directory in human-readable
-   and JSON formats before and after initialization.
+7. `waap init` and `waap check` report the resolved absolute state directory in
+   human-readable and JSON formats.
 8. Staged, unstaged, and untracked direct edits fail `waap check`, including
    edits whose contents are otherwise valid.
 9. `waap check` passes when `origin/waap` is absent or behind local state, and
