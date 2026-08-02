@@ -41,7 +41,8 @@ This proposal intentionally chooses the following behaviors for review:
   of choosing or merging state.
 - `waap check` fails when central state has staged, unstaged, or untracked
   changes, even when their contents are otherwise valid.
-- Waap never pushes the local state branch.
+- The local `waap` branch tracks `origin/waap`; initialization configures the
+  upstream but does not push it.
 
 ## Non-goals
 
@@ -121,8 +122,7 @@ instructs the caller to run `waap init`. Initialization repairs the Git linkage,
 moves the state worktree to the newly resolved path, and repairs the
 registration. It preserves the branch, state, dirty files, and commit history.
 It fails without moving anything if the destination is occupied or the
-registered worktree
-cannot be identified safely.
+registered worktree cannot be identified safely.
 
 A caller in another linked worktree whose `.git` file was also broken by the
 primary move must first run Git's repair procedure from the primary repository.
@@ -135,15 +135,21 @@ An initialized project satisfies all of these conditions:
 2. The branch has no merge base with any application branch. Its first commit
    has no parents.
 3. The expected state worktree is registered with Git and checks out `waap`.
-4. The expected state worktree contains `agents` and `tickets` at its root.
-5. Only waap state is tracked on the branch. The worktree does not contain an
+4. Branch `waap` has remote `origin` and merge ref `refs/heads/waap`, making
+   `origin/waap` its upstream even before the remote ref's first push.
+5. The expected state worktree contains `agents` and `tickets` at its root.
+6. Only waap state is tracked on the branch. The worktree does not contain an
    application source checkout.
-6. Git commits made by waap stage only explicit state paths and are created on
+7. Git commits made by waap stage only explicit state paths and are created on
    `waap`.
-7. The state worktree has no staged, unstaged, or untracked changes.
+8. The state worktree has no staged, unstaged, or untracked changes.
 
-The local branch name is always `waap`; it is not configurable. Waap does not
-push it. The branch ref prevents its commits from being garbage-collected.
+The local branch name is always `waap`; it is not configurable. Initialization
+sets `branch.waap.remote = origin` and
+`branch.waap.merge = refs/heads/waap`. A plain `git push` from the state
+worktree therefore creates or updates `origin/waap`. Waap does not automatically
+push or fetch the branch. The local branch ref prevents its commits from being
+garbage-collected.
 
 A branch named `waap` that has application ancestry is not adopted or reset.
 Initialization fails without changing it and explains how to rename or remove
@@ -159,7 +165,8 @@ When neither central nor legacy state exists, `waap init`:
 2. Creates orphan branch `waap` and its worktree at the resolved path.
 3. Creates the `agents` and `tickets` skeleton at the worktree root.
 4. Creates a parentless `waap init` commit on `waap`.
-5. Adds the invocation-root `/.waap/` path to the repository's local exclude
+5. Configures `origin/waap` as the branch upstream.
+6. Adds the invocation-root `/.waap/` path to the repository's local exclude
    file so accidental state is not added to application branches.
 
 Initialization leaves the application branch and working tree unchanged.
@@ -187,9 +194,10 @@ Dirty legacy state is allowed; migration copies its working-tree contents.
 2. Creates the orphan state branch and worktree.
 3. Copies the contents of legacy `.waap` into the central worktree root.
 4. Validates and commits central state with subject `waap migrate state`.
-5. Removes legacy `.waap` and commits that deletion on its application branch
+5. Configures `origin/waap` as the branch upstream.
+6. Removes legacy `.waap` and commits that deletion on its application branch
    with subject `Remove legacy waap state`.
-6. Adds `/.waap/` to the repository's local exclude file.
+7. Adds `/.waap/` to the repository's local exclude file.
 
 The central commit happens before source removal so a partial failure does not
 lose state. If source cleanup fails, later commands report both directories as
@@ -197,8 +205,9 @@ duplicates; the error instructs the user to compare them and remove the legacy
 copy manually. Waap never deletes legacy state until central state is valid and
 committed.
 
-When central state exists and no legacy state exists, `waap init` reports that
-the repository is already initialized.
+When central state exists and no legacy state exists, `waap init` repairs a
+missing or incorrect `origin/waap` upstream, then reports that the repository is
+already initialized.
 
 ## Command behavior
 
@@ -222,7 +231,7 @@ afterward.
 
 `waap check` validates:
 
-- the branch and registered-worktree invariants above;
+- the branch, upstream, and registered-worktree invariants above;
 - that no legacy `.waap` exists in any registered application worktree;
 - the state root directories, frontmatter, ID, status, and dependency
   invariants;
@@ -259,6 +268,7 @@ plain files as a recovery mechanism.
 Commands must fail without modifying state when:
 
 - the caller is outside a supported non-bare Git repository;
+- remote `origin` is missing;
 - `HOME` cannot produce the required absolute state path;
 - the expected path is occupied by an unrelated file or checkout;
 - branch `waap` exists but is not an orphan waap state branch;
@@ -292,7 +302,8 @@ agent role templates so that:
    state directory and observe each other's state commits immediately.
 2. After initialization or migration, state mutations change only `waap`;
    application branch HEADs do not move.
-3. `waap` has no merge base with `main` after fresh initialization.
+3. `waap` has no merge base with `main` after fresh initialization and tracks
+   `origin/waap`; a plain `git push` from the state worktree pushes that ref.
 4. Agent source worktrees start from the invoking application HEAD, never from
    `waap`.
 5. A repository with tracked legacy `.waap` is blocked until `waap init`
