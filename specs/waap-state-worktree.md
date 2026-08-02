@@ -39,7 +39,8 @@ This proposal intentionally chooses the following behaviors for review:
   branch.
 - If more than one waap state directory exists, waap returns an error instead
   of choosing or merging state.
-- Valid direct edits may remain uncommitted after `waap check`.
+- `waap check` fails when central state has staged, unstaged, or untracked
+  changes, even when their contents are otherwise valid.
 - Waap never pushes the local state branch.
 
 ## Non-goals
@@ -139,6 +140,7 @@ An initialized project satisfies all of these conditions:
    application source checkout.
 6. Git commits made by waap stage only explicit state paths and are created on
    `waap`.
+7. The state worktree has no staged, unstaged, or untracked changes.
 
 The local branch name is always `waap`; it is not configurable. Waap does not
 push it. The branch ref prevents its commits from being garbage-collected.
@@ -223,9 +225,9 @@ afterward.
 - the branch and registered-worktree invariants above;
 - that no legacy `.waap` exists in any registered application worktree;
 - the state root directories, frontmatter, ID, status, and dependency
-  invariants; and
-- the files currently present in the state worktree, including uncommitted
-  direct edits.
+  invariants;
+- the contents of files currently present in the state worktree; and
+- that the state worktree has no staged, unstaged, or untracked changes.
 
 The command always reports the resolved absolute state directory, including
 when state is absent, legacy migration is required, or worktree repair is
@@ -246,9 +248,11 @@ JSON output adds `state_directory` to the existing check result:
 }
 ```
 
-A successful check does not stage or commit direct edits. Dirty but valid state
-is valid. This preserves the plain-file escape hatch while making the CLI the
-preferred mutation interface.
+`waap check` never stages or commits direct edits. Any dirty state makes the
+check fail, even when its contents pass structural validation. The error lists
+the changed paths and requires the user to revert them or commit them on
+`waap` before retrying. This makes bypassing the CLI visible while preserving
+plain files as a recovery mechanism.
 
 ## Failure and recovery
 
@@ -277,7 +281,8 @@ agent role templates so that:
 - central state paths use the state worktree root while `.waap` refers only to
   legacy state in an application checkout;
 - examples use the CLI for mutations;
-- direct edits are followed by `waap check`; and
+- direct edits are followed by `waap check`, which reports uncommitted state as
+  an error; and
 - agent worktree instructions distinguish source worktrees from the state
   worktree.
 
@@ -296,7 +301,8 @@ agent role templates so that:
    produce an error listing every state path and change no checkout.
 7. `waap check` reports the resolved absolute state directory in human-readable
    and JSON formats before and after initialization.
-8. Direct valid edits pass `waap check`; invalid edits fail it.
+8. Staged, unstaged, and untracked direct edits fail `waap check`, including
+   edits whose contents are otherwise valid.
 9. A pre-existing non-orphan `waap` branch is preserved and causes a useful
    error.
 10. Concurrent mutation attempts serialize or fail cleanly without leaving
