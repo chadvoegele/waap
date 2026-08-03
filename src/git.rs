@@ -291,7 +291,7 @@ fn adopt_remote_state_worktree(repository_root: &Path, state_root: &Path) -> io:
     Ok(())
 }
 
-fn configure_state_upstream(repository_root: &Path) -> io::Result<()> {
+pub(crate) fn configure_state_upstream(repository_root: &Path) -> io::Result<()> {
     if has_origin(repository_root)? {
         run_git(
             repository_root,

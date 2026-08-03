@@ -7,6 +7,7 @@ mod git;
 mod ids;
 mod init;
 mod record;
+mod repair;
 mod root;
 #[cfg(test)]
 mod test_git;

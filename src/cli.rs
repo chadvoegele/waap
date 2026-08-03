@@ -37,6 +37,8 @@ pub(crate) enum Command {
     Init,
     /// Validate .waap state.
     Check,
+    /// Repair central state or migrate legacy .waap state.
+    Repair,
     /// Manage agents.
     Agent {
         #[command(subcommand)]
@@ -147,6 +149,13 @@ mod tests {
 
         assert_eq!(cli.waap_root, Some(PathBuf::from("/some/path")));
         assert!(matches!(cli.command, Command::Init));
+    }
+
+    #[test]
+    fn parses_repair_command() {
+        let cli = Cli::try_parse_from(["waap", "repair"]).unwrap();
+
+        assert!(matches!(cli.command, Command::Repair));
     }
 
     #[test]

@@ -10,31 +10,46 @@ use crate::frontmatter::parse_frontmatter;
 use crate::ticket::{is_ticket_id, TicketMetadata};
 
 pub(crate) fn check_waap(waap_root: &Path) -> Vec<String> {
+    let state_root = waap_root.join(".waap");
+    if !state_root.exists() {
+        return vec!["no waap project found; run 'waap init'".to_string()];
+    }
+    if !state_root.is_dir() {
+        return vec![".waap must be a directory".to_string()];
+    }
+    check_state_directories(&state_root, ".waap", false)
+}
+
+/// Validate state stored directly in a central state worktree.
+pub(crate) fn check_state(state_root: &Path) -> Vec<String> {
+    if !state_root.is_dir() {
+        return vec![format!(
+            "state directory {} must be a directory",
+            state_root.display()
+        )];
+    }
+    check_state_directories(state_root, "state", true)
+}
+
+fn check_state_directories(
+    state_root: &Path,
+    label: &str,
+    require_directories: bool,
+) -> Vec<String> {
     let mut errors = Vec::new();
-    let waap_dir = waap_root.join(".waap");
-    let agents_dir = waap_dir.join("agents");
-    let tickets_dir = waap_dir.join("tickets");
+    let agents_dir = state_root.join("agents");
+    let tickets_dir = state_root.join("tickets");
 
-    if !waap_dir.exists() {
-        errors.push("no waap project found; run 'waap init'".to_string());
-        return errors;
+    if agents_dir.is_dir() {
+        check_agents(&agents_dir, &format!("{label}/agents"), &mut errors);
+    } else if agents_dir.exists() || require_directories {
+        errors.push(format!("{label}/agents must be a directory"));
     }
 
-    if !waap_dir.is_dir() {
-        errors.push(".waap must be a directory".to_string());
-        return errors;
-    }
-
-    if agents_dir.exists() && agents_dir.is_dir() {
-        check_agents(&agents_dir, &mut errors);
-    } else if agents_dir.exists() {
-        errors.push(".waap/agents must be a directory".to_string());
-    }
-
-    if tickets_dir.exists() && tickets_dir.is_dir() {
-        check_tickets(&tickets_dir, &mut errors);
-    } else if tickets_dir.exists() {
-        errors.push(".waap/tickets must be a directory".to_string());
+    if tickets_dir.is_dir() {
+        check_tickets(&tickets_dir, &format!("{label}/tickets"), &mut errors);
+    } else if tickets_dir.exists() || require_directories {
+        errors.push(format!("{label}/tickets must be a directory"));
     }
 
     errors
@@ -69,12 +84,15 @@ fn format_check_result(output_format: &OutputFormat, errors: &[String]) -> Strin
     }
 }
 
-fn check_agents(agents_dir: &Path, errors: &mut Vec<String>) {
-    let entries = read_dir(agents_dir, ".waap/agents", errors);
+fn check_agents(agents_dir: &Path, agents_label: &str, errors: &mut Vec<String>) {
+    let entries = read_dir(agents_dir, agents_label, errors);
     for entry in entries {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
-        let label = format!(".waap/agents/{name}");
+        if name == ".gitkeep" && path.is_file() {
+            continue;
+        }
+        let label = format!("{agents_label}/{name}");
 
         if !path.is_dir() {
             errors.push(format!("{label} must be an agent directory"));
@@ -105,14 +123,17 @@ fn check_agent_frontmatter(path: &Path, errors: &mut Vec<String>) {
     }
 }
 
-fn check_tickets(tickets_dir: &Path, errors: &mut Vec<String>) {
-    let entries = read_dir(tickets_dir, ".waap/tickets", errors);
+fn check_tickets(tickets_dir: &Path, tickets_label: &str, errors: &mut Vec<String>) {
+    let entries = read_dir(tickets_dir, tickets_label, errors);
     let mut tickets = Vec::new();
 
     for entry in entries {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
-        let label = format!(".waap/tickets/{name}");
+        if name == ".gitkeep" && path.is_file() {
+            continue;
+        }
+        let label = format!("{tickets_label}/{name}");
 
         if !path.is_dir() {
             errors.push(format!("{label} must be a ticket directory"));
@@ -136,15 +157,23 @@ fn check_tickets(tickets_dir: &Path, errors: &mut Vec<String>) {
         }
     }
 
-    check_ticket_dependencies(&tickets, errors);
+    check_ticket_dependencies(&tickets, tickets_label, errors);
 }
 
-fn check_ticket_dependencies(tickets: &[TicketMetadata], errors: &mut Vec<String>) {
-    check_dependencies_exist(tickets, errors);
+fn check_ticket_dependencies(
+    tickets: &[TicketMetadata],
+    tickets_label: &str,
+    errors: &mut Vec<String>,
+) {
+    check_dependencies_exist(tickets, tickets_label, errors);
     check_cycles(tickets, errors);
 }
 
-fn check_dependencies_exist(tickets: &[TicketMetadata], errors: &mut Vec<String>) {
+fn check_dependencies_exist(
+    tickets: &[TicketMetadata],
+    tickets_label: &str,
+    errors: &mut Vec<String>,
+) {
     let known_ids: HashSet<&str> = tickets
         .iter()
         .map(|ticket| ticket.ticket_id.as_str())
@@ -154,7 +183,7 @@ fn check_dependencies_exist(tickets: &[TicketMetadata], errors: &mut Vec<String>
         for dep in ticket.depends_on.iter().flatten() {
             if !known_ids.contains(dep.as_str()) {
                 errors.push(format!(
-                    ".waap/tickets/{}/ticket.md depends_on {dep:?} which does not exist",
+                    "{tickets_label}/{}/ticket.md depends_on {dep:?} which does not exist",
                     ticket.ticket_id
                 ));
             }
