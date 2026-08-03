@@ -9,24 +9,29 @@ use tempfile::tempdir;
 
 use common::{git, init_repo, isolate_git_config};
 
-/// Initialize a git repo and an already-initialized waap project inside it.
+/// Initialize a repository with legacy state while legacy command dispatch is
+/// still active. Central initialization is covered separately below.
 fn init_repo_with_waap_project(waap_root: &Path) {
     init_repo(waap_root);
-    let output = waap(waap_root, "", &["init"]);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    std::fs::create_dir_all(waap_root.join(".waap/agents")).unwrap();
+    std::fs::create_dir_all(waap_root.join(".waap/tickets")).unwrap();
+    std::fs::write(waap_root.join(".waap/.gitkeep"), "").unwrap();
+    git(waap_root, &["add", ".waap"]);
+    git(waap_root, &["commit", "-q", "-m", "legacy state"]);
 }
 
 fn waap(waap_root: &Path, stdin: &str, args: &[&str]) -> Output {
+    waap_with_state_root(waap_root, waap_root, stdin, args)
+}
+
+fn waap_with_state_root(cwd: &Path, state_root: &Path, stdin: &str, args: &[&str]) -> Output {
     use std::io::{ErrorKind, Write};
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_waap"));
     isolate_git_config(&mut command);
     let mut child = command
-        .args(["--waap-root", waap_root.to_str().unwrap()])
+        .current_dir(cwd)
+        .args(["--waap-root", state_root.to_str().unwrap()])
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -423,27 +428,38 @@ fn agent_stop_commits_and_reports_the_commit() {
 }
 
 #[test]
-fn init_creates_and_commits_waap_skeleton() {
-    let dir = tempdir().unwrap();
-    init_repo(dir.path());
+fn init_creates_a_central_skeleton_without_changing_application_head() {
+    let repository = tempdir().unwrap();
+    let state_parent = tempdir().unwrap();
+    let state = state_parent.path().join("state");
+    init_repo(repository.path());
+    let application_head = git(repository.path(), &["rev-parse", "HEAD"]);
 
-    let before = commit_count(dir.path());
-    let output = waap(dir.path(), "", &["--output-format", "json", "init"]);
+    let output = waap_with_state_root(
+        repository.path(),
+        &state,
+        "",
+        &["--output-format", "json", "init"],
+    );
 
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
-    let commit = value["commit"].as_str().unwrap();
-    assert_eq!(commit, git(dir.path(), &["rev-parse", "HEAD"]));
-
-    assert_eq!(commit_count(dir.path()), before + 1);
-    assert_eq!(last_subject(dir.path()), "waap init");
-    assert!(dir.path().join(".waap/agents").is_dir());
-    assert!(dir.path().join(".waap/tickets").is_dir());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value["state_directory"],
+        state.canonicalize().unwrap().display().to_string()
+    );
+    assert_eq!(value["commit"], git(&state, &["rev-parse", "HEAD"]));
+    assert_eq!(
+        git(repository.path(), &["rev-parse", "HEAD"]),
+        application_head
+    );
+    assert!(state.join("agents").is_dir());
+    assert!(state.join("tickets").is_dir());
+    assert!(!repository.path().join(".waap").exists());
 }
 
 #[test]
@@ -455,7 +471,7 @@ fn init_errors_when_waap_already_exists() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains(".waap"), "{stderr}");
+    assert!(stderr.contains("state directory"), "{stderr}");
 }
 
 #[test]

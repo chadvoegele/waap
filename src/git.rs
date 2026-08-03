@@ -187,6 +187,11 @@ pub(crate) fn initialize_state_worktree(
     state_root.canonicalize()
 }
 
+/// Return the checked-out state branch commit after initialization or adoption.
+pub(crate) fn state_worktree_head(state_root: &Path) -> io::Result<String> {
+    git_stdout(state_root, &os_args(["rev-parse", "HEAD"]))
+}
+
 fn ensure_safe_initialization(
     repository_root: &Path,
     state_root: &Path,

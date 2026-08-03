@@ -1,187 +1,237 @@
-//! End-to-end tests for root resolution and command validation.
+//! End-to-end tests for central `waap init` setup.
 
 mod common;
 
+use std::fs;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use tempfile::tempdir;
 
-use common::{init_repo, isolate_git_config};
+use common::{git, init_repo, isolate_git_config};
 
-fn waap(cwd: &Path, stdin: &str, args: &[&str]) -> Output {
-    waap_with_log_level(cwd, stdin, args, None)
-}
-
-fn waap_with_log_level(cwd: &Path, stdin: &str, args: &[&str], log_level: Option<&str>) -> Output {
-    use std::io::Write;
-
+fn waap(cwd: &Path, args: &[&str], home: Option<&Path>) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_waap"));
     isolate_git_config(&mut command);
     command.env_remove("WAAP_LOG_LEVEL");
-    if let Some(log_level) = log_level {
-        command.env("WAAP_LOG_LEVEL", log_level);
+    if let Some(home) = home {
+        command.env("HOME", home);
     }
-    let mut child = command
+    command
         .current_dir(cwd)
         .args(args)
-        .stdin(Stdio::piped())
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
+        .output()
         .unwrap()
-        .write_all(stdin.as_bytes())
-        .unwrap();
-    child.wait_with_output().unwrap()
-}
-
-fn stdout(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-#[test]
-fn verbose_logs_resolved_root() {
-    let dir = tempdir().unwrap();
-    init_repo(dir.path());
-    assert!(waap(dir.path(), "", &["init"]).status.success());
+fn derived_state_directory(home: &Path, repository: &Path) -> std::path::PathBuf {
+    home.join(".local/state/waap/data").join(
+        repository
+            .canonicalize()
+            .unwrap()
+            .strip_prefix("/")
+            .unwrap(),
+    )
+}
 
-    let output = waap(dir.path(), "", &["--verbose", "check"]);
-
-    assert!(output.status.success(), "{}", stderr(&output));
-    assert!(stderr(&output).contains(&format!(
-        "resolved waap root: {}",
-        dir.path().canonicalize().unwrap().display()
-    )));
+fn bare_remote(parent: &Path) -> std::path::PathBuf {
+    let remote = parent.join("remote.git");
+    let mut command = Command::new("git");
+    isolate_git_config(&mut command);
+    assert!(command
+        .args(["init", "-q", "--bare", remote.to_str().unwrap()])
+        .status()
+        .unwrap()
+        .success());
+    remote
 }
 
 #[test]
-fn waap_log_level_enables_debug_logging() {
-    let dir = tempdir().unwrap();
-    init_repo(dir.path());
-    assert!(waap(dir.path(), "", &["init"]).status.success());
-
-    let output = waap_with_log_level(dir.path(), "", &["check"], Some("debug"));
-
-    assert!(output.status.success(), "{}", stderr(&output));
-    assert!(stderr(&output).contains("resolved waap root:"));
-}
-
-#[test]
-fn verbose_overrides_log_level_and_preserves_json_stdout() {
-    let dir = tempdir().unwrap();
-    init_repo(dir.path());
-    assert!(waap(dir.path(), "", &["init"]).status.success());
-
-    let output = waap_with_log_level(
-        dir.path(),
-        "",
-        &["--verbose", "--output-format", "json", "check"],
-        Some("off"),
-    );
-
-    assert!(output.status.success(), "{}", stderr(&output));
-    assert!(stderr(&output).contains("resolved waap root:"));
-    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
-}
-
-#[test]
-fn init_from_subdirectory_uses_git_root() {
-    let dir = tempdir().unwrap();
-    init_repo(dir.path());
-    let sub = dir.path().join("deep/nested");
-    std::fs::create_dir_all(&sub).unwrap();
-
-    let output = waap(&sub, "", &["init"]);
-
-    assert!(output.status.success(), "{}", stdout(&output));
-    assert!(dir.path().join(".waap").is_dir());
-    assert!(!sub.join(".waap").exists());
-}
-
-#[test]
-fn init_with_explicit_root_uses_that_directory() {
-    let dir = tempdir().unwrap();
-    init_repo(dir.path());
-    let project = dir.path().join("nested-project");
-    std::fs::create_dir_all(&project).unwrap();
+fn fresh_init_uses_derived_state_and_leaves_application_unchanged() {
+    let repository = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    init_repo(repository.path());
+    let application_head = git(repository.path(), &["rev-parse", "HEAD"]);
+    let expected_state = derived_state_directory(home.path(), repository.path());
 
     let output = waap(
-        dir.path(),
-        "",
-        &["--waap-root", project.to_str().unwrap(), "init"],
+        repository.path(),
+        &["--output-format", "json", "init"],
+        Some(home.path()),
     );
 
-    assert!(output.status.success(), "{}", stdout(&output));
-    assert!(project.join(".waap").is_dir());
-    assert!(!dir.path().join(".waap").exists());
+    assert!(output.status.success(), "{}", stderr(&output));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["state_directory"],
+        expected_state.display().to_string()
+    );
+    assert_eq!(
+        report["commit"],
+        git(&expected_state, &["rev-parse", "HEAD"])
+    );
+    assert!(expected_state.join("agents").is_dir());
+    assert!(expected_state.join("tickets").is_dir());
+    assert_eq!(
+        git(repository.path(), &["rev-parse", "HEAD"]),
+        application_head
+    );
+    assert!(git(repository.path(), &["status", "--porcelain"]).is_empty());
+    assert!(!repository.path().join(".waap").exists());
 }
 
 #[test]
-fn check_fails_when_waap_is_missing() {
-    let dir = tempdir().unwrap();
-    init_repo(dir.path());
+fn init_uses_an_exact_override_target() {
+    let repository = tempdir().unwrap();
+    let state_parent = tempdir().unwrap();
+    let state = state_parent.path().join("exact-state");
+    init_repo(repository.path());
+    let application_head = git(repository.path(), &["rev-parse", "HEAD"]);
 
-    let output = waap(dir.path(), "", &["check"]);
+    let output = waap(
+        repository.path(),
+        &["--waap-root", state.to_str().unwrap(), "init"],
+        None,
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(String::from_utf8_lossy(&output.stdout).contains(&format!(
+        "State directory: {}",
+        state.canonicalize().unwrap().display()
+    )));
+    assert_eq!(
+        git(repository.path(), &["rev-parse", "HEAD"]),
+        application_head
+    );
+    assert!(state.join("agents").is_dir());
+    assert!(state.join("tickets").is_dir());
+}
+
+#[test]
+fn init_adopts_verified_origin_state_without_changing_the_application() {
+    let repository = tempdir().unwrap();
+    let remote_parent = tempdir().unwrap();
+    let source = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    let remote = bare_remote(remote_parent.path());
+    init_repo(repository.path());
+    init_repo(source.path());
+    git(source.path(), &["switch", "--orphan", "waap"]);
+    fs::create_dir_all(source.path().join("agents/aa-one")).unwrap();
+    fs::create_dir_all(source.path().join("tickets/tt-one")).unwrap();
+    fs::write(source.path().join("agents/aa-one/agent.md"), "+++").unwrap();
+    fs::write(source.path().join("tickets/tt-one/ticket.md"), "+++").unwrap();
+    git(source.path(), &["add", "agents", "tickets"]);
+    git(source.path(), &["commit", "-q", "-m", "remote state"]);
+    let remote_head = git(source.path(), &["rev-parse", "HEAD"]);
+    git(
+        source.path(),
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(source.path(), &["push", "-q", "origin", "waap"]);
+    git(
+        repository.path(),
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    let application_head = git(repository.path(), &["rev-parse", "HEAD"]);
+    let state = derived_state_directory(home.path(), repository.path());
+
+    let output = waap(repository.path(), &["init"], Some(home.path()));
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(git(&state, &["rev-parse", "HEAD"]), remote_head);
+    assert!(state.join("agents/aa-one/agent.md").is_file());
+    assert_eq!(
+        git(
+            repository.path(),
+            &["config", "--get", "branch.waap.remote"]
+        ),
+        "origin"
+    );
+    assert_eq!(
+        git(repository.path(), &["rev-parse", "HEAD"]),
+        application_head
+    );
+}
+
+#[test]
+fn unreachable_origin_fails_before_creating_state() {
+    let repository = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    init_repo(repository.path());
+    let state = derived_state_directory(home.path(), repository.path());
+    let application_head = git(repository.path(), &["rev-parse", "HEAD"]);
+    git(
+        repository.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            repository.path().join("missing-remote").to_str().unwrap(),
+        ],
+    );
+
+    let output = waap(repository.path(), &["init"], Some(home.path()));
 
     assert!(!output.status.success());
-    assert!(stdout(&output).contains("no waap project found; run 'waap init'"));
+    assert!(stderr(&output).contains("ls-remote"), "{}", stderr(&output));
+    assert!(!state.exists());
+    assert!(git(repository.path(), &["branch", "--list", "waap"]).is_empty());
+    assert_eq!(
+        git(repository.path(), &["rev-parse", "HEAD"]),
+        application_head
+    );
 }
 
 #[test]
-fn agent_and_ticket_commands_do_not_initialize_missing_state() {
-    let dir = tempdir().unwrap();
-    init_repo(dir.path());
+fn init_rejects_existing_state_idempotently() {
+    let repository = tempdir().unwrap();
+    let state_parent = tempdir().unwrap();
+    let state = state_parent.path().join("state");
+    init_repo(repository.path());
+    assert!(waap(
+        repository.path(),
+        &["--waap-root", state.to_str().unwrap(), "init"],
+        None
+    )
+    .status
+    .success());
+    let state_head = git(&state, &["rev-parse", "HEAD"]);
+    let application_head = git(repository.path(), &["rev-parse", "HEAD"]);
 
-    let agent = waap(dir.path(), "# Agent\n", &["agent", "new"]);
-    let ticket = waap(
-        dir.path(),
-        "# Ticket\n",
-        &["ticket", "new", "--name", "Task"],
+    let output = waap(
+        repository.path(),
+        &["--waap-root", state.to_str().unwrap(), "init"],
+        None,
     );
 
-    assert!(!agent.status.success());
-    assert!(!ticket.status.success());
-    assert!(stderr(&agent).contains("run 'waap init'"));
-    assert!(stderr(&ticket).contains("run 'waap init'"));
-    assert!(!dir.path().join(".waap").exists());
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("setup-only"));
+    assert_eq!(git(&state, &["rev-parse", "HEAD"]), state_head);
+    assert_eq!(
+        git(repository.path(), &["rev-parse", "HEAD"]),
+        application_head
+    );
 }
 
 #[test]
-fn agent_and_ticket_commands_do_not_operate_on_invalid_state() {
-    let dir = tempdir().unwrap();
-    init_repo(dir.path());
-    assert!(waap(dir.path(), "", &["init"]).status.success());
-    std::fs::create_dir_all(dir.path().join(".waap/agents/invalid-agent")).unwrap();
+fn init_rejects_legacy_state_without_an_override() {
+    let repository = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    init_repo(repository.path());
+    fs::create_dir_all(repository.path().join(".waap/agents")).unwrap();
+    let state = derived_state_directory(home.path(), repository.path());
 
-    let agent = waap(dir.path(), "# Agent\n", &["agent", "new"]);
-    let ticket = waap(
-        dir.path(),
-        "# Ticket\n",
-        &["ticket", "new", "--name", "Task"],
-    );
+    let output = waap(repository.path(), &["init"], Some(home.path()));
 
-    assert!(!agent.status.success());
-    assert!(!ticket.status.success());
-    assert!(stderr(&agent).contains("must be named as an agent id"));
-    assert!(stderr(&ticket).contains("must be named as an agent id"));
-    assert_eq!(
-        std::fs::read_dir(dir.path().join(".waap/agents"))
-            .unwrap()
-            .count(),
-        1
-    );
-    assert_eq!(
-        std::fs::read_dir(dir.path().join(".waap/tickets"))
-            .unwrap()
-            .count(),
-        0
-    );
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("legacy state"));
+    assert!(!state.exists());
 }

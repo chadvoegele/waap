@@ -14,7 +14,7 @@ use crate::agent::{
 use crate::check::{check_waap, print_check_errors, print_check_result};
 use crate::cli::{AgentCommand, Cli, Command, TicketCommand};
 use crate::init::{init_project, print_init_report};
-use crate::root::resolve_waap_root;
+use crate::root::{resolve_init_project_context, resolve_waap_root};
 use crate::ticket::{
     create_ticket, get_ticket, list_tickets, print_ticket_get_report, print_ticket_list,
     print_ticket_report, print_updated_ticket_report, update_ticket,
@@ -47,6 +47,26 @@ pub(crate) fn run() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    if matches!(&cli.command, Command::Init) {
+        let context = match resolve_init_project_context(&cwd, cli.waap_root.as_deref()) {
+            Ok(context) => context,
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::from(1);
+            }
+        };
+        log::debug!("resolved state directory: {}", context.state_root.display());
+        return match init_project(&context, cli.waap_root.is_some()) {
+            Ok(report) => {
+                print_init_report(&cli.output_format, &report);
+                ExitCode::SUCCESS
+            }
+            Err(error) => command_error("failed to initialize waap project", error),
+        };
+    }
+
+    // Keep legacy command dispatch until the central-state migration is
+    // activated for each command.
     let waap_root = match resolve_waap_root(&cwd, cli.waap_root.as_deref()) {
         Ok(root) => root,
         Err(error) => {
@@ -66,13 +86,7 @@ pub(crate) fn run() -> ExitCode {
     }
 
     match cli.command {
-        Command::Init => match init_project(waap_root) {
-            Ok(report) => {
-                print_init_report(&cli.output_format, &report);
-                ExitCode::SUCCESS
-            }
-            Err(error) => command_error("failed to initialize waap project", error),
-        },
+        Command::Init => unreachable!("waap init returns after central-state setup"),
         Command::Check => {
             let errors = check_waap(waap_root);
             print_check_result(&cli.output_format, &errors);
