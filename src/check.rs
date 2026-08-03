@@ -1,12 +1,17 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
 use crate::agent::{is_agent_id, AgentMetadata};
 use crate::cli::OutputFormat;
 use crate::frontmatter::parse_frontmatter;
+use crate::git::{
+    fetch_origin_state_branch, has_origin, inspect_state_worktree, remote_only_state_commit_count,
+    state_worktree_changed_paths, validate_state_history, OriginStateBranch, STATE_BRANCH,
+};
+use crate::root::ProjectContext;
 use crate::ticket::{is_ticket_id, TicketMetadata};
 
 pub(crate) fn check_waap(waap_root: &Path) -> Vec<String> {
@@ -55,30 +60,196 @@ fn check_state_directories(
     errors
 }
 
-pub(crate) fn print_check_result(output_format: &OutputFormat, errors: &[String]) {
-    println!("{}", format_check_result(output_format, errors));
+#[derive(Debug)]
+pub(crate) struct CentralCheckReport {
+    pub(crate) state_directory: PathBuf,
+    pub(crate) errors: Vec<String>,
+    pub(crate) warnings: Vec<String>,
+}
+
+/// Validate the central state checkout and the Git metadata that makes it the
+/// repository's sole waap state. This never stages, commits, or repairs state.
+pub(crate) fn check_central_state(
+    context: &ProjectContext,
+    has_explicit_state_root: bool,
+) -> CentralCheckReport {
+    let state_directory = context.state_root.clone();
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    let legacy_state = context.invocation_worktree_root.join(".waap");
+
+    if !has_explicit_state_root && legacy_state.exists() {
+        if state_directory.exists() {
+            errors.push(format!(
+                "central state directory {} and legacy state {} coexist; run waap repair after reconciling them",
+                state_directory.display(),
+                legacy_state.display()
+            ));
+        } else {
+            errors.push(format!(
+                "legacy state {} requires migration; run waap repair",
+                legacy_state.display()
+            ));
+        }
+        return CentralCheckReport {
+            state_directory,
+            errors,
+            warnings,
+        };
+    }
+
+    match inspect_state_worktree(&context.primary_repository_root, &state_directory) {
+        Ok(inspection) => {
+            if inspection.local_branch.is_none() {
+                errors.push(format!(
+                    "local branch {STATE_BRANCH} is missing; run waap init or waap repair"
+                ));
+            } else if let Err(error) =
+                validate_state_history(&context.primary_repository_root, STATE_BRANCH)
+            {
+                errors.push(error.to_string());
+            }
+
+            match &inspection.expected_path_registration {
+                Some(registration) if registration.branch.as_deref() == Some("refs/heads/waap") => {}
+                Some(registration) => errors.push(format!(
+                    "expected state worktree {} is registered on {}; it must check out {STATE_BRANCH}; run waap repair",
+                    state_directory.display(),
+                    registration.branch.as_deref().unwrap_or("a detached HEAD")
+                )),
+                None if inspection.waap_checkouts.is_empty() => errors.push(format!(
+                    "expected state worktree {} is not registered; run waap repair",
+                    state_directory.display()
+                )),
+                None => {
+                    let paths = inspection
+                        .waap_checkouts
+                        .iter()
+                        .map(|registration| registration.path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    errors.push(format!(
+                        "expected state worktree {} is not registered; {STATE_BRANCH} is registered at {paths}; run waap repair",
+                        state_directory.display()
+                    ));
+                }
+            }
+            if inspection.waap_checkouts.len() > 1 {
+                errors.push(format!(
+                    "branch {STATE_BRANCH} is registered in multiple worktrees: {}; run waap repair",
+                    inspection
+                        .waap_checkouts
+                        .iter()
+                        .map(|registration| registration.path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+
+            match has_origin(&context.primary_repository_root) {
+                Ok(true) => {
+                    if inspection.upstream_remote.as_deref() != Some("origin")
+                        || inspection.upstream_merge.as_deref() != Some("refs/heads/waap")
+                    {
+                        errors.push(
+                            "branch waap must track origin/waap; run waap repair".to_string(),
+                        );
+                    }
+                }
+                Ok(false) => {
+                    if inspection.upstream_remote.is_some() || inspection.upstream_merge.is_some() {
+                        errors.push(
+                            "branch waap has an upstream but remote origin is absent; remove the stale upstream or add origin, then run waap repair"
+                                .to_string(),
+                        );
+                    }
+                }
+                Err(error) => errors.push(format!("failed to inspect Git remotes: {error}")),
+            }
+
+            match fetch_origin_state_branch(&context.primary_repository_root) {
+                Ok(OriginStateBranch::Present) if inspection.local_branch.is_some() => {
+                    match remote_only_state_commit_count(&context.primary_repository_root) {
+                        Ok(0) => {}
+                        Ok(count) => warnings.push(format!(
+                            "origin/waap has {count} commit(s) not in local waap; update or rebase local state"
+                        )),
+                        Err(error) => warnings.push(format!(
+                            "could not compare local waap with origin/waap: {error}"
+                        )),
+                    }
+                }
+                Ok(OriginStateBranch::Present | OriginStateBranch::NoOrigin | OriginStateBranch::Missing) => {}
+                Err(error) => warnings.push(format!(
+                    "could not fetch origin/waap to check remote state: {error}"
+                )),
+            }
+        }
+        Err(error) => errors.push(format!("failed to inspect state worktree: {error}")),
+    }
+
+    errors.extend(check_state(&state_directory));
+    if state_directory.is_dir() {
+        match state_worktree_changed_paths(&state_directory) {
+            Ok(paths) if !paths.is_empty() => errors.push(format!(
+                "state worktree has staged, unstaged, or untracked changes: {}; commit them on waap or revert them before retrying",
+                paths.join(", ")
+            )),
+            Ok(_) => {}
+            Err(error) => errors.push(format!(
+                "failed to inspect state worktree changes at {}: {error}",
+                state_directory.display()
+            )),
+        }
+    }
+
+    CentralCheckReport {
+        state_directory,
+        errors,
+        warnings,
+    }
+}
+
+pub(crate) fn print_central_check_result(
+    output_format: &OutputFormat,
+    report: &CentralCheckReport,
+) {
+    match output_format {
+        OutputFormat::Json => println!(
+            "{}",
+            json!({
+                "state_directory": report.state_directory.display().to_string(),
+                "valid": report.errors.is_empty(),
+                "errors": report.errors,
+            })
+        ),
+        OutputFormat::HumanReadable => {
+            println!("State directory: {}", report.state_directory.display());
+            if report.errors.is_empty() {
+                println!("OK: waap state is valid");
+            } else {
+                println!("ERROR: waap state is invalid");
+                for error in &report.errors {
+                    println!("- {error}");
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn print_check_errors(output_format: &OutputFormat, errors: &[String]) {
-    eprintln!("{}", format_check_result(output_format, errors));
-}
-
-fn format_check_result(output_format: &OutputFormat, errors: &[String]) -> String {
     match output_format {
-        OutputFormat::Json => json!({
-            "valid": errors.is_empty(),
-            "errors": errors,
-        })
-        .to_string(),
+        OutputFormat::Json => eprintln!(
+            "{}",
+            json!({
+                "valid": false,
+                "errors": errors,
+            })
+        ),
         OutputFormat::HumanReadable => {
-            if errors.is_empty() {
-                "OK: .waap is valid".to_string()
-            } else {
-                let mut output = "ERROR: .waap is invalid".to_string();
-                for error in errors {
-                    output.push_str(&format!("\n- {error}"));
-                }
-                output
+            eprintln!("ERROR: .waap is invalid");
+            for error in errors {
+                eprintln!("- {error}");
             }
         }
     }

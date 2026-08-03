@@ -1,5 +1,6 @@
 #![allow(dead_code)] // Central-state primitives are intentionally unwired until activation.
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
@@ -435,9 +436,64 @@ fn worktree_registrations(repository_root: &Path) -> io::Result<Vec<WorktreeRegi
     Ok(registrations)
 }
 
-fn has_origin(repository_root: &Path) -> io::Result<bool> {
+pub(crate) fn has_origin(repository_root: &Path) -> io::Result<bool> {
     let remotes = git_stdout(repository_root, &os_args(["remote"]))?;
     Ok(remotes.lines().any(|remote| remote == "origin"))
+}
+
+/// Count commits present on `origin/waap` but not local `waap`.
+pub(crate) fn remote_only_state_commit_count(repository_root: &Path) -> io::Result<usize> {
+    let commits = git_stdout(
+        repository_root,
+        &os_args(["rev-list", "--count", "waap..origin/waap"]),
+    )?;
+    commits.parse::<usize>().map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid remote waap commit count {commits:?}: {error}"),
+        )
+    })
+}
+
+/// List staged, unstaged, untracked, and conflicted paths in the state
+/// worktree. Ignored files are intentionally omitted.
+pub(crate) fn state_worktree_changed_paths(state_root: &Path) -> io::Result<Vec<String>> {
+    let output = git_command(
+        state_root,
+        &os_args(["status", "--porcelain=v1", "--untracked-files=all", "-z"]),
+    )?;
+    if !output.status.success() {
+        return Err(run_git_error(
+            &os_args(["status", "--porcelain=v1", "--untracked-files=all", "-z"]),
+            &output,
+        ));
+    }
+
+    let mut paths = BTreeSet::new();
+    let mut entries = output.stdout.split(|byte| *byte == 0);
+    while let Some(entry) = entries.next() {
+        if entry.is_empty() {
+            continue;
+        }
+        if entry.len() < 4 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid git status porcelain output",
+            ));
+        }
+        let status = &entry[..2];
+        paths.insert(String::from_utf8_lossy(&entry[3..]).into_owned());
+        if matches!(status[0], b'R' | b'C') || matches!(status[1], b'R' | b'C') {
+            let Some(previous_path) = entries.next() else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid renamed-path git status porcelain output",
+                ));
+            };
+            paths.insert(String::from_utf8_lossy(previous_path).into_owned());
+        }
+    }
+    Ok(paths.into_iter().collect())
 }
 
 fn ref_hash(repository_root: &Path, reference: &str) -> io::Result<Option<String>> {

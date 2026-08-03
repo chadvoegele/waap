@@ -11,11 +11,13 @@ use crate::agent::{
     print_agent_stop_report, print_created_agent_report, print_updated_agent_report, run_agent,
     stop_agents_with_systems, update_agent,
 };
-use crate::check::{check_waap, print_check_errors, print_check_result};
+use crate::check::{
+    check_central_state, check_waap, print_central_check_result, print_check_errors,
+};
 use crate::cli::{AgentCommand, Cli, Command, TicketCommand};
 use crate::init::{init_project, print_init_report};
 use crate::repair::{print_repair_report, repair_project};
-use crate::root::{resolve_init_project_context, resolve_waap_root};
+use crate::root::{resolve_check_project_context, resolve_init_project_context, resolve_waap_root};
 use crate::ticket::{
     create_ticket, get_ticket, list_tickets, print_ticket_get_report, print_ticket_list,
     print_ticket_report, print_updated_ticket_report, update_ticket,
@@ -76,6 +78,27 @@ pub(crate) fn run() -> ExitCode {
         };
     }
 
+    if matches!(&cli.command, Command::Check) {
+        let context = match resolve_check_project_context(&cwd, cli.waap_root.as_deref()) {
+            Ok(context) => context,
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::from(1);
+            }
+        };
+        let report = check_central_state(&context, cli.waap_root.is_some());
+        for warning in &report.warnings {
+            eprintln!("WARNING: {warning}");
+        }
+        let valid = report.errors.is_empty();
+        print_central_check_result(&cli.output_format, &report);
+        return if valid {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
+        };
+    }
+
     // Keep legacy command dispatch until the central-state migration is
     // activated for each command.
     let waap_root = match resolve_waap_root(&cwd, cli.waap_root.as_deref()) {
@@ -100,15 +123,7 @@ pub(crate) fn run() -> ExitCode {
         Command::Init | Command::Repair => {
             unreachable!("waap init and repair return after project setup resolution")
         }
-        Command::Check => {
-            let errors = check_waap(waap_root);
-            print_check_result(&cli.output_format, &errors);
-            if errors.is_empty() {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(1)
-            }
-        }
+        Command::Check => unreachable!("waap check returns after central-state resolution"),
         Command::Agent { command } => match command {
             AgentCommand::New { name } => match create_agent(waap_root, name.as_deref()) {
                 Ok(report) => {

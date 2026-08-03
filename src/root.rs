@@ -46,6 +46,16 @@ pub(crate) fn resolve_project_context(
     resolve_project_context_inner(start, explicit_state_root, false)
 }
 
+/// Resolve a context for `waap check`. Check must report its selected state
+/// directory even when it is absent or malformed, so explicit paths do not
+/// have to contain the state directories yet.
+pub(crate) fn resolve_check_project_context(
+    start: &Path,
+    explicit_state_root: Option<&Path>,
+) -> io::Result<ProjectContext> {
+    resolve_project_context_inner(start, explicit_state_root, true)
+}
+
 /// Resolve a context for `waap init`. Unlike regular explicit resolution, an
 /// explicit state-root target may not exist yet.
 pub(crate) fn resolve_init_project_context(

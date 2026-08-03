@@ -16,8 +16,8 @@ pub(crate) struct Cli {
     #[arg(long, value_enum, default_value = "human-readable", global = true)]
     pub(crate) output_format: OutputFormat,
 
-    /// Waap project root. When omitted, use the nearest ancestor containing `.waap/`, bounded by
-    /// and falling back to the git root.
+    /// Waap state directory. When omitted, derive the central state directory from the current
+    /// repository's primary checkout.
     #[arg(long, global = true)]
     pub(crate) waap_root: Option<PathBuf>,
 
@@ -35,7 +35,7 @@ pub(crate) enum OutputFormat {
 pub(crate) enum Command {
     /// Initialize a new waap project.
     Init,
-    /// Validate .waap state.
+    /// Validate waap state.
     Check,
     /// Repair central state or migrate legacy .waap state.
     Repair,
