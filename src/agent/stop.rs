@@ -9,8 +9,9 @@ use crate::agent::{
     agent_report_json, print_agent_report_human, read_agent_record, transition_agent_status,
     write_agent_record, AgentReport, AgentStatus,
 };
+use crate::check::check_waap;
 use crate::cli::OutputFormat;
-use crate::git::commit_paths;
+use crate::git::{StateMutationContext, StateTransaction};
 use crate::record::{list_record_ids, WaapRecordKind};
 
 #[derive(Debug)]
@@ -44,7 +45,13 @@ pub(crate) fn stop_agents_with_systems(
     waap_root: &Path,
     agent_id: Option<&str>,
 ) -> io::Result<AgentStopReport> {
-    let stopped_agents = stop_agents(waap_root, agent_id)?;
+    let context = StateMutationContext::legacy(waap_root)?;
+    let mut transaction = StateTransaction::begin(context, check_waap)?;
+    let state_root = transaction.state_root().to_path_buf();
+    for id in list_record_ids(&state_root, WaapRecordKind::Agent)? {
+        transaction.snapshot_path(&crate::agent::agent_path(&state_root, &id))?;
+    }
+    let stopped_agents = stop_agents(&state_root, agent_id)?;
 
     let commit = if stopped_agents.is_empty() {
         None
@@ -58,17 +65,14 @@ pub(crate) fn stop_agents_with_systems(
             .map(|report| report.agent_id.as_str())
             .collect();
         Some(
-            commit_paths(
-                waap_root,
-                &paths,
-                &format!("waap agent stop {}", ids.join(" ")),
-            )
-            .map_err(|error| {
-                io::Error::new(
-                    error.kind(),
-                    format!("failed to commit waap state change: {error}"),
-                )
-            })?,
+            transaction
+                .commit(&paths, &format!("waap agent stop {}", ids.join(" ")))
+                .map_err(|error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!("failed to commit waap state change: {error}"),
+                    )
+                })?,
         )
     };
 

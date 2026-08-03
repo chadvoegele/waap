@@ -8,8 +8,9 @@ use crate::agent::{
     transition_agent_status, write_agent_record, AgentMetadata, AgentReport, AgentStatus,
     AgentSystem,
 };
+use crate::check::check_waap;
 use crate::cli::OutputFormat;
-use crate::git::{commit_paths, create_worktree, remove_worktree};
+use crate::git::{create_worktree, remove_worktree, StateMutationContext, StateTransaction};
 
 fn print_run_agent_report(
     output_format: &OutputFormat,
@@ -201,12 +202,16 @@ fn mark_running(
     metadata: &mut AgentMetadata,
     body: &str,
 ) -> io::Result<()> {
+    let context = StateMutationContext::legacy(waap_root)?;
+    let mut transaction = StateTransaction::begin(context, check_waap)?;
+    let state_root = transaction.state_root().to_path_buf();
+    let path = crate::agent::agent_path(&state_root, agent_id);
+    transaction.snapshot_path(&path)?;
     transition_agent_status(metadata, AgentStatus::Running)?;
-    write_agent_record(waap_root, agent_id, metadata, body)?;
+    write_agent_record(&state_root, agent_id, metadata, body)?;
 
-    let report = load_agent_report(waap_root, agent_id)?;
-    let commit = commit_paths(
-        waap_root,
+    let report = load_agent_report(&state_root, agent_id)?;
+    let commit = transaction.commit(
         &[report.path.as_path()],
         &format!("waap agent run {agent_id}"),
     )?;
@@ -221,7 +226,10 @@ fn update_agent_session(
     session_id: &str,
     system: AgentSystem,
 ) -> io::Result<()> {
-    let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
+    let context = StateMutationContext::legacy(waap_root)?;
+    let mut transaction = StateTransaction::begin(context, check_waap)?;
+    let state_root = transaction.state_root().to_path_buf();
+    let (mut metadata, body) = read_agent_record(&state_root, agent_id)?;
     if metadata.status != AgentStatus::Running.as_str() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -250,11 +258,12 @@ fn update_agent_session(
     let header = format!("{} session", system.as_str());
     metadata.session_id = Some(session_id.to_string());
     metadata.system = Some(system.clone());
-    write_agent_record(waap_root, agent_id, &metadata, &body)?;
+    let path = crate::agent::agent_path(&state_root, agent_id);
+    transaction.snapshot_path(&path)?;
+    write_agent_record(&state_root, agent_id, &metadata, &body)?;
 
-    let report = load_agent_report(waap_root, agent_id)?;
-    let commit = commit_paths(
-        waap_root,
+    let report = load_agent_report(&state_root, agent_id)?;
+    let commit = transaction.commit(
         &[report.path.as_path()],
         &format!("waap agent {} session {agent_id}", system.as_str()),
     )?;
@@ -296,30 +305,19 @@ fn transition_and_commit_status(
     header: &str,
     commit_message: &str,
 ) -> io::Result<()> {
-    let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
+    let context = StateMutationContext::legacy(waap_root)?;
+    let mut transaction = StateTransaction::begin(context, check_waap)?;
+    let state_root = transaction.state_root().to_path_buf();
+    let (mut metadata, body) = read_agent_record(&state_root, agent_id)?;
     if metadata.status == status.as_str() {
         return Ok(());
     }
-    let previous_metadata = metadata.clone();
     transition_agent_status(&mut metadata, status)?;
-    let persistence_result = (|| {
-        write_agent_record(waap_root, agent_id, &metadata, &body)?;
-        let report = load_agent_report(waap_root, agent_id)?;
-        let commit = commit_paths(waap_root, &[report.path.as_path()], commit_message)?;
-        Ok((report, commit))
-    })();
-    let (report, commit) = match persistence_result {
-        Ok(persisted) => persisted,
-        Err(primary) => {
-            return match write_agent_record(waap_root, agent_id, &previous_metadata, &body) {
-                Ok(()) => Err(primary),
-                Err(rollback_error) => Err(io::Error::new(
-                    primary.kind(),
-                    format!("{primary}; failed to restore previous agent status: {rollback_error}"),
-                )),
-            };
-        }
-    };
+    let path = crate::agent::agent_path(&state_root, agent_id);
+    transaction.snapshot_path(&path)?;
+    write_agent_record(&state_root, agent_id, &metadata, &body)?;
+    let report = load_agent_report(&state_root, agent_id)?;
+    let commit = transaction.commit(&[report.path.as_path()], commit_message)?;
     print_run_agent_report(output_format, header, &report, &commit);
     Ok(())
 }

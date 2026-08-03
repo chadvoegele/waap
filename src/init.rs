@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
+use crate::check::check_waap;
 use crate::cli::OutputFormat;
-use crate::git::{commit_paths, is_inside_git_work_tree, Committed};
+use crate::git::{is_inside_git_work_tree, Committed, StateMutationContext, StateTransaction};
 
 #[derive(Debug)]
 pub(crate) struct InitReport {
@@ -32,18 +33,20 @@ pub(crate) fn init_project(waap_root: &Path) -> io::Result<Committed<InitReport>
         ));
     }
 
+    let context = StateMutationContext::legacy(waap_root)?;
+    let mut transaction = StateTransaction::begin(context, check_uninitialized_or_valid_waap)?;
+    let waap_dir = transaction.state_root().join(".waap");
+    let marker = waap_dir.join(".gitkeep");
+    transaction.snapshot_path(&marker)?;
     fs::create_dir_all(waap_dir.join("agents"))?;
     fs::create_dir_all(waap_dir.join("tickets"))?;
-    let marker = waap_dir.join(".gitkeep");
     fs::write(&marker, "")?;
 
-    let path = waap_root
-        .canonicalize()
-        .unwrap_or_else(|_| waap_root.to_path_buf());
-
+    let path = transaction.state_root().to_path_buf();
     let report = InitReport { path, marker };
-    let commit =
-        commit_paths(waap_root, &[report.marker.as_path()], "waap init").map_err(|error| {
+    let commit = transaction
+        .commit(&[report.marker.as_path()], "waap init")
+        .map_err(|error| {
             io::Error::new(
                 error.kind(),
                 format!("failed to commit waap state change: {error}"),
@@ -54,6 +57,14 @@ pub(crate) fn init_project(waap_root: &Path) -> io::Result<Committed<InitReport>
         value: report,
         commit,
     })
+}
+
+fn check_uninitialized_or_valid_waap(root: &Path) -> Vec<String> {
+    if root.join(".waap").exists() {
+        check_waap(root)
+    } else {
+        Vec::new()
+    }
 }
 
 pub(crate) fn print_init_report(output_format: &OutputFormat, committed: &Committed<InitReport>) {

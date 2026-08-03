@@ -3,8 +3,9 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use crate::check::check_waap;
 use crate::cli::OutputFormat;
-use crate::git::{commit_paths, Committed};
+use crate::git::{Committed, StateMutationContext, StateTransaction};
 use crate::ticket::{
     is_ticket_id, load_tickets_metadata, print_ticket_report_human, read_ticket_record,
     ticket_path, ticket_report_json, write_ticket_record, TicketReport, TicketStatus,
@@ -35,24 +36,28 @@ pub(crate) fn update_ticket(
     add_depends_on: &[String],
     remove_depends_on: &[String],
 ) -> io::Result<Committed<TicketReport>> {
-    let report = update_ticket_record(
-        waap_root,
+    let context = StateMutationContext::legacy(waap_root)?;
+    let mut transaction = StateTransaction::begin(context, check_waap)?;
+    let state_root = transaction.state_root().to_path_buf();
+    let report = update_ticket_record_in_transaction(
+        &state_root,
         ticket_id,
         set_status,
         add_depends_on,
         remove_depends_on,
+        Some(&mut transaction),
     )?;
-    let commit = commit_paths(
-        waap_root,
-        &[report.path.as_path()],
-        &format!("waap ticket update {}", report.ticket_id),
-    )
-    .map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("failed to commit waap state change: {error}"),
+    let commit = transaction
+        .commit(
+            &[report.path.as_path()],
+            &format!("waap ticket update {}", report.ticket_id),
         )
-    })?;
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("failed to commit waap state change: {error}"),
+            )
+        })?;
 
     Ok(Committed {
         value: report,
@@ -60,12 +65,31 @@ pub(crate) fn update_ticket(
     })
 }
 
+#[cfg(test)]
 fn update_ticket_record(
     waap_root: &Path,
     ticket_id: &str,
     set_status: Option<&TicketStatus>,
     add_depends_on: &[String],
     remove_depends_on: &[String],
+) -> io::Result<TicketReport> {
+    update_ticket_record_in_transaction(
+        waap_root,
+        ticket_id,
+        set_status,
+        add_depends_on,
+        remove_depends_on,
+        None,
+    )
+}
+
+fn update_ticket_record_in_transaction(
+    waap_root: &Path,
+    ticket_id: &str,
+    set_status: Option<&TicketStatus>,
+    add_depends_on: &[String],
+    remove_depends_on: &[String],
+    transaction: Option<&mut StateTransaction>,
 ) -> io::Result<TicketReport> {
     for dep_id in add_depends_on.iter().chain(remove_depends_on.iter()) {
         if !is_ticket_id(dep_id) {
@@ -106,9 +130,11 @@ fn update_ticket_record(
     }
     metadata.depends_on = if deps.is_empty() { None } else { Some(deps) };
 
-    write_ticket_record(waap_root, ticket_id, &metadata, &body)?;
-
     let path = ticket_path(waap_root, ticket_id);
+    if let Some(transaction) = transaction {
+        transaction.snapshot_path(&path)?;
+    }
+    write_ticket_record(waap_root, ticket_id, &metadata, &body)?;
     Ok(TicketReport {
         ticket_id: ticket_id.to_string(),
         path: path.clone(),

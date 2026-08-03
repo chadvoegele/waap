@@ -3,8 +3,9 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
 
+use crate::check::check_waap;
 use crate::cli::OutputFormat;
-use crate::git::{commit_paths, Committed};
+use crate::git::{Committed, StateMutationContext, StateTransaction};
 use crate::record::WaapRecordKind;
 use crate::ticket::{
     available_ticket_id, is_ticket_id, load_tickets_metadata, print_ticket_report_human,
@@ -40,18 +41,27 @@ pub(crate) fn create_ticket(
         .read_to_string(&mut markdown)
         .map_err(|error| io::Error::new(error.kind(), format!("failed to read stdin: {error}")))?;
 
-    let report = create_ticket_with_markdown(waap_root, name, depends_on, &markdown)?;
-    let commit = commit_paths(
-        waap_root,
-        &[report.path.as_path()],
-        &format!("waap ticket new {}", report.ticket_id),
-    )
-    .map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("failed to commit waap state change: {error}"),
+    let context = StateMutationContext::legacy(waap_root)?;
+    let mut transaction = StateTransaction::begin(context, check_waap)?;
+    let state_root = transaction.state_root().to_path_buf();
+    let report = create_ticket_with_markdown_in_transaction(
+        &state_root,
+        name,
+        depends_on,
+        &markdown,
+        Some(&mut transaction),
+    )?;
+    let commit = transaction
+        .commit(
+            &[report.path.as_path()],
+            &format!("waap ticket new {}", report.ticket_id),
         )
-    })?;
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("failed to commit waap state change: {error}"),
+            )
+        })?;
 
     Ok(Committed {
         value: report,
@@ -59,11 +69,22 @@ pub(crate) fn create_ticket(
     })
 }
 
+#[cfg(test)]
 fn create_ticket_with_markdown(
     waap_root: &Path,
     name: Option<&str>,
     depends_on: &[String],
     markdown: &str,
+) -> io::Result<TicketReport> {
+    create_ticket_with_markdown_in_transaction(waap_root, name, depends_on, markdown, None)
+}
+
+fn create_ticket_with_markdown_in_transaction(
+    waap_root: &Path,
+    name: Option<&str>,
+    depends_on: &[String],
+    markdown: &str,
+    transaction: Option<&mut StateTransaction>,
 ) -> io::Result<TicketReport> {
     for id in depends_on {
         if !is_ticket_id(id) {
@@ -104,8 +125,11 @@ fn create_ticket_with_markdown(
         status: "pending".to_string(),
         depends_on: depends_on_opt,
     };
-    write_ticket_record(waap_root, &ticket_id, &metadata, &format!("\n{markdown}"))?;
     let path = ticket_path(waap_root, &ticket_id);
+    if let Some(transaction) = transaction {
+        transaction.snapshot_path(&path)?;
+    }
+    write_ticket_record(waap_root, &ticket_id, &metadata, &format!("\n{markdown}"))?;
     let file_size = fs::metadata(&path)?.len();
 
     Ok(TicketReport {

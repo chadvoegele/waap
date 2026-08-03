@@ -6,8 +6,9 @@ use crate::agent::{
     agent_path, agent_report_json, available_agent_id, print_agent_report_human,
     write_agent_record, AgentMetadata, AgentReport,
 };
+use crate::check::check_waap;
 use crate::cli::OutputFormat;
-use crate::git::{commit_paths, Committed};
+use crate::git::{Committed, StateMutationContext, StateTransaction};
 use crate::record::WaapRecordKind;
 use crate::toml::current_toml_datetime;
 
@@ -38,18 +39,26 @@ pub(crate) fn create_agent(
         .read_to_string(&mut markdown)
         .map_err(|error| io::Error::new(error.kind(), format!("failed to read stdin: {error}")))?;
 
-    let report = create_agent_with_markdown(waap_root, name, &markdown)?;
-    let commit = commit_paths(
-        waap_root,
-        &[report.path.as_path()],
-        &format!("waap agent new {}", report.agent_id),
-    )
-    .map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("failed to commit waap state change: {error}"),
+    let context = StateMutationContext::legacy(waap_root)?;
+    let mut transaction = StateTransaction::begin(context, check_waap)?;
+    let state_root = transaction.state_root().to_path_buf();
+    let report = create_agent_with_markdown_in_transaction(
+        &state_root,
+        name,
+        &markdown,
+        Some(&mut transaction),
+    )?;
+    let commit = transaction
+        .commit(
+            &[report.path.as_path()],
+            &format!("waap agent new {}", report.agent_id),
         )
-    })?;
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("failed to commit waap state change: {error}"),
+            )
+        })?;
 
     Ok(Committed {
         value: report,
@@ -57,10 +66,20 @@ pub(crate) fn create_agent(
     })
 }
 
+#[cfg(test)]
 fn create_agent_with_markdown(
     waap_root: &Path,
     name: Option<&str>,
     markdown: &str,
+) -> io::Result<AgentReport> {
+    create_agent_with_markdown_in_transaction(waap_root, name, markdown, None)
+}
+
+fn create_agent_with_markdown_in_transaction(
+    waap_root: &Path,
+    name: Option<&str>,
+    markdown: &str,
+    transaction: Option<&mut StateTransaction>,
 ) -> io::Result<AgentReport> {
     let agents_dir = WaapRecordKind::Agent.root_path(waap_root);
     let agent_id = available_agent_id(&agents_dir, name)?;
@@ -72,8 +91,11 @@ fn create_agent_with_markdown(
         session_id: None,
         system: None,
     };
-    write_agent_record(waap_root, &agent_id, &metadata, &format!("\n{markdown}"))?;
     let path = agent_path(waap_root, &agent_id);
+    if let Some(transaction) = transaction {
+        transaction.snapshot_path(&path)?;
+    }
+    write_agent_record(waap_root, &agent_id, &metadata, &format!("\n{markdown}"))?;
     let file_size = fs::metadata(&path)?.len();
 
     Ok(AgentReport {

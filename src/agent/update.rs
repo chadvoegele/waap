@@ -6,8 +6,9 @@ use crate::agent::{
     agent_report_json, print_agent_report_human, read_agent_record, transition_agent_status,
     write_agent_record, AgentReport, AgentStatus,
 };
+use crate::check::check_waap;
 use crate::cli::OutputFormat;
-use crate::git::{commit_paths, Committed};
+use crate::git::{Committed, StateMutationContext, StateTransaction};
 
 pub(crate) fn print_updated_agent_report(
     output_format: &OutputFormat,
@@ -33,18 +34,27 @@ pub(crate) fn update_agent(
     set_status: Option<&AgentStatus>,
     set_session_id: Option<&str>,
 ) -> io::Result<Committed<AgentReport>> {
-    let report = update_agent_record(waap_root, agent_id, set_status, set_session_id)?;
-    let commit = commit_paths(
-        waap_root,
-        &[report.path.as_path()],
-        &format!("waap agent update {}", report.agent_id),
-    )
-    .map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("failed to commit waap state change: {error}"),
+    let context = StateMutationContext::legacy(waap_root)?;
+    let mut transaction = StateTransaction::begin(context, check_waap)?;
+    let state_root = transaction.state_root().to_path_buf();
+    let report = update_agent_record_in_transaction(
+        &state_root,
+        agent_id,
+        set_status,
+        set_session_id,
+        Some(&mut transaction),
+    )?;
+    let commit = transaction
+        .commit(
+            &[report.path.as_path()],
+            &format!("waap agent update {}", report.agent_id),
         )
-    })?;
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("failed to commit waap state change: {error}"),
+            )
+        })?;
 
     Ok(Committed {
         value: report,
@@ -52,11 +62,22 @@ pub(crate) fn update_agent(
     })
 }
 
+#[cfg(test)]
 fn update_agent_record(
     waap_root: &Path,
     agent_id: &str,
     set_status: Option<&AgentStatus>,
     set_session_id: Option<&str>,
+) -> io::Result<AgentReport> {
+    update_agent_record_in_transaction(waap_root, agent_id, set_status, set_session_id, None)
+}
+
+fn update_agent_record_in_transaction(
+    waap_root: &Path,
+    agent_id: &str,
+    set_status: Option<&AgentStatus>,
+    set_session_id: Option<&str>,
+    transaction: Option<&mut StateTransaction>,
 ) -> io::Result<AgentReport> {
     if set_status.is_none() && set_session_id.is_none() {
         return Err(io::Error::new(
@@ -96,6 +117,10 @@ fn update_agent_record(
     }
     if let Some(session_id) = set_session_id {
         metadata.session_id = Some(session_id.to_string());
+    }
+    let path = crate::agent::agent_path(waap_root, agent_id);
+    if let Some(transaction) = transaction {
+        transaction.snapshot_path(&path)?;
     }
     write_agent_record(waap_root, agent_id, &metadata, &body)?;
 
