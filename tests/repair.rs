@@ -221,6 +221,21 @@ fn repair_relocates_a_moved_primary_repository_and_preserves_dirty_state() {
 
     fs::rename(&old_repository, &moved_repository).unwrap();
     let expected_state = derived_state_directory(home.path(), &moved_repository);
+    let check = waap(
+        &moved_repository,
+        &["--output-format", "json", "check"],
+        home.path(),
+    );
+    assert!(!check.status.success());
+    let check_report: serde_json::Value = serde_json::from_slice(&check.stdout).unwrap();
+    assert_eq!(
+        check_report["state_directory"],
+        expected_state.display().to_string()
+    );
+    assert!(check_report["errors"]
+        .to_string()
+        .contains(&old_state.display().to_string()));
+
     let output = waap(
         &moved_repository,
         &["--output-format", "json", "repair"],

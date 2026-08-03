@@ -88,6 +88,50 @@ fn fresh_init_uses_derived_state_and_leaves_application_unchanged() {
 }
 
 #[test]
+fn fresh_init_creates_a_parentless_state_history_and_pushes_its_upstream() {
+    let repository = tempdir().unwrap();
+    let remote_parent = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    init_repo(repository.path());
+    let remote = bare_remote(remote_parent.path());
+    git(
+        repository.path(),
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    let application_head = git(repository.path(), &["rev-parse", "HEAD"]);
+    let state = derived_state_directory(home.path(), repository.path());
+
+    let output = waap(repository.path(), &["init"], Some(home.path()));
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(!git(&state, &["rev-list", "--max-parents=0", "waap"]).is_empty());
+    assert!(git(&state, &["rev-list", "--parents", "waap"])
+        .lines()
+        .all(|line| line.split_whitespace().count() == 1));
+    assert!(git(&state, &["log", "--format=", "--name-only", "waap"])
+        .lines()
+        .filter(|path| !path.is_empty())
+        .all(|path| path.starts_with("agents/") || path.starts_with("tickets/")));
+    assert_eq!(
+        git(repository.path(), &["config", "branch.waap.remote"]),
+        "origin"
+    );
+    assert_eq!(
+        git(repository.path(), &["config", "branch.waap.merge"]),
+        "refs/heads/waap"
+    );
+    git(&state, &["push", "-q"]);
+    assert_eq!(
+        git(remote.as_path(), &["rev-parse", "refs/heads/waap"]),
+        git(&state, &["rev-parse", "waap"])
+    );
+    assert_eq!(
+        git(repository.path(), &["rev-parse", "HEAD"]),
+        application_head
+    );
+}
+
+#[test]
 fn init_uses_an_exact_override_target() {
     let repository = tempdir().unwrap();
     let state_parent = tempdir().unwrap();
@@ -219,6 +263,30 @@ fn init_rejects_existing_state_idempotently() {
         git(repository.path(), &["rev-parse", "HEAD"]),
         application_head
     );
+}
+
+#[test]
+fn init_preserves_a_conflicting_application_waap_branch() {
+    let repository = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    init_repo(repository.path());
+    let application_head = git(repository.path(), &["rev-parse", "HEAD"]);
+    let state = derived_state_directory(home.path(), repository.path());
+    git(repository.path(), &["branch", "waap"]);
+
+    let output = waap(repository.path(), &["init"], Some(home.path()));
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("non-state path README.md"));
+    assert_eq!(
+        git(repository.path(), &["rev-parse", "waap"]),
+        application_head
+    );
+    assert_eq!(
+        git(repository.path(), &["rev-parse", "HEAD"]),
+        application_head
+    );
+    assert!(!state.exists());
 }
 
 #[test]
