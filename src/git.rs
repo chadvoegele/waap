@@ -655,6 +655,7 @@ impl StateTransaction {
             } else {
                 None
             },
+            missing_parent_dirs: missing_parent_dirs(path, &self.context.state_root),
         });
         Ok(())
     }
@@ -724,8 +725,36 @@ impl StateTransaction {
                 None => {}
             }
         }
+        for directory in self
+            .snapshots
+            .iter()
+            .flat_map(|snapshot| &snapshot.missing_parent_dirs)
+        {
+            match fs::remove_dir(directory) {
+                Ok(()) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+        }
         Ok(())
     }
+}
+
+fn missing_parent_dirs(path: &Path, state_root: &Path) -> Vec<PathBuf> {
+    let mut directories = Vec::new();
+    let mut current = path.parent();
+    while let Some(directory) = current {
+        if directory == state_root || directory.exists() {
+            break;
+        }
+        directories.push(directory.to_path_buf());
+        current = directory.parent();
+    }
+    directories
 }
 
 impl Drop for StateTransaction {
@@ -743,6 +772,7 @@ impl Drop for StateTransaction {
 struct PathSnapshot {
     path: PathBuf,
     contents: Option<Vec<u8>>,
+    missing_parent_dirs: Vec<PathBuf>,
 }
 
 struct StateLock {
@@ -1002,6 +1032,14 @@ mod tests {
         }
     }
 
+    fn central_state_has_no_new_agent(root: &Path) -> Vec<String> {
+        if root.join("agents/aa-new").exists() {
+            vec!["new agent is invalid".to_string()]
+        } else {
+            central_state_is_valid(root)
+        }
+    }
+
     fn init_central_state_repo(root: &Path) {
         init_repo(root);
         run(root, &["switch", "--orphan", STATE_BRANCH]);
@@ -1076,6 +1114,26 @@ mod tests {
             .contains("central state marker is invalid"));
         assert_eq!(fs::read_to_string(&invalid).unwrap(), "");
         assert!(run(dir.path(), &["diff", "--cached", "--name-only"]).is_empty());
+        assert!(run(dir.path(), &["status", "--porcelain"]).is_empty());
+    }
+
+    #[test]
+    fn state_transaction_rollback_removes_directories_created_for_new_records() {
+        let dir = tempdir().unwrap();
+        init_central_state_repo(dir.path());
+        let path = dir.path().join("agents/aa-new/agent.md");
+        let mut transaction =
+            StateTransaction::begin(central_context(dir.path()), central_state_has_no_new_agent)
+                .unwrap();
+        transaction.snapshot_path(&path).unwrap();
+        write_file(&path, "agent state\n");
+
+        let error = transaction
+            .commit(&[path.as_path()], "must fail")
+            .unwrap_err();
+
+        assert!(error.to_string().contains("new agent is invalid"));
+        assert!(!path.parent().unwrap().exists());
         assert!(run(dir.path(), &["status", "--porcelain"]).is_empty());
     }
 

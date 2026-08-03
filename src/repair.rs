@@ -8,8 +8,9 @@ use serde_json::json;
 use crate::check::{check_state, check_waap};
 use crate::cli::OutputFormat;
 use crate::git::{
-    commit_paths, configure_state_upstream, initialize_state_worktree, query_origin_state_branch,
-    relocate_state_worktree, state_worktree_relocation_source, OriginStateBranch,
+    commit_paths, configure_state_upstream, initialize_state_worktree, inspect_state_worktree,
+    query_origin_state_branch, relocate_state_worktree, state_worktree_relocation_source,
+    validate_state_history, OriginStateBranch, STATE_BRANCH,
 };
 use crate::root::ProjectContext;
 
@@ -28,7 +29,7 @@ pub(crate) fn repair_project(
     has_explicit_state_root: bool,
 ) -> io::Result<RepairReport> {
     if has_explicit_state_root {
-        validate_central_state(&context.state_root)?;
+        validate_registered_central_state(context)?;
         configure_state_upstream(&context.primary_repository_root)?;
         return Ok(RepairReport {
             state_directory: context.state_root.clone(),
@@ -66,7 +67,7 @@ pub(crate) fn repair_project(
                 &source,
                 &context.state_root,
             )?;
-            validate_central_state(&state_directory)?;
+            validate_registered_central_state(context)?;
             configure_state_upstream(&context.primary_repository_root)?;
             Ok(RepairReport {
                 state_directory,
@@ -76,7 +77,7 @@ pub(crate) fn repair_project(
             })
         }
         (false, true, None) => {
-            validate_central_state(&context.state_root)?;
+            validate_registered_central_state(context)?;
             configure_state_upstream(&context.primary_repository_root)?;
             Ok(RepairReport {
                 state_directory: context.state_root.clone(),
@@ -183,6 +184,51 @@ fn validate_legacy_state(invocation_root: &Path, legacy_state: &Path) -> io::Res
             format!("legacy waap state is invalid: {}", errors.join("; ")),
         ))
     }
+}
+
+fn validate_registered_central_state(context: &ProjectContext) -> io::Result<()> {
+    let inspection = inspect_state_worktree(&context.primary_repository_root, &context.state_root)?;
+    if inspection.local_branch.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("local branch {STATE_BRANCH} is missing; run waap init"),
+        ));
+    }
+    validate_state_history(&context.primary_repository_root, STATE_BRANCH)?;
+
+    let expected_branch = format!("refs/heads/{STATE_BRANCH}");
+    match &inspection.expected_path_registration {
+        Some(registration) if registration.branch.as_deref() == Some(&expected_branch) => {}
+        Some(registration) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "state directory {} is registered on {}; it must check out {STATE_BRANCH}",
+                    context.state_root.display(),
+                    registration.branch.as_deref().unwrap_or("a detached HEAD")
+                ),
+            ));
+        }
+        None => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "state directory {} is not a registered {STATE_BRANCH} worktree; run waap init or relocate the existing state with waap repair",
+                    context.state_root.display()
+                ),
+            ));
+        }
+    }
+    if inspection.waap_checkouts.len() != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "branch {STATE_BRANCH} must be checked out only at {}",
+                context.state_root.display()
+            ),
+        ));
+    }
+    validate_central_state(&context.state_root)
 }
 
 fn validate_central_state(state_root: &Path) -> io::Result<()> {

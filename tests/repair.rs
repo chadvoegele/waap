@@ -397,6 +397,28 @@ fn repair_from_a_broken_linked_worktree_requires_the_primary_checkout() {
 }
 
 #[test]
+fn repair_rejects_an_unregistered_state_directory() {
+    let repository = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    init_repo(repository.path());
+    let state = derived_state_directory(home.path(), repository.path());
+    fs::create_dir_all(state.join("agents")).unwrap();
+    fs::create_dir_all(state.join("tickets")).unwrap();
+
+    let output = waap(repository.path(), &["repair"], home.path());
+
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("local branch waap is missing"),
+        "{}",
+        stderr(&output)
+    );
+
+    let check = waap(repository.path(), &["check"], home.path());
+    assert!(!check.status.success());
+}
+
+#[test]
 fn explicit_repair_uses_only_the_selected_state_directory() {
     let repository = tempdir().unwrap();
     let state_parent = tempdir().unwrap();

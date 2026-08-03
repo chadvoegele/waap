@@ -137,8 +137,8 @@ fn run_started_agent(
     collapse_errors(run_result, cleanup_result)
 }
 
-fn build_agent_goal(repository_root: &Path, agent_id: &str) -> String {
-    let instruction_path = repository_root.join(format!(".waap/agents/{agent_id}/agent.md"));
+fn build_agent_goal(state_root: &Path, agent_id: &str) -> String {
+    let instruction_path = crate::agent::agent_path(state_root, agent_id);
     format!(
         "Complete when instructions in {} are satisfied. Use the waap CLI for state changes; do not edit waap state files directly.",
         instruction_path.display()
@@ -873,10 +873,12 @@ mod tests {
             backend.start_calls[0].repository_root,
             source.path().canonicalize().unwrap()
         );
-        assert_eq!(
-            backend.start_calls[0].prompt,
-            build_agent_goal(&state, "aa-00000001")
-        );
+        let instruction_path = state.join("agents/aa-00000001/agent.md");
+        assert!(instruction_path.is_file());
+        assert!(backend.start_calls[0]
+            .prompt
+            .contains(&instruction_path.display().to_string()));
+        assert!(!backend.start_calls[0].prompt.contains("/.waap/agents/"));
         assert!(backend.start_calls[0]
             .worktree_dir
             .starts_with(source.path().canonicalize().unwrap()));
