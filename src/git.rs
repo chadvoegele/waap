@@ -1,4 +1,7 @@
+#![allow(dead_code)] // Central-state primitives are intentionally unwired until activation.
+
 use std::ffi::OsString;
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -32,6 +35,356 @@ pub(crate) fn remove_worktree(repo_root: &Path, relative_path: &Path) -> io::Res
         ],
     )?;
     Ok(())
+}
+
+/// The dedicated branch used for central waap state. These primitives remain
+/// separate from command dispatch until central-state activation.
+pub(crate) const STATE_BRANCH: &str = "waap";
+const STATE_BRANCH_REF: &str = "refs/heads/waap";
+const ORIGIN_STATE_BRANCH_REF: &str = "refs/remotes/origin/waap";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct WorktreeRegistration {
+    pub(crate) path: PathBuf,
+    pub(crate) head: String,
+    pub(crate) branch: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct StateWorktreeInspection {
+    pub(crate) local_branch: Option<String>,
+    pub(crate) expected_path_registration: Option<WorktreeRegistration>,
+    pub(crate) waap_checkouts: Vec<WorktreeRegistration>,
+    pub(crate) upstream_remote: Option<String>,
+    pub(crate) upstream_merge: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OriginStateBranch {
+    NoOrigin,
+    Missing,
+    Present,
+}
+
+/// Inspect central-state Git metadata without changing refs or worktrees.
+pub(crate) fn inspect_state_worktree(
+    repository_root: &Path,
+    state_root: &Path,
+) -> io::Result<StateWorktreeInspection> {
+    let registrations = worktree_registrations(repository_root)?;
+    let expected_path_registration = registrations
+        .iter()
+        .find(|registration| paths_match(&registration.path, state_root))
+        .cloned();
+    let waap_checkouts = registrations
+        .into_iter()
+        .filter(|registration| registration.branch.as_deref() == Some(STATE_BRANCH_REF))
+        .collect();
+
+    Ok(StateWorktreeInspection {
+        local_branch: ref_hash(repository_root, STATE_BRANCH_REF)?,
+        expected_path_registration,
+        waap_checkouts,
+        upstream_remote: git_config_value(repository_root, "branch.waap.remote")?,
+        upstream_merge: git_config_value(repository_root, "branch.waap.merge")?,
+    })
+}
+
+/// Determine whether `origin/waap` exists. A failed query is intentionally not
+/// treated as a missing branch: callers must not create local state unless the
+/// remote result is conclusive.
+pub(crate) fn query_origin_state_branch(repository_root: &Path) -> io::Result<OriginStateBranch> {
+    if !has_origin(repository_root)? {
+        return Ok(OriginStateBranch::NoOrigin);
+    }
+
+    let args = os_args([
+        "ls-remote",
+        "--exit-code",
+        "--heads",
+        "origin",
+        STATE_BRANCH_REF,
+    ]);
+    let output = git_command(repository_root, &args)?;
+    match output.status.code() {
+        Some(0) => Ok(OriginStateBranch::Present),
+        Some(2) => Ok(OriginStateBranch::Missing),
+        _ => Err(run_git_error(&args, &output)),
+    }
+}
+
+/// Fetch `origin/waap` only after a successful existence query. The fetched
+/// ref is then available at `refs/remotes/origin/waap` for validation and
+/// adoption.
+pub(crate) fn fetch_origin_state_branch(repository_root: &Path) -> io::Result<OriginStateBranch> {
+    let state = query_origin_state_branch(repository_root)?;
+    if state != OriginStateBranch::Present {
+        return Ok(state);
+    }
+
+    let refspec = format!("+{STATE_BRANCH_REF}:{ORIGIN_STATE_BRANCH_REF}");
+    run_git(
+        repository_root,
+        &os_args(["fetch", "origin", refspec.as_str()]),
+    )?;
+    if ref_hash(repository_root, ORIGIN_STATE_BRANCH_REF)?.is_none() {
+        return Err(io::Error::other(
+            "origin/waap disappeared while it was being fetched; retry initialization",
+        ));
+    }
+    Ok(state)
+}
+
+/// Verify that every tree reachable from a single state ref contains only
+/// files below `agents/` or `tickets/`. This deliberately never examines any
+/// application branch.
+pub(crate) fn validate_state_history(repository_root: &Path, revision: &str) -> io::Result<()> {
+    let commits = git_stdout(repository_root, &os_args(["rev-list", revision]))?;
+    if commits.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("state branch {revision} has no commits"),
+        ));
+    }
+
+    for commit in commits.lines() {
+        let paths = git_stdout(
+            repository_root,
+            &os_args(["ls-tree", "-r", "--name-only", commit]),
+        )?;
+        for path in paths.lines() {
+            if !is_state_path(path) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "state branch {revision} contains non-state path {path} in commit {commit}; repair or remove the conflicting state history before initializing"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Create or adopt the dedicated state worktree. This does not push. It is
+/// intentionally not called by normal command dispatch until activation.
+pub(crate) fn initialize_state_worktree(
+    repository_root: &Path,
+    state_root: &Path,
+) -> io::Result<PathBuf> {
+    let inspection = inspect_state_worktree(repository_root, state_root)?;
+    ensure_safe_initialization(repository_root, state_root, &inspection)?;
+
+    match fetch_origin_state_branch(repository_root)? {
+        OriginStateBranch::Present => adopt_remote_state_worktree(repository_root, state_root)?,
+        OriginStateBranch::NoOrigin | OriginStateBranch::Missing => {
+            create_fresh_state_worktree(repository_root, state_root)?
+        }
+    }
+
+    configure_state_upstream(repository_root)?;
+    state_root.canonicalize()
+}
+
+fn ensure_safe_initialization(
+    repository_root: &Path,
+    state_root: &Path,
+    inspection: &StateWorktreeInspection,
+) -> io::Result<()> {
+    if inspection.local_branch.is_some() {
+        validate_state_history(repository_root, STATE_BRANCH_REF)?;
+        if let Some(registration) = inspection.waap_checkouts.first() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "waap is already checked out at {}; use waap repair",
+                    registration.path.display()
+                ),
+            ));
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "local waap branch exists but has no registered state worktree; use waap repair",
+        ));
+    }
+    if let Some(registration) = &inspection.expected_path_registration {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "expected state worktree {} is already registered on {}; use waap repair",
+                registration.path.display(),
+                registration.branch.as_deref().unwrap_or("a detached HEAD")
+            ),
+        ));
+    }
+    if let Some(registration) = inspection.waap_checkouts.first() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "waap is already checked out at {}; use waap repair",
+                registration.path.display()
+            ),
+        ));
+    }
+    if state_root.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "expected state worktree path {} is occupied and is not registered; choose an empty path or use waap repair",
+                state_root.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn create_fresh_state_worktree(repository_root: &Path, state_root: &Path) -> io::Result<()> {
+    let parent = state_root.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("state worktree path {} has no parent", state_root.display()),
+        )
+    })?;
+    fs::create_dir_all(parent)?;
+    let mut worktree_add = os_args(["worktree", "add", "--no-checkout", "--detach"]);
+    worktree_add.push(state_root.as_os_str().to_os_string());
+    run_git(repository_root, &worktree_add)?;
+    run_git(state_root, &os_args(["switch", "--orphan", STATE_BRANCH]))?;
+
+    let agents_marker = state_root.join("agents/.gitkeep");
+    let tickets_marker = state_root.join("tickets/.gitkeep");
+    fs::create_dir_all(agents_marker.parent().expect("agents marker parent"))?;
+    fs::create_dir_all(tickets_marker.parent().expect("tickets marker parent"))?;
+    fs::write(&agents_marker, "")?;
+    fs::write(&tickets_marker, "")?;
+    commit_paths(
+        state_root,
+        &[agents_marker.as_path(), tickets_marker.as_path()],
+        "waap init",
+    )?;
+    Ok(())
+}
+
+fn adopt_remote_state_worktree(repository_root: &Path, state_root: &Path) -> io::Result<()> {
+    validate_state_history(repository_root, ORIGIN_STATE_BRANCH_REF)?;
+    let parent = state_root.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("state worktree path {} has no parent", state_root.display()),
+        )
+    })?;
+    fs::create_dir_all(parent)?;
+    run_git(
+        repository_root,
+        &os_args(["branch", STATE_BRANCH, ORIGIN_STATE_BRANCH_REF]),
+    )?;
+    let mut worktree_add = os_args(["worktree", "add"]);
+    worktree_add.push(state_root.as_os_str().to_os_string());
+    worktree_add.push(STATE_BRANCH.into());
+    run_git(repository_root, &worktree_add)?;
+    Ok(())
+}
+
+fn configure_state_upstream(repository_root: &Path) -> io::Result<()> {
+    if has_origin(repository_root)? {
+        run_git(
+            repository_root,
+            &os_args(["config", "branch.waap.remote", "origin"]),
+        )?;
+        run_git(
+            repository_root,
+            &os_args(["config", "branch.waap.merge", STATE_BRANCH_REF]),
+        )?;
+    }
+    Ok(())
+}
+
+fn worktree_registrations(repository_root: &Path) -> io::Result<Vec<WorktreeRegistration>> {
+    let output = git_stdout(
+        repository_root,
+        &os_args(["worktree", "list", "--porcelain"]),
+    )?;
+    let mut registrations = Vec::new();
+    let mut current: Option<WorktreeRegistration> = None;
+    for line in output.lines().chain(std::iter::once("")) {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            if let Some(registration) = current.take() {
+                registrations.push(registration);
+            }
+            current = Some(WorktreeRegistration {
+                path: PathBuf::from(path),
+                head: String::new(),
+                branch: None,
+            });
+        } else if let Some(head) = line.strip_prefix("HEAD ") {
+            if let Some(registration) = &mut current {
+                registration.head = head.to_owned();
+            }
+        } else if let Some(branch) = line.strip_prefix("branch ") {
+            if let Some(registration) = &mut current {
+                registration.branch = Some(branch.to_owned());
+            }
+        } else if line.is_empty() {
+            if let Some(registration) = current.take() {
+                registrations.push(registration);
+            }
+        }
+    }
+    Ok(registrations)
+}
+
+fn has_origin(repository_root: &Path) -> io::Result<bool> {
+    let remotes = git_stdout(repository_root, &os_args(["remote"]))?;
+    Ok(remotes.lines().any(|remote| remote == "origin"))
+}
+
+fn ref_hash(repository_root: &Path, reference: &str) -> io::Result<Option<String>> {
+    let revision = format!("{reference}^{{commit}}");
+    let args = os_args(["rev-parse", "--verify", "--quiet", revision.as_str()]);
+    let output = git_command(repository_root, &args)?;
+    match output.status.code() {
+        Some(0) => Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        )),
+        Some(1) => Ok(None),
+        _ => Err(run_git_error(&args, &output)),
+    }
+}
+
+fn git_config_value(repository_root: &Path, key: &str) -> io::Result<Option<String>> {
+    let args = os_args(["config", "--get", key]);
+    let output = git_command(repository_root, &args)?;
+    match output.status.code() {
+        Some(0) => Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        )),
+        Some(1) => Ok(None),
+        _ => Err(run_git_error(&args, &output)),
+    }
+}
+
+fn git_stdout(repository_root: &Path, args: &[OsString]) -> io::Result<String> {
+    let output = run_git(repository_root, args)?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn os_args<const N: usize>(args: [&str; N]) -> Vec<OsString> {
+    args.into_iter().map(OsString::from).collect()
+}
+
+fn is_state_path(path: &str) -> bool {
+    path.strip_prefix("agents/")
+        .is_some_and(|tail| !tail.is_empty())
+        || path
+            .strip_prefix("tickets/")
+            .is_some_and(|tail| !tail.is_empty())
+}
+
+fn paths_match(left: &Path, right: &Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
 }
 
 #[derive(Debug)]
@@ -128,12 +481,17 @@ fn run_git(waap_root: &Path, args: &[OsString]) -> io::Result<Output> {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
 
     use tempfile::tempdir;
 
-    use super::{commit_paths, create_worktree, is_inside_git_work_tree, remove_worktree};
-    use crate::test_git::{init_repo, init_repo_with_commit, run};
+    use super::{
+        commit_paths, create_worktree, fetch_origin_state_branch, initialize_state_worktree,
+        inspect_state_worktree, is_inside_git_work_tree, query_origin_state_branch,
+        remove_worktree, OriginStateBranch, STATE_BRANCH,
+    };
+    use crate::test_git::{init_repo, init_repo_with_commit, isolate, run};
 
     fn write_file(path: &Path, contents: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -344,5 +702,209 @@ mod tests {
         remove_worktree(dir.path(), relative_path).unwrap();
 
         assert!(!worktree.exists());
+    }
+
+    #[test]
+    fn fresh_state_worktree_is_orphaned_tracks_origin_and_preserves_application_checkout() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let central = tempdir().unwrap();
+        let remote = bare_remote(central.path());
+        add_origin(dir.path(), &remote);
+        let state = central.path().join("state");
+        let application_head = run(dir.path(), &["rev-parse", "HEAD"]);
+
+        let created = initialize_state_worktree(dir.path(), &state).unwrap();
+
+        assert_eq!(created, state.canonicalize().unwrap());
+        assert_eq!(run(dir.path(), &["rev-parse", "HEAD"]), application_head);
+        assert!(run(dir.path(), &["status", "--porcelain"]).is_empty());
+        assert!(state.join("agents").is_dir());
+        assert!(state.join("tickets").is_dir());
+        assert_eq!(
+            run(dir.path(), &["rev-list", "--parents", "-1", STATE_BRANCH])
+                .split_whitespace()
+                .count(),
+            1
+        );
+        assert_eq!(
+            run(dir.path(), &["ls-tree", "-r", "--name-only", STATE_BRANCH]),
+            "agents/.gitkeep\ntickets/.gitkeep"
+        );
+
+        let inspection = inspect_state_worktree(dir.path(), &state).unwrap();
+        assert!(inspection.local_branch.is_some());
+        assert_eq!(
+            inspection
+                .expected_path_registration
+                .unwrap()
+                .branch
+                .as_deref(),
+            Some("refs/heads/waap")
+        );
+        assert_eq!(inspection.upstream_remote.as_deref(), Some("origin"));
+        assert_eq!(
+            inspection.upstream_merge.as_deref(),
+            Some("refs/heads/waap")
+        );
+    }
+
+    #[test]
+    fn adopts_only_verified_remote_state_without_inspecting_application_history() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let central = tempdir().unwrap();
+        let remote = bare_remote(central.path());
+        let source_dir = tempdir().unwrap();
+        let source = source_dir.path().join("remote-source");
+        fs::create_dir(&source).unwrap();
+        init_repo_with_commit(&source);
+        run(&source, &["switch", "--orphan", STATE_BRANCH]);
+        write_file(&source.join("agents/aa-one/agent.md"), "+++");
+        write_file(&source.join("tickets/tt-one/ticket.md"), "+++");
+        run(&source, &["add", "agents", "tickets"]);
+        run(&source, &["commit", "-q", "-m", "remote state"]);
+        run(
+            &source,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        run(&source, &["push", "-q", "origin", STATE_BRANCH]);
+        let remote_head = run(&source, &["rev-parse", STATE_BRANCH]);
+        add_origin(dir.path(), &remote);
+        let state = central.path().join("state");
+        let application_head = run(dir.path(), &["rev-parse", "HEAD"]);
+
+        initialize_state_worktree(dir.path(), &state).unwrap();
+
+        assert_eq!(run(&state, &["rev-parse", "HEAD"]), remote_head);
+        assert!(state.join("agents/aa-one/agent.md").is_file());
+        assert!(state.join("tickets/tt-one/ticket.md").is_file());
+        assert_eq!(run(dir.path(), &["rev-parse", "HEAD"]), application_head);
+        assert!(run(dir.path(), &["status", "--porcelain"]).is_empty());
+    }
+
+    #[test]
+    fn rejects_remote_waap_history_with_application_paths() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let central = tempdir().unwrap();
+        let remote = bare_remote(central.path());
+        let source_dir = tempdir().unwrap();
+        init_repo_with_commit(source_dir.path());
+        run(source_dir.path(), &["branch", STATE_BRANCH, "main"]);
+        run(
+            source_dir.path(),
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        run(source_dir.path(), &["push", "-q", "origin", STATE_BRANCH]);
+        add_origin(dir.path(), &remote);
+        let state = central.path().join("state");
+
+        let error = initialize_state_worktree(dir.path(), &state).unwrap_err();
+
+        assert!(error.to_string().contains("non-state path README.md"));
+        assert!(!state.exists());
+        assert!(run(dir.path(), &["branch", "--list", STATE_BRANCH]).is_empty());
+    }
+
+    #[test]
+    fn missing_remote_state_creates_fresh_but_unreachable_origin_does_not() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let remote = bare_remote(dir.path());
+        add_origin(dir.path(), &remote);
+        let state = dir.path().join("central/state");
+
+        assert_eq!(
+            query_origin_state_branch(dir.path()).unwrap(),
+            OriginStateBranch::Missing
+        );
+        assert_eq!(
+            fetch_origin_state_branch(dir.path()).unwrap(),
+            OriginStateBranch::Missing
+        );
+        initialize_state_worktree(dir.path(), &state).unwrap();
+        assert!(state.is_dir());
+
+        let unreachable = tempdir().unwrap();
+        init_repo_with_commit(unreachable.path());
+        run(
+            unreachable.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                unreachable.path().join("missing-remote").to_str().unwrap(),
+            ],
+        );
+        let missing_state = unreachable.path().join("central/state");
+        let error = initialize_state_worktree(unreachable.path(), &missing_state).unwrap_err();
+
+        assert!(error.to_string().contains("ls-remote"));
+        assert!(!missing_state.exists());
+        assert!(run(unreachable.path(), &["branch", "--list", STATE_BRANCH]).is_empty());
+    }
+
+    #[test]
+    fn rejects_non_state_history_and_existing_state_conflicts_without_resetting_them() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        run(dir.path(), &["branch", STATE_BRANCH]);
+        let state = dir.path().join("central/state");
+
+        let error = initialize_state_worktree(dir.path(), &state).unwrap_err();
+        assert!(error.to_string().contains("non-state path README.md"));
+        assert!(
+            run(dir.path(), &["show-ref", "--verify", "refs/heads/waap"])
+                .contains("refs/heads/waap")
+        );
+        assert!(!state.exists());
+
+        let occupied = tempdir().unwrap();
+        init_repo_with_commit(occupied.path());
+        let occupied_state = occupied.path().join("central/state");
+        fs::create_dir_all(&occupied_state).unwrap();
+        let error = initialize_state_worktree(occupied.path(), &occupied_state).unwrap_err();
+        assert!(error.to_string().contains("is occupied"));
+        assert!(run(occupied.path(), &["branch", "--list", STATE_BRANCH]).is_empty());
+    }
+
+    #[test]
+    fn detects_waap_checked_out_outside_the_expected_state_path() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        run(dir.path(), &["switch", "--orphan", STATE_BRANCH]);
+        write_file(&dir.path().join("agents/.gitkeep"), "");
+        write_file(&dir.path().join("tickets/.gitkeep"), "");
+        run(dir.path(), &["add", "agents", "tickets"]);
+        run(dir.path(), &["commit", "-q", "-m", "state"]);
+        let expected_state = dir.path().join("central/state");
+
+        let inspection = inspect_state_worktree(dir.path(), &expected_state).unwrap();
+        assert_eq!(inspection.waap_checkouts.len(), 1);
+        assert_eq!(inspection.waap_checkouts[0].path, dir.path());
+        let error = initialize_state_worktree(dir.path(), &expected_state).unwrap_err();
+
+        assert!(error.to_string().contains("already checked out"));
+        assert!(!expected_state.exists());
+    }
+
+    fn bare_remote(root: &Path) -> PathBuf {
+        let remote = root.join("remote.git");
+        let mut command = Command::new("git");
+        isolate(&mut command);
+        let output = command
+            .args(["init", "-q", "--bare", remote.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        remote
+    }
+
+    fn add_origin(repository: &Path, remote: &Path) {
+        run(
+            repository,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
     }
 }
