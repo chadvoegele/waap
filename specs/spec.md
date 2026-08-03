@@ -1,293 +1,176 @@
 # waap
 
-`waap` Agent Automation Platform
+`waap` is an agent automation platform that structures disposable-agent work as tickets and agents. It stores state as plain Markdown with TOML frontmatter and validates it with `waap check`.
 
-## Description
+## Central state
 
-`waap` is an agent automation platform that structures execution of disposable AI agents. Tickets are used to describe work, and agents are used to perform work. It provides scaffolding and parallelization for sub-agents.
+Each non-bare Git repository has one central state worktree on a local orphan branch named `waap`. The state directory is derived from the canonical primary checkout path:
 
-`waap` can be used to build an "AI software factory".
-
-## Agent Purposes
-
-You may give `waap` agents different roles to solve your problem. An agent's purpose is carried by its instructions/content, not by a separate metadata field.
-
-For a software development project, consider
-- Planner
-	- Translates application specifications, e.g. `specs.md`, into an implementation plan via tickets.
-- Developer
-	- Implements their assigned ticket.
-    - Merges their changes into the application repository.
-    - Tests the application meets the specification for the ticket scope.
-
-## Conventions
-
-All paths in the specification are relative to the application's repository root.
-
-## Datastore
-
-waap maintains its own datastore within the application's repository at `/.waap/`.
-
-## Agents
-
-Agents do the work in waap. Agents use the repository source code and specifications primarily as context, and use `.waap/` to track their own state and log partial progress.
-
-Agent state is tracked in the `/.waap/agents/` directory. An agent can have an optional human-readable name. Its id is `aa-` plus the name slug, or an 8-character random hex value when unnamed.
-
-Agent metadata is stored in TOML frontmatter.
-
-**Agent Schema**
+```text
+<primary repository root>
+  /home/chad/code/github.com/chadvoegele/waap
+<state directory>
+  ~/.local/state/waap/data/home/chad/code/github.com/chadvoegele/waap
 ```
+
+The state directory is the root of the state worktree and contains only:
+
+```text
+agents/
+tickets/
+```
+
+All primary and linked **source worktrees** of one repository resolve the same state directory. State reads, validation, writes, staging, and commits occur there on `waap`; application source operations occur in the invoking source worktree. State commits must not move application branch heads.
+
+`.waap` refers only to legacy state in an application checkout. It is not a current state location and must not be copied into source worktrees.
+
+### State resolution
+
+`--waap-root` always names a state directory containing `agents` and `tickets`, never an application checkout.
+
+- Except for `waap init`, an explicit `--waap-root <path>` is canonicalized and used directly. Waap does not derive, relocate, or compare another state location.
+- `waap init --waap-root <path>` treats `<path>` as the exact new state-directory target.
+- Without `--waap-root`, waap derives the state path under `~/.local/state/waap/data/` from the current source worktree's primary checkout. `HOME` must be absolute.
+
+An invocation from the central state worktree cannot select a source HEAD for `waap agent run`; invoke it from an application source worktree instead.
+
+### Setup, migration, and relocation
+
+`waap init` is setup-only. For a new repository it creates the central worktree, `agents` and `tickets`, and a parentless `waap init` commit. When `origin/waap` already exists, it verifies and adopts that state instead. It leaves the application checkout unchanged and reports `state_directory` in human and JSON output.
+
+`waap init` fails without modification if selected central state or legacy `.waap` exists. `waap repair` is the explicit recovery command:
+
+- It migrates legacy `.waap` into central state, commits the central migration, then removes and commits the legacy state on its application branch.
+- It repairs a moved primary checkout's registered state worktree and relocates it to the newly derived directory.
+- It repairs `origin/waap` upstream configuration.
+
+When central state and legacy `.waap` coexist, waap does not choose or merge them. Reconcile them manually, then run `waap repair`. Run relocation repair from the primary checkout.
+
+### Remote behavior
+
+With `origin`, local `waap` tracks `origin/waap`, but waap never pushes automatically. Synchronization is manual, for example `git -C "$WAAP_STATE" push`.
+
+`waap check` fetches `origin/waap`. Remote-only commits, including divergence, produce a warning without failing an otherwise valid check. The warning does not fetch application branches, merge, rebase, or reconcile state.
+
+## Records
+
+Agents and tickets are state records. Their paths below are relative to the central state directory.
+
+### Agents
+
+Agent instructions and metadata are stored at `agents/<agent-id>/agent.md`; optional progress notes may be stored at `agents/<agent-id>/work_log.md`. Agent IDs are `aa-` plus a name slug or eight lowercase hex characters. Agent frontmatter is strict:
+
+```toml
 +++
 name = "List Tickets Developer"
 creation_date = 2026-06-18T15:00:34Z
-status = "ready"  # ready, running, completed, failed, aborted
-session_id = "ses_9032dd..."  # add after agent is started
-system = "opencode"  # opencode, claude; add after agent is started
+status = "ready" # ready, running, completed, failed, aborted
+session_id = "ses_9032dd..." # added after start
+system = "opencode" # opencode, claude, codex; added after start
 +++
 
 # Purpose
 Implement code for `tt-list-tickets`
 ```
 
-Example:
-`/.waap/agents/aa-list-tickets-developer/agent.md`
+### Tickets
 
-Agents should also keep a work log, recording any work done. 
+Tickets are stored at `tickets/<ticket-id>/ticket.md`. IDs are `tt-` plus a name slug or eight lowercase hex characters. Slugs are lowercase ASCII, trim whitespace, replace spaces with one hyphen, remove punctuation, and are shorter than 64 characters. Long slugs are truncated and given a random four-hex suffix; conflicts use the same suffix strategy.
 
-Example:
-`/.waap/agents/aa-list-tickets-developer/work_log.md`
-
-## Tickets
-
-Tickets track agent work, capture partial progress, and anchor the developer lifecycle. They serve as a bridge between the specifications and the implementation, resolving ambiguity in the specifications while not fully code.
-
-Tickets are stored in the `/.waap/tickets/` directory, typically as Markdown files.
-
-Ticket metadata is stored in TOML frontmatter.
-
-**Ticket Schema**
-```
+```toml
 +++
 name = "List Tickets"
 creation_date = 2026-06-18T10:15:02Z
-status = "pending"  # pending, in-progress, completed, abandoned
+status = "pending" # pending, in-progress, completed, abandoned
+depends_on = ["tt-required-foundation"]
 +++
 
-# Spec Reference
-Line 10-15 of /specs/spec.md
-
-# Description
-List tickets in `.waap/tickets/` directory. Return in JSON format.
-Additionally allow a flag to filter by status.
+Implement ticket listing.
 ```
 
-Tickets can have an optional human-readable name. A named ticket id is the name slug prefixed by `tt-`; an unnamed ticket id is `tt-` plus an 8-character random hex value. The legacy `title` metadata field is accepted as `name` when reading old tickets, but new writes use `name`.
+`depends_on` is optional. A ticket is blocked until all dependencies are completed. The legacy `title` field is accepted when reading old tickets, but new writes use `name`.
 
-Slug Requirements:
-1. Lowercase
-1. Leading and trailing spaces are trimmed
-1. Spaces translated to hyphens
-1. Repeated hyphens are collapsed to a single hyphen
-1. Punctuation removed
-1. Avoid special and non-ASCII characters
-1. Less than 64 characters
-    1. excess is truncated, and appended with a dash and random 4 character hex hash
-    1. Example: `tt-list-all-very-long-tickets-that-are-too-long-for-a-slug-de32`
+## CLI
 
-If a named ticket or agent id conflicts, append a 4-character random hex suffix.
+The CLI is the required interface for normal state mutations. Mutations validate, write, stage explicit state paths, and commit on `waap` under a per-repository lock.
 
-Example:
-`/.waap/tickets/tt-list-tickets/ticket.md`
-
-Agents should update the `ticket.md` file with any key decisions, important commands, code fragments so that another agent can resume the work if necessary.
-
-## Command Line Interface (CLI)
-
-The `waap` CLI is the primary interface for interacting with waap state, though the state can be edited manually so long as it is still valid schema, e.g. passes `waap check`.
-
-- Global Parameters
-    - `--output-format`  # Choices: json, human-readable
-    - `--waap-root`  # Existing project directory inside a git repository
-
-The default format is human-readable.
-
-Mutation commands must not leave `/.waap/` invalid when they return success. Manual edits can
-still invalidate state; `waap check` remains the validator for finding and repairing such changes.
-
-Without `--waap-root`, commands use the nearest ancestor containing `.waap/`, bounded by the
-current git root. If none exists, commands use the git root so `waap init` can initialize it and
-other commands can report missing state.
-
-### waap check
-Validates `/.waap` state.
-
-Missing `/.waap` state is invalid and reports that `waap init` is required.
-
-1. `/.waap` has the correct directory structure.
-1. For `/.waap/agents/`,
-    1. Every sub directory is an agent id.
-    1. Each agent directory has a `agent.md` file.
-    1. If there is a work log, it is named `work_log.md`.
-    1. Other files are allowed in the agent directory.
-1. For `/.waap/tickets/`,
-    1. Every sub directory is a ticket id.
-    1. Each ticket directory has a `ticket.md` file.
-1. Agent frontmatter is valid.
-1. Ticket frontmatter is valid.
-
-Frontmatter is validated strictly: unknown fields outside the documented agent and ticket schemas are rejected. The error names the offending field and the record path so it can be located. Optional known fields such as `depends_on` remain optional.
-
-### waap ticket
-- new
-    - Creates a new ticket
-    - Prepends TOML frontmatter in ticket.md
-    - Appends ticket.md contents from stdin
-    - Commits the ticket.md to git
-    - Parameters
-        - Optional
-            - `--name`
-            - `--depends-on`  # Existing ticket id; repeatable
-    - Streams
-        - stdin: write to ticket markdown
-        - stdout: reports created ticket path, metadata, and file size
-- update
-    - Updates an existing ticket
-    - The ticket name and id cannot be changed.
-    - Commits the ticket.md changes to git
-    - Parameters
-        - Required
-            - `--ticket-id`
-        - At least one of these
-            - `--set-status`
-            - `--add-depends-on`  # Existing ticket id; repeatable
-            - `--remove-depends-on`  # Valid ticket id; repeatable; absent dependencies are ignored
-    - Streams
-        - stdout: reports updated ticket path, metadata, and file size
-- get
-    - Gets an existing ticket
-    - Parameters
-        - Required
-            - `--ticket-id`
-    - Streams
-        - stdout: reports ticket metadata and content
-- list
-    - Lists existing tickets with filter criteria applied.
-    - Parameters
-        - Optional
-            - `--status`  # returned list has this status
-    - Streams
-        - stdout: reports ticket ids
-
-### waap agent
-- new
-    - Creates a new agent entry in `/.waap/agents/`
-    - Prepends TOML frontmatter in agent.md
-    - Appends agent.md contents from stdin
-    - Commits the agent.md to git
-    - Parameters
-        - Optional
-            - `--name`
-    - Streams
-        - stdin: write to agent markdown
-        - stdout: reports created agent path, metadata, and file size
-- run
-    - Starts the agent harness
-    - Updates agent entry to running
-    - Commits the agent.md changes to git
-    - Parameters
-        - Required
-            - `--agent-id`
-        - Optional
-            - `--system`  # agent system used to run the agent: opencode, claude. Defaults to opencode.
-    - Streams
-        - stdout: reports agent path, metadata
-- stop
-    - Stops running agents
-    - Marks their statuses as 'aborted'
-    - Commits the agent.md changes to git
-    - Parameters
-        - Optional
-            - `--agent-id`  # if not provided, all agents are stopped
-- update
-    - Updates an existing agent
-    - The agent name and id cannot be changed.
-    - Commits the agent.md changes to git
-    - Parameters
-        - Required
-            - `--agent-id`
-        - At least one of these
-            - `--set-status`
-            - `--set-session-id`
-    - Streams
-        - stdout: reports updated agent path, metadata
-- get
-    - Gets an existing agent
-    - Parameters
-        - Required
-            - `--agent-id`
-    - Streams
-        - stdout: reports agent metadata and content
-- list
-    - Lists existing agents, with filter criteria applied.
-    - Parameters
-        - Optional
-            - `--status`  # returned list has this status
-    - Streams
-        - stdout: reports agent ids
-
-
-## Running Agents
-
-Agents can be run with different agent systems, selected with `waap agent run --system`. The chosen system and the resulting session id are recorded in the agent metadata.
-
-### Worktree Lifecycle
-
-`waap agent run` owns the agent worktree lifecycle. It first commits the agent's `running` status and chosen system to `main`, then creates an isolated git worktree at `worktrees/$agent_id` (a fresh branch named after the agent). Worktree and integration policy belong to the editable detailed agent instructions. Finally, the worktree is removed.
-
-### opencode (default)
-
-opencode runs against a remote server through its authenticated HTTP API. `waap` creates the session against the canonical repository root with denied interactive permissions, establishes the repository-wide SSE event stream, then submits the common detailed-instruction prompt to `POST /session/{sessionID}/prompt_async`. The prompt uses `$OPENCODE_SERVER_MODEL` as `provider/model` or `provider/model/variant`, the `build` agent, and a text part. Recognized OpenCode reasoning variants (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`) are forwarded in the top-level `variant` field; without one, the field is omitted so the agent default applies. Other trailing segments remain part of slash-containing model IDs, consistent with the current models.dev catalog. Matching completed text, tool, step, and error events are forwarded as JSON lines; matching idle status completes the run.
-
-### claude
-
-claude runs as a local headless process (`claude -p`). `waap` mints the session id itself and passes it via `--session-id`. The goal is passed directly as the prompt. The model is optional and read from `$CLAUDE_MODEL`.
-
-```
-claude -p \
-  --session-id "$session_id" \
-  --output-format json \
-  --permission-mode bypassPermissions \
-  --model "$CLAUDE_MODEL" \
-  "Complete when instructions in ${repository_root}/.waap/agents/${agent_id}/agent.md are satisfied"
+```sh
+waap init
+waap check
+waap repair
 ```
 
-## waap Skill
+`waap init` and `waap check` report the absolute state directory in human-readable output and as `state_directory` in JSON. `waap check` validates central-worktree and state-record invariants and requires a clean state worktree. It does not stage, commit, repair, or reconcile state.
 
-In addition to the CLI, waap also includes an agent skill that tells a (non-waap spawned) agent how to interact with waap. The skill includes a CLI reference as well as instructions to be passed to the waap agents.
+Emergency direct edits are permitted only as recovery:
 
-```
-- .agents/skills/waap/SKILL.md
-- .agents/skills/waap/roles/planner/agent.md
-- .agents/skills/waap/roles/developer/agent.md
-```
+1. Edit the central state worktree, never legacy `.waap` or a source worktree.
+2. Run `waap check`; a dirty-worktree failure is expected until the edit is committed. Correct all content errors.
+3. Explicitly commit the corrected state files on branch `waap`.
+4. Run `waap check` again and require a clean success.
 
-### Software Development Bootstrap
+### Tickets
 
-To start the waap software lifecyle, first run a planner agent to create tickets as needed.
-
-```
-cd ${APP_REPO_ROOT}
-planner_id=$(cat .agents/skills/waap/roles/planner/agent.md | waap --output-format json agent new | jq -r '."agent-id"')
-waap agent run --agent-id ${planner_id}
-```
-
-Then select a ticket for an agent, insert it into the developer agent.md template, and create an agent with those instructions,
-```
-cd ${APP_REPO_ROOT}
-# replace ${ticket_id} in .agents/skills/waap/roles/developer/agent.md to create resolved_developer_agent.md
-developer_id=$(cat resolved_developer_agent.md | waap --output-format json agent new | jq -r '."agent-id"')
-waap agent run --agent-id ${developer_id}
+```sh
+waap ticket new --name "Implement Example Feature" --depends-on tt-foundation < ticket.md
+waap ticket get --ticket-id tt-example-feature
+waap ticket update --ticket-id tt-example-feature --set-status in-progress
+waap ticket update --ticket-id tt-example-feature --add-depends-on tt-other
+waap ticket update --ticket-id tt-example-feature --remove-depends-on tt-other
+waap ticket list --status pending --unblocked
 ```
 
-Multiple developer agents can be run in parallel if there are enough tickets.
+`ticket new` accepts repeatable `--depends-on`. `ticket update` requires `--ticket-id` and at least one of `--set-status`, `--add-depends-on`, or `--remove-depends-on`. `ticket list` accepts `--status`, `--blocked`, or `--unblocked`; the latter two conflict.
+
+### Agents
+
+```sh
+waap agent new --name "Example Developer" < agent.md
+waap agent get --agent-id aa-example-developer
+waap agent update --agent-id aa-example-developer --set-status completed
+waap agent list --status ready
+waap agent run --agent-id aa-example-developer --system codex
+waap agent stop --agent-id aa-example-developer
+```
+
+`agent run` supports `opencode` (default), `claude`, and `codex`. `agent stop` without `--agent-id` stops all running agents.
+
+`--output-format json` and `--waap-root` are global options and may appear after the subcommand. JSON reports use `ticket_id` and `agent_id` fields for scripting.
+
+### Agent worktrees
+
+`waap agent run` commits its state transition on `waap`, then creates an isolated **source** worktree at `worktrees/<agent-id>` relative to the application repository's primary checkout. It starts that worktree from the invoking application's HEAD, not `waap`, and removes it after the run.
+
+The launcher owns source-worktree creation, cleanup, and state transitions. Prompts may point an agent to its central `agent.md`, but agents must use CLI commands for state changes and must not edit central state directly or create/remove source worktrees themselves. Detailed agent instructions own source integration policy.
+
+### Agent systems
+
+OpenCode runs against its authenticated HTTP API. It uses `OPENCODE_SERVER_MODEL` as `provider/model` or `provider/model/variant`; recognized variants are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
+
+Claude runs `claude -p` with a minted session ID, JSON output, bypassed permissions, and optional `$CLAUDE_MODEL`. Codex is selected with `waap agent run --system codex`.
+
+## Bundled skill and bootstrap
+
+The waap skill and role templates are:
+
+```text
+.agents/skills/waap/SKILL.md
+.agents/skills/waap/roles/planner/agent.md
+.agents/skills/waap/roles/developer/agent.md
+```
+
+From an application source checkout, create and run a planner:
+
+```sh
+planner_id=$(waap --output-format json agent new < .agents/skills/waap/roles/planner/agent.md | jq -r '.agent_id')
+waap agent run --agent-id "$planner_id"
+```
+
+Resolve `${ticket_id}` in the developer template, then create and run it:
+
+```sh
+developer_id=$(waap --output-format json agent new < resolved-developer-agent.md | jq -r '.agent_id')
+waap agent run --agent-id "$developer_id"
+```
+
+Multiple developers may run in parallel when their tickets are unblocked.

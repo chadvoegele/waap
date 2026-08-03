@@ -1,120 +1,114 @@
 # waap
 
-`waap` is an agent automation platform that structures execution of disposable AI agents.
+`waap` is an agent automation platform for planning work as tickets, running disposable agents, and keeping their state in Git.
 
-`waap` is similar in spirit to [Gas Town](https://github.com/gastownhall/gastown), but without the exhaust, and [Omnigent Polly](https://github.com/omnigent-ai/omnigent), but without the omni.
+<img width="512" height="512" alt="waap" src="https://github.com/user-attachments/assets/929a5b2c-6c08-457a-b16f-d00c34bfa080" />
 
-<img width="512" height="512" alt="image" src="https://github.com/user-attachments/assets/929a5b2c-6c08-457a-b16f-d00c34bfa080" />
+## State model
 
-## Motivation
+Each application repository has one central waap state worktree on the local orphan branch `waap`. For a primary checkout at:
 
-I found that an effective pattern for running autonomous agents was making a `TODO.md` and pointing the agent to it with a `/goal`. `waap` formalizes this approach, promoting tickets and agents to first class. It persists context into files to get you out of the "my chat history is my context" approach, parallelizes agent execution, and rapidly gets you to [level 8](https://www.augmentcode.com/guides/steve-yegge-8-levels-ai-assisted-development).
+```text
+/home/chad/code/github.com/chadvoegele/example
+```
 
-## Design
+its state directory is:
 
-`waap` uses two types:
+```text
+~/.local/state/waap/data/home/chad/code/github.com/chadvoegele/example
+```
 
-1. `waap` tickets describe implementation work and live at `.waap/tickets/<ticket-id>/ticket.md`.
-2. `waap` agents contain agent instructions, e.g. `AGENTS.md`, and live at `.waap/agents/<agent-id>/agent.md`.
+The state directory contains `agents/` and `tickets/` directly. It is separate from application source worktrees, so state commits stay on `waap` and never move an application branch. The path is derived from the primary checkout, so the primary checkout and every linked source worktree use the same state immediately.
 
-The records use TOML frontmatter for structured `waap` metadata and the markdown body for unstructured content. The schema is intentionally plain text for agent-friendliness, and can be validated anytime with `waap check` using the `waap` CLI. The records are persisted in `git` so that agents can refer to past context.
+`.waap` means only legacy state inside an application checkout. A project with legacy state must be migrated with `waap repair`; do not copy it into source worktrees.
 
-Frequently but not always, agents are assigned to work on tickets.
-
-Tickets can include one or more dependencies to create arbitrary directed acyclic graphs (DAGs). This allows you to create a multi-step implementation plan up front, specify complex workflows, and also parallelize agent execution as wide as your workflow allows.
-
-## `waap` Workflow
-
-In a `git` repo, initialize a new `waap` project:
+Run this once in a new Git repository:
 
 ```sh
 waap init
 ```
 
-Then create a ticket that describes the work to be done:
+`waap init` is setup-only: it creates or adopts central state and reports its absolute state directory. It refuses existing central or legacy state. Use `waap repair` to migrate legacy state, repair a moved state worktree, or restore `origin/waap` tracking.
 
-```
-printf "Implement the file picker" | waap ticket new --name="File Picker"
-```
-
-This creates a `ticket.md` file at `.waap/tickets/tt-file-picker/ticket.md` like
-
-```
-+++
-name = "File Picker"
-creation_date = 2026-07-06T10:44:50Z
-status = "pending"
-+++
-
-Implement the file picker
+```sh
+waap check
 ```
 
-Next create an agent to work on the ticket:
+`waap init` and `waap check` report the resolved absolute state directory in human-readable output and as `state_directory` in JSON. `waap check` also validates its Git and record invariants.
 
-```
-printf "Continue working on `tt-file-picker` until done" | waap agent new --name="File Picker Implementer"
-```
+## Workflow
 
-This creates an `agent.md` file at `.waap/agents/aa-file-picker-implementer/agent.md` like
+Create a ticket and an agent with the CLI:
 
-```
-+++
-name = "File Picker Implementer"
-creation_date = 2026-07-06T10:47:39Z
-status = "ready"
-+++
-
-Continue working on `tt-file-picker` until done
+```sh
+printf 'Implement the file picker' | waap ticket new --name 'File Picker'
+printf 'Implement tt-file-picker.' | waap agent new --name 'File Picker Implementer'
+waap agent run --agent-id aa-file-picker-implementer
 ```
 
-Then run your agent with `waap agent run --agent-id aa-file-picker-implementer`.
+Tickets live at `$WAAP_STATE/tickets/<ticket-id>/ticket.md`; agents live at `$WAAP_STATE/agents/<agent-id>/agent.md`, where `$WAAP_STATE` is the directory reported by `waap init` or `waap check`. Records use TOML frontmatter and Markdown bodies. Tickets may depend on other tickets to form a DAG.
 
-## `waap` Loop
+`waap agent run` creates a temporary **source** worktree from the invoking application's HEAD, runs the agent there, and removes it afterward. It never creates a source worktree from `waap`. The launcher owns this lifecycle; agents must not create or remove source worktrees themselves.
 
-For more complex workflows, follow the same idea but with multiple tickets and use a `waap` loop:
+## State safety
 
-1. While there are unblocked tickets,
-    1. Create agents to complete the work.
-    2. Run the agents.
-    3. Add new tickets as needed.
+Use `waap` commands for all normal state mutations (`ticket new`/`update`, `agent new`/`run`/`update`/`stop`). They serialize validation, writes, and commits on `waap`.
 
-## CLI
+Plain files remain available for emergency recovery. If a direct edit is unavoidable:
 
-For a full CLI description, check:
+1. Edit the central state directory, not an application checkout.
+2. Run `waap check`; its dirty-state failure is expected while the edit is uncommitted. Fix every reported content error.
+3. Explicitly commit the validated files on the `waap` branch in the state worktree.
+4. Run `waap check` again. It must pass cleanly.
 
+`waap check` never stages, commits, or repairs direct edits.
+
+## State location and repair
+
+`--waap-root` always identifies a **state directory** containing `agents` and `tickets`, never an application checkout. For commands other than `init`, it uses that directory directly without deriving, relocating, or comparing state. For `waap init --waap-root <path>`, `<path>` is the exact new state-directory target.
+
+Without `--waap-root`, waap derives the central state directory from the current source worktree's primary checkout. For example:
+
+```sh
+waap --waap-root /srv/waap-state ticket list
+waap init --waap-root /srv/new-waap-state
 ```
+
+If a primary repository moves, run `waap repair` from its primary checkout. If central and legacy state coexist, reconcile them manually before repairing; waap will not merge or choose between them.
+
+## Remotes
+
+When `origin` exists, `waap init` configures local `waap` to track `origin/waap`, but does not push. State synchronization is manual:
+
+```sh
+cd "$WAAP_STATE"
+git push
+```
+
+`waap check` fetches `origin/waap` to detect remote-only commits and warns if the remote is ahead or branches diverge. The warning does not update, merge, rebase, or otherwise reconcile state; do that deliberately before pushing.
+
+## CLI and skill
+
+For the complete command reference:
+
+```sh
 waap --help
 waap ticket --help
 waap agent --help
 ```
 
-## Skill Resources
+The bundled skill and role templates are:
 
-Use `waap` with an agent referencing the `waap` skill:
-
-1. `.agents/skills/waap/SKILL.md` describes the waap workflow and CLI reference.
-2. `.agents/skills/waap/roles/planner/agent.md` has a recommended `agent.md` for a planner role.
-3. `.agents/skills/waap/roles/developer/agent.md` has a recommended `agent.md` for a developer role.
-
-The skill also includes examples of using a `waap` loop to build a [software factory](https://github.com/chadvoegele/waap/blob/main/.agents/skills/waap/SKILL.md#software-factory-loop) and to run a [structured agent program](https://github.com/chadvoegele/waap/blob/main/.agents/skills/waap/SKILL.md#structured-agent-program-loop).
+- `.agents/skills/waap/SKILL.md`
+- `.agents/skills/waap/roles/planner/agent.md`
+- `.agents/skills/waap/roles/developer/agent.md`
 
 ## Build
 
-To build:
-
 ```sh
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
 cargo build
 cargo build --release
-```
-
-To run checks:
-
-```sh
-cargo clippy
-cargo fmt --check
 cargo test
 ```
-
-To run the end-to-end test:
-
-Ask an agent to run `.agents/skills/waap-heat-equation-e2e-test/SKILL.md`.

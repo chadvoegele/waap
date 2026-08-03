@@ -1,205 +1,143 @@
 ---
 name: waap
-description: waap is a structured agent automation platform for specifying workflows as tickets in directed acyclic graphs (DAGs), running agents to execute the workflow in parallel, and durably tracking the instructions, agent instructions and progress. Use when coordinating agents, creating or running waap workflows, or validating or managing waap agents or tickets via the `waap` CLI.
+description: waap is a structured agent automation platform for tickets, directed acyclic workflows, disposable agents, and durable Git-backed state. Use for waap workflows, agents, tickets, validation, or the waap CLI.
 ---
 
 # waap
 
-## Basic Workflow
+## Central state and safety
 
-First, specify to-be-completed work in waap tickets. The work is described in markdown format, e.g. `cool_feature.md`.
+Waap keeps one central state worktree per application repository. For a primary checkout at `/home/me/code/example`, state is at:
+
+```text
+~/.local/state/waap/data/home/me/code/example
+```
+
+That directory, on local orphan branch `waap`, contains `agents/` and `tickets/` directly. It is not an application source worktree. Every linked source worktree of the same repository resolves it, and all CLI state commits remain on `waap`.
+
+`.waap` is legacy state in an application checkout only. Do not create or edit it for a central-state project.
+
+Use the CLI for normal mutations. Do not directly edit central state or create/remove source worktrees. `waap agent run` owns source-worktree creation and cleanup and starts the agent source worktree from the invoking application's HEAD, never `waap`.
+
+If emergency recovery requires a direct state edit:
+
+1. Edit the central state directory.
+2. Run `waap check`; it must fail while the worktree is dirty. Fix every content error it reports.
+3. Explicitly commit the corrected files on branch `waap` in the state worktree.
+4. Run `waap check` again and require a clean success.
+
+`waap check` never commits, stages, merges, or repairs direct edits.
+
+## Setup and recovery
+
+From an application source checkout, initialize a new project:
 
 ```sh
-$ cat cool_feature.md | waap ticket new --name "Cool Feature"
-```
-
-This creates a ticket at `.waap/tickets/<ticket-id>/ticket.md`. Ticket IDs start with `tt-` and use lowercase filesystem-safe slugs, e.g. `tt-cool-feature`.
-
-Next, create a waap agent to complete the work in the ticket. The agent's instructions are also described in markdown format, e.g. `agents.md`, and should indicate to work on the ticket.
-
-```sh
-$ cat agents.md | waap agent new
-Agent ID: aa-1234abcd
-```
-This creates an agent at `.waap/agents/<agent-id>/agent.md`. Agent IDs start with `aa-` followed by eight lowercase hex characters.
-
-Then run the agent with `waap agent run --agent-id aa-1234abcd`.
-
-## State Model
-
-waap stores state in the application repository under `.waap/`, and tracks it with `git`.
-
-All state is stored as plain text, but should be validated with `waap check` to ensure `waap` commands will work.
-
-### Running Outside the Sandbox
-
-WAAP commands that mutate state (`ticket new/update`, `agent new/run/update`) must run outside the agent sandbox. WAAP writes files before committing them, so a sandbox-blocked Git lock can leave untracked state behind. Disable the sandbox on the first attempt rather than letting the command fail and retrying.
-
-- **Codex:** set `sandbox_permissions: "require_escalated"` on the command call and provide a concise `justification`.
-- **Claude Code:** set `dangerouslyDisableSandbox: true` on the `Bash` tool call.
-
-## Ticket Dependencies
-
-If a ticket (B) depends on another ticket (A), then ticket (B) is blocked until ticket (A) is completed. This dependency is specified when the ticket is created with `waap ticket new --depends-on tt-A`, where `tt-A` is ticket id of the blocking ticket (A). Multiple blocking tickets can be specified with `--depends-on` multiple times. This can be used to create arbitrary DAGs of work.
-
-To see all unblocked pending tickets, use:
-
-```sh
-waap ticket list --status pending --unblocked
-```
-
-## Ticket Frontmatter
-
-Ticket metadata is stored as TOML frontmatter at the top of the ticket markdown file.
-
-```toml
-+++
-name = "Implement Example Feature"
-creation_date = 2026-06-18T10:15:02Z
-status = "pending"
-depends_on = ["tt-required-foundation"]
-+++
-```
-
-`depends_on` is optional. When specified, it's an array.
-
-## Agent Instructions
-
-The agent instructions should include the work to be completed, typically by referring to a waap ticket id.
-
-> Your role is to implement the functionality described in `.waap/tickets/${ticket_id}/ticket.md`.
-
-When appropriate the instructions should also include to merge their changes back to the repository.
-
-If your agents are repeating the same function, consider storing the common instructions as a reusable template. Some example templates are at:
-
-- [Planner](./roles/planner/agent.md)
-    - Creates waap tickets for implementing a program defined in spec.md
-- [Developer](./roles/developer/agent.md)
-    - Implement functionality described in a waap ticket.
-
-It is helpful to ensure continuity across agents, to also instruct the agent to update:
-
-1. An agent specific work log: `.waap/agents/<agent-id>/work_log.md`
-    1. A chronological log summarizing the work the agent did during their session.
-1. Top-level shared `AGENTS.md`
-    1. Include any project-specific details that might be helpful for futures agents like:
-        1. key files/artifact locations
-        2. developer commands, e.g. building, formatting, linting, testing, etc.
-        3. common gotchas
-        4. project conventions
-
-## Agent Parallelization
-
-`waap agent run` owns the agent worktree lifecycle. Before launching the selected system, it creates an isolated git worktree (`worktrees/<agent-id>`); after the system process exits it removes that worktree. Detailed agent instructions specify where the agent works and how it integrates changes, allowing merge, push, or pull-request workflows without changing the launcher.
-
-## Agent Frontmatter
-
-Agent metadata is stored as TOML frontmatter at the top of the agent markdown file.
-
-```toml
-+++
-creation_date = 2026-06-18T15:00:34Z
-status = "ready"
-session_id = "ses_9032dd..."
-system = "opencode"
-+++
-```
-
-The `system` property identifies which system was used to run the agent, and the `session_id` is the system's unique identifier for the agent run.
-
-## CLI Reference
-
-Validate waap state:
-
-```sh
+waap init
 waap check
 ```
 
-Create a ticket from Markdown on stdin:
+`waap init` is setup-only. It creates or adopts state and reports its absolute state directory; it refuses an existing central directory or legacy `.waap`. `waap init` and `waap check` include `state_directory` in JSON output. Use `waap repair` to migrate legacy state, repair a moved state worktree, or restore the `origin/waap` upstream.
+
+`--waap-root` always names a state directory containing `agents` and `tickets`, never an application checkout:
 
 ```sh
-waap ticket new --name "Implement Example Feature" --depends-on tt-foundation < ticket.md
+waap --waap-root /srv/waap-state ticket list
+waap init --waap-root /srv/new-waap-state
 ```
 
-List unblocked pending tickets:
+The first command uses the supplied directory directly. The second creates state at the supplied exact target. Without it, waap derives `~/.local/state/waap/data/...` from the current source worktree's primary checkout.
+
+If central state and legacy state coexist, reconcile them manually before `waap repair`; waap will not choose or merge them. After moving an application repository, run `waap repair` from its primary checkout.
+
+With `origin`, local `waap` tracks `origin/waap`, but synchronization and pushing are manual. `waap check` fetches to warn about remote-only or diverged state; the warning does not reconcile either branch.
+
+## Basic workflow
+
+Create a ticket from Markdown:
 
 ```sh
+cat cool-feature.md | waap ticket new --name 'Cool Feature'
+```
+
+Create an agent from instructions, then run it:
+
+```sh
+cat agent.md | waap agent new --name 'Cool Feature Developer'
+waap agent run --agent-id aa-cool-feature-developer
+```
+
+Use the generated IDs from JSON when scripting:
+
+```sh
+ticket_id=$(waap --output-format json ticket new --name 'Cool Feature' < cool-feature.md | jq -r '.ticket_id')
+agent_id=$(waap --output-format json agent new --name 'Cool Feature Developer' < agent.md | jq -r '.agent_id')
+waap agent run --agent-id "$agent_id"
+```
+
+Ticket IDs begin `tt-`; agent IDs begin `aa-`. Their records are at `$WAAP_STATE/tickets/<ticket-id>/ticket.md` and `$WAAP_STATE/agents/<agent-id>/agent.md`, where `$WAAP_STATE` is the state directory reported by `waap check`.
+
+## Ticket dependencies
+
+A ticket is blocked until every ticket in `depends_on` is completed. Specify repeatable dependencies at creation or update them later:
+
+```sh
+waap ticket new --name 'Deploy' --depends-on tt-build --depends-on tt-test < deploy.md
+waap ticket update --ticket-id tt-deploy --add-depends-on tt-security-review
+waap ticket update --ticket-id tt-deploy --remove-depends-on tt-test
 waap ticket list --status pending --unblocked
 ```
 
-Update ticket status:
+## Agent instructions
+
+Agent instructions should identify the ticket and require CLI state mutation. They must not tell the agent to edit central state files or create source worktrees. A suitable instruction is:
+
+> Implement the functionality described by ticket `tt-example`. Use the waap CLI for state changes. Work only in the source worktree prepared by the launcher; do not create or remove worktrees.
+
+Read records with CLI commands when needed:
 
 ```sh
-waap ticket update --ticket-id tt-example-feature --set-status in-progress
-waap ticket update --ticket-id tt-example-feature --set-status completed
+waap ticket get --ticket-id tt-example
+waap agent get --agent-id aa-example
 ```
 
-Create an agent from an instruction prompt on stdin:
+Templates are available at:
+
+- [Planner](./roles/planner/agent.md)
+- [Developer](./roles/developer/agent.md)
+
+## CLI reference
 
 ```sh
-waap agent new < .agents/skills/waap/roles/planner/agent.md
-waap agent new < resolved-developer-agent.md
+waap check
+waap ticket new --name 'Example' < ticket.md
+waap ticket get --ticket-id tt-example
+waap ticket update --ticket-id tt-example --set-status in-progress
+waap ticket list --status pending --unblocked
+waap agent new --name 'Example Agent' < agent.md
+waap agent get --agent-id aa-example
+waap agent update --agent-id aa-example --set-status completed
+waap agent list --status ready
+waap agent run --agent-id aa-example --system codex
+waap agent stop --agent-id aa-example
 ```
 
-Run an agent:
+`agent run` supports `opencode` (default), `claude`, and `codex`. For OpenCode, set `OPENCODE_SERVER_URL`, `OPENCODE_SERVER_USERNAME`, `OPENCODE_SERVER_PASSWORD`, and `OPENCODE_SERVER_MODEL`. The model accepts `provider/model` or `provider/model/variant`; recognized variants are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 
-```sh
-waap agent run --agent-id aa-1234abcd
-```
+## Running outside a sandbox
 
-Run an agent with a different system:
+State-mutating CLI commands write and commit state. Run them outside a command sandbox that blocks Git locks.
 
-```sh
-waap agent run --agent-id aa-1234abcd --system claude
-waap agent run --agent-id aa-1234abcd --system codex
-waap agent run --agent-id aa-1234abcd --system opencode
-```
+- **Codex:** use `sandbox_permissions: "require_escalated"` with a concise justification.
+- **Claude Code:** use `dangerouslyDisableSandbox: true` on the Bash call.
 
-For OpenCode, set `OPENCODE_SERVER_URL`, `OPENCODE_SERVER_USERNAME`, `OPENCODE_SERVER_PASSWORD`, and `OPENCODE_SERVER_MODEL`. The model accepts `provider/model` or `provider/model/variant`; recognized variants are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
+## waap loop
 
-Update agent status:
+1. Create tickets for work.
+2. While pending tickets are unblocked:
+   1. Create agents with clear instructions.
+   2. Run agents.
+   3. Run application tests and `waap check`.
+   4. Add tickets for remaining work.
 
-```sh
-waap agent update --agent-id aa-1234abcd --set-status completed
-```
-
-Prefer `--output-format json` when scripting and parse the `agent_id` or `ticket_id` fields from command output.
-
-## waap Loop
-
-To effectively use waap, follow this loop:
-
-1. Create tickets for work to be done. (`cat ticket.md | waap ticket new ...`)
-1. While there are unblocked tickets, (`waap ticket list --status pending --unblocked`)
-    1. Create agents to complete the work. (`cat agent.md | waap agent new ...`)
-    2. Run the agents. (`waap agent run ...`)
-    3. Add new tickets as needed. (`cat new_ticket.md | waap ticket new ...`)
-
-### Software Factory Loop
-
-To build a software factory, follow this loop:
-
-1. Draft a `spec.md` including any diagrams, or associated files describing the program.
-1. Create a planner ticket to create tickets for implementing the program. (`cat ticket.md | waap ticket new ...`)
-1. Run the planner agent. (`waap agent run ...`)
-1. While there are unblocked tickets, (`waap ticket list --status pending --unblocked`)
-    1. Create agents to complete the work. (`cat agent.md | waap agent new ...`)
-    1. Run the agents. (`waap agent run ...`)
-    1. Run end-to-end tests.
-    1. Verify all aspects of the spec have been implemented.
-    1. Add new tickets as needed to address spec drift, testing, or refactoring. (`cat new_ticket.md | waap ticket new ...`)
-
-### Structured Agent Program Loop
-
-To run a structured program leveraging agents, e.g.
-
-```
-1. Fetch configs from config store
-1. For every host in fleet,
-    1. Deploy or update configs for that host
-    1. Restart the host
-    1. Ensure the host is back online
-```
-
-First, create tickets for implementing the program, making sure to include dependency details, then run the waap loop.
+For a software factory, first create a planner ticket for the application specification, run its planner agent, then use the same loop for the resulting developer tickets.
