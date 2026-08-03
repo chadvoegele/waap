@@ -5,8 +5,8 @@ use std::process::ExitCode;
 use super::backend::{AgentSystemBackend, RunOutcome, StartContext};
 use crate::agent::{
     agent_report_json, load_agent_report, print_agent_report_human, read_agent_record,
-    transition_agent_status, write_agent_record, AgentMetadata, AgentReport, AgentStatus,
-    AgentSystem,
+    transition_agent_status, write_agent_record, AgentMetadata, AgentReport, AgentRunOptions,
+    AgentStatus, AgentSystem,
 };
 use crate::cli::OutputFormat;
 use crate::git::{commit_paths, create_worktree, remove_worktree};
@@ -36,9 +36,10 @@ pub(crate) fn run_agent(
     output_format: &OutputFormat,
     agent_id: &str,
     system: &AgentSystem,
+    options: &AgentRunOptions,
 ) -> io::Result<ExitCode> {
     require_ready_agent(waap_root, agent_id)?;
-    let mut backend = system.backend()?;
+    let mut backend = system.run_backend(options)?;
     run_agent_with_backend(
         repository_root,
         waap_root,
@@ -373,7 +374,8 @@ mod tests {
     use crate::agent::backend::{fake::FakeBackend, RunOutcome};
     use crate::agent::{
         agent_report_json, read_agent_record, transition_agent_status, write_agent_record,
-        AgentMetadata, AgentReport, AgentStatus, AgentSystem,
+        AgentMetadata, AgentReport, AgentRunOptions, AgentStatus, AgentSystem,
+        CodexReasoningEffort, CODEX_ENV_LOCK,
     };
     use crate::cli::OutputFormat;
     use crate::git::{create_worktree, remove_worktree};
@@ -604,6 +606,7 @@ mod tests {
             &OutputFormat::Json,
             agent_id,
             &AgentSystem::Opencode,
+            &AgentRunOptions::default(),
         )
         .unwrap_err();
 
@@ -639,6 +642,7 @@ mod tests {
             &OutputFormat::Json,
             agent_id,
             &AgentSystem::Opencode,
+            &AgentRunOptions::default(),
         )
         .unwrap_err();
 
@@ -652,6 +656,83 @@ mod tests {
                 Some(value) => std::env::set_var(name, value),
                 None => std::env::remove_var(name),
             }
+        }
+    }
+
+    #[test]
+    fn codex_only_options_are_rejected_before_non_codex_state_changes() {
+        let cases = [
+            AgentRunOptions {
+                model: Some("gpt-5.4".to_string()),
+                reasoning_effort: None,
+            },
+            AgentRunOptions {
+                model: None,
+                reasoning_effort: Some(CodexReasoningEffort::High),
+            },
+        ];
+
+        for system in [AgentSystem::Opencode, AgentSystem::Claude] {
+            for options in &cases {
+                let dir = tempdir().unwrap();
+                init_repo_with_commit(dir.path());
+                let agent_id = "aa-00000001";
+                seed_agent_record(dir.path(), agent_id, "ready");
+
+                let error = run_agent(
+                    dir.path(),
+                    dir.path(),
+                    &OutputFormat::Json,
+                    agent_id,
+                    &system,
+                    options,
+                )
+                .unwrap_err();
+
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+                assert!(error
+                    .to_string()
+                    .contains("only supported with --system codex"));
+                assert_eq!(
+                    read_agent_record(dir.path(), agent_id).unwrap().0.status,
+                    "ready"
+                );
+                assert!(!dir.path().join(agent_worktree_dir(agent_id)).exists());
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_codex_environment_is_rejected_before_state_changes() {
+        let _lock = CODEX_ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("CODEX_REASONING_EFFORT");
+        std::env::set_var("CODEX_REASONING_EFFORT", "extreme");
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let agent_id = "aa-00000001";
+        seed_agent_record(dir.path(), agent_id, "ready");
+
+        let error = run_agent(
+            dir.path(),
+            dir.path(),
+            &OutputFormat::Json,
+            agent_id,
+            &AgentSystem::Codex,
+            &AgentRunOptions::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("CODEX_REASONING_EFFORT"));
+        assert_eq!(
+            read_agent_record(dir.path(), agent_id).unwrap().0.status,
+            "ready"
+        );
+        assert!(!dir.path().join(agent_worktree_dir(agent_id)).exists());
+
+        match previous {
+            Some(value) => std::env::set_var("CODEX_REASONING_EFFORT", value),
+            None => std::env::remove_var("CODEX_REASONING_EFFORT"),
         }
     }
 

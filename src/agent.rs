@@ -30,6 +30,8 @@ mod update;
 
 #[cfg(test)]
 static OPENCODE_ENV_LOCK: Mutex<()> = Mutex::new(());
+#[cfg(test)]
+static CODEX_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 pub(crate) use get::{load_agent_content, load_agent_report, print_agent_content_report};
 pub(crate) use list::{list_agents, print_agent_list};
@@ -256,12 +258,96 @@ pub(crate) enum AgentSystem {
     Codex,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum CodexReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+    Ultra,
+}
+
+impl CodexReasoningEffort {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+            Self::Ultra => "ultra",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        Self::value_variants()
+            .iter()
+            .find(|effort| effort.as_str() == value)
+            .copied()
+    }
+
+    pub(crate) fn labels() -> Vec<&'static str> {
+        Self::value_variants()
+            .iter()
+            .map(|effort| effort.as_str())
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AgentRunOptions {
+    pub(crate) model: Option<String>,
+    pub(crate) reasoning_effort: Option<CodexReasoningEffort>,
+}
+
 impl AgentSystem {
     fn backend(&self) -> io::Result<Box<dyn backend::AgentSystemBackend>> {
         match self {
             AgentSystem::Opencode => Ok(Box::new(opencode::OpencodeBackend::from_env()?)),
             AgentSystem::Claude => Ok(Box::new(claude::ClaudeBackend::from_env())),
-            AgentSystem::Codex => Ok(Box::new(codex::CodexBackend::from_env())),
+            AgentSystem::Codex => Ok(Box::new(codex::CodexBackend::for_abort())),
+        }
+    }
+
+    fn run_backend(
+        &self,
+        options: &AgentRunOptions,
+    ) -> io::Result<Box<dyn backend::AgentSystemBackend>> {
+        if options
+            .model
+            .as_deref()
+            .is_some_and(|model| model.trim().is_empty())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "model must not be empty",
+            ));
+        }
+        if self != &AgentSystem::Codex {
+            let option = if options.model.is_some() {
+                Some("--model")
+            } else if options.reasoning_effort.is_some() {
+                Some("--reasoning-effort")
+            } else {
+                None
+            };
+            if let Some(option) = option {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{option} is only supported with --system codex"),
+                ));
+            }
+        }
+
+        match self {
+            AgentSystem::Opencode => Ok(Box::new(opencode::OpencodeBackend::from_env()?)),
+            AgentSystem::Claude => Ok(Box::new(claude::ClaudeBackend::from_env())),
+            AgentSystem::Codex => Ok(Box::new(codex::CodexBackend::from_env(options)?)),
         }
     }
 
@@ -333,7 +419,7 @@ mod tests {
 
     use super::{
         agent_report_json, is_agent_id, transition_agent_status, AgentMetadata, AgentReport,
-        AgentStatus, AgentSystem, OPENCODE_ENV_LOCK,
+        AgentRunOptions, AgentStatus, AgentSystem, CODEX_ENV_LOCK, OPENCODE_ENV_LOCK,
     };
     use crate::ids::random_hex_chars;
 
@@ -525,6 +611,37 @@ mod tests {
             if let Some(value) = value {
                 env::set_var(name, value);
             }
+        }
+    }
+
+    #[test]
+    fn codex_run_backend_does_not_require_opencode_environment() {
+        let _opencode_lock = OPENCODE_ENV_LOCK.lock().unwrap();
+        let _codex_lock = CODEX_ENV_LOCK.lock().unwrap();
+        let opencode_names = [
+            "OPENCODE_SERVER_URL",
+            "OPENCODE_SERVER_USERNAME",
+            "OPENCODE_SERVER_PASSWORD",
+            "OPENCODE_SERVER_MODEL",
+        ];
+        let previous_opencode = opencode_names.map(env::var_os);
+        let previous_effort = env::var_os("CODEX_REASONING_EFFORT");
+        for name in opencode_names {
+            env::remove_var(name);
+        }
+        env::remove_var("CODEX_REASONING_EFFORT");
+
+        AgentSystem::Codex
+            .run_backend(&AgentRunOptions::default())
+            .unwrap();
+
+        for (name, value) in opencode_names.into_iter().zip(previous_opencode) {
+            if let Some(value) = value {
+                env::set_var(name, value);
+            }
+        }
+        if let Some(value) = previous_effort {
+            env::set_var("CODEX_REASONING_EFFORT", value);
         }
     }
 

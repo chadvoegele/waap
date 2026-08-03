@@ -10,15 +10,22 @@ use serde_json::{json, Value as JsonValue};
 use super::backend::{
     AbortContext, AgentSystemBackend, RunHandle, RunOutcome, StartContext, StartedRun,
 };
+use super::{AgentRunOptions, CodexReasoningEffort};
 
 pub(super) struct CodexBackend {
     config: CodexRunConfig,
 }
 
 impl CodexBackend {
-    pub(super) fn from_env() -> Self {
+    pub(super) fn from_env(options: &AgentRunOptions) -> io::Result<Self> {
+        Ok(Self {
+            config: codex_run_config_from_env(options)?,
+        })
+    }
+
+    pub(super) fn for_abort() -> Self {
         Self {
-            config: codex_run_config_from_env(),
+            config: CodexRunConfig::default(),
         }
     }
 }
@@ -80,17 +87,46 @@ const METHOD_TURN_COMPLETED: &str = "turn/completed";
 const APPROVAL_POLICY_NEVER: &str = "never";
 const SANDBOX_DANGER_FULL_ACCESS: &str = "danger-full-access";
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 struct CodexRunConfig {
     model: Option<String>,
+    reasoning_effort: Option<CodexReasoningEffort>,
 }
 
-fn codex_run_config_from_env() -> CodexRunConfig {
-    CodexRunConfig {
-        model: env::var("CODEX_MODEL")
+fn codex_run_config_from_env(options: &AgentRunOptions) -> io::Result<CodexRunConfig> {
+    let model = options.model.clone().or_else(|| {
+        env::var("CODEX_MODEL")
             .ok()
-            .filter(|model| !model.is_empty()),
-    }
+            .filter(|model| !model.is_empty())
+    });
+    let reasoning_effort = match options.reasoning_effort {
+        Some(effort) => Some(effort),
+        None => match env::var("CODEX_REASONING_EFFORT") {
+            Ok(value) => Some(CodexReasoningEffort::parse(&value).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "invalid CODEX_REASONING_EFFORT {value:?}; accepted values: {}",
+                        CodexReasoningEffort::labels().join(", ")
+                    ),
+                )
+            })?),
+            Err(env::VarError::NotPresent) => None,
+            Err(env::VarError::NotUnicode(_)) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "invalid CODEX_REASONING_EFFORT; accepted values: {}",
+                        CodexReasoningEffort::labels().join(", ")
+                    ),
+                ));
+            }
+        },
+    };
+    Ok(CodexRunConfig {
+        model,
+        reasoning_effort,
+    })
 }
 
 fn signal_codex_run(agent_id: &str) -> io::Result<()> {
@@ -156,13 +192,21 @@ fn thread_start_params(cwd: &Path, model: Option<&str>) -> JsonValue {
     params
 }
 
-fn turn_start_params(thread_id: &str, prompt: &str, model: Option<&str>) -> JsonValue {
+fn turn_start_params(
+    thread_id: &str,
+    prompt: &str,
+    model: Option<&str>,
+    reasoning_effort: Option<CodexReasoningEffort>,
+) -> JsonValue {
     let mut params = json!({
         "threadId": thread_id,
         "input": [{ "type": "text", "text": prompt }],
     });
     if let Some(model) = model {
         params["model"] = JsonValue::String(model.to_string());
+    }
+    if let Some(effort) = reasoning_effort {
+        params["effort"] = JsonValue::String(effort.as_str().to_string());
     }
     params
 }
@@ -227,6 +271,7 @@ struct CodexClient<R, W, O> {
     out: O,
     next_id: i64,
     model: Option<String>,
+    reasoning_effort: Option<CodexReasoningEffort>,
 }
 
 fn spawn_codex_app_server(
@@ -255,6 +300,7 @@ fn spawn_codex_app_server(
         out: io::stdout(),
         next_id: 0,
         model: config.model.clone(),
+        reasoning_effort: config.reasoning_effort,
     })
 }
 
@@ -356,7 +402,12 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
     }
 
     fn turn_start(&mut self, thread_id: &str, prompt: &str) -> io::Result<String> {
-        let params = turn_start_params(thread_id, prompt, self.model.as_deref());
+        let params = turn_start_params(
+            thread_id,
+            prompt,
+            self.model.as_deref(),
+            self.reasoning_effort,
+        );
         let result = self.send_request(METHOD_TURN_START, params)?;
         result
             .pointer("/turn/id")
@@ -419,7 +470,10 @@ mod tests {
     use std::io::Cursor;
     use std::path::PathBuf;
 
+    use clap::ValueEnum;
+
     use super::*;
+    use crate::agent::CODEX_ENV_LOCK;
 
     fn parse(line: &str) -> JsonValue {
         serde_json::from_str(line).expect("line is JSON")
@@ -432,6 +486,7 @@ mod tests {
             out: Vec::new(),
             next_id: 0,
             model: None,
+            reasoning_effort: None,
         }
     }
 
@@ -494,6 +549,8 @@ mod tests {
         assert_eq!(params["sandbox"], json!("danger-full-access"));
         assert_eq!(params["cwd"], json!("/repo/with space"));
         assert_eq!(params["model"], json!("o3"));
+        assert!(params.get("effort").is_none());
+        assert!(params.get("reasoningEffort").is_none());
         assert_eq!(command.get_program(), "codex");
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
@@ -513,20 +570,119 @@ mod tests {
 
     #[test]
     fn turn_start_params_use_camel_case_thread_id_and_carry_prompt() {
-        let params = turn_start_params("th_1", "do the thing", Some("o3"));
+        let params = turn_start_params(
+            "th_1",
+            "do the thing",
+            Some("gpt-5.4"),
+            Some(CodexReasoningEffort::High),
+        );
 
         assert_eq!(params["threadId"], json!("th_1"));
         assert_eq!(params["input"][0]["type"], json!("text"));
         assert_eq!(params["input"][0]["text"], json!("do the thing"));
-        assert_eq!(params["model"], json!("o3"));
+        assert_eq!(params["model"], json!("gpt-5.4"));
+        assert_eq!(params["effort"], json!("high"));
+        assert!(params.get("reasoningEffort").is_none());
     }
 
     #[test]
     fn turn_start_params_omit_model_when_unset() {
-        let params = turn_start_params("th_1", "prompt", None);
+        let params = turn_start_params("th_1", "prompt", None, None);
 
         assert!(params.get("model").is_none());
+        assert!(params.get("effort").is_none());
         assert_eq!(params["threadId"], json!("th_1"));
+    }
+
+    #[test]
+    fn turn_start_params_support_model_and_effort_independently() {
+        let model_only = turn_start_params("th", "prompt", Some("gpt-5.4"), None);
+        let effort_only =
+            turn_start_params("th", "prompt", None, Some(CodexReasoningEffort::Ultra));
+
+        assert_eq!(model_only["model"], json!("gpt-5.4"));
+        assert!(model_only.get("effort").is_none());
+        assert!(effort_only.get("model").is_none());
+        assert_eq!(effort_only["effort"], json!("ultra"));
+    }
+
+    #[test]
+    fn codex_config_uses_environment_fallbacks_and_cli_precedence() {
+        let _lock = CODEX_ENV_LOCK.lock().unwrap();
+        let previous_model = env::var_os("CODEX_MODEL");
+        let previous_effort = env::var_os("CODEX_REASONING_EFFORT");
+        env::set_var("CODEX_MODEL", "env-model");
+        env::set_var("CODEX_REASONING_EFFORT", "low");
+
+        let fallback = codex_run_config_from_env(&AgentRunOptions::default()).unwrap();
+        let overrides = codex_run_config_from_env(&AgentRunOptions {
+            model: Some("cli-model".to_string()),
+            reasoning_effort: Some(CodexReasoningEffort::High),
+        })
+        .unwrap();
+        env::set_var("CODEX_REASONING_EFFORT", "invalid-but-overridden");
+        let invalid_override = codex_run_config_from_env(&AgentRunOptions {
+            model: None,
+            reasoning_effort: Some(CodexReasoningEffort::Max),
+        })
+        .unwrap();
+
+        assert_eq!(fallback.model.as_deref(), Some("env-model"));
+        assert_eq!(fallback.reasoning_effort, Some(CodexReasoningEffort::Low));
+        assert_eq!(overrides.model.as_deref(), Some("cli-model"));
+        assert_eq!(overrides.reasoning_effort, Some(CodexReasoningEffort::High));
+        assert_eq!(
+            invalid_override.reasoning_effort,
+            Some(CodexReasoningEffort::Max)
+        );
+
+        match previous_model {
+            Some(value) => env::set_var("CODEX_MODEL", value),
+            None => env::remove_var("CODEX_MODEL"),
+        }
+        match previous_effort {
+            Some(value) => env::set_var("CODEX_REASONING_EFFORT", value),
+            None => env::remove_var("CODEX_REASONING_EFFORT"),
+        }
+    }
+
+    #[test]
+    fn codex_config_accepts_exact_efforts_and_rejects_invalid_environment_values() {
+        let _lock = CODEX_ENV_LOCK.lock().unwrap();
+        let previous_model = env::var_os("CODEX_MODEL");
+        let previous_effort = env::var_os("CODEX_REASONING_EFFORT");
+        env::remove_var("CODEX_MODEL");
+
+        for expected in CodexReasoningEffort::value_variants() {
+            env::set_var("CODEX_REASONING_EFFORT", expected.as_str());
+            let config = codex_run_config_from_env(&AgentRunOptions::default()).unwrap();
+            assert_eq!(config.reasoning_effort, Some(*expected));
+        }
+        for invalid in ["", "HIGH", "extreme"] {
+            env::set_var("CODEX_REASONING_EFFORT", invalid);
+            let error = codex_run_config_from_env(&AgentRunOptions::default()).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            let message = error.to_string();
+            assert!(message.contains("CODEX_REASONING_EFFORT"));
+            for accepted in CodexReasoningEffort::labels() {
+                assert!(message.contains(accepted));
+            }
+        }
+
+        env::remove_var("CODEX_REASONING_EFFORT");
+        assert_eq!(
+            codex_run_config_from_env(&AgentRunOptions::default()).unwrap(),
+            CodexRunConfig::default()
+        );
+
+        match previous_model {
+            Some(value) => env::set_var("CODEX_MODEL", value),
+            None => env::remove_var("CODEX_MODEL"),
+        }
+        match previous_effort {
+            Some(value) => env::set_var("CODEX_REASONING_EFFORT", value),
+            None => env::remove_var("CODEX_REASONING_EFFORT"),
+        }
     }
 
     #[test]

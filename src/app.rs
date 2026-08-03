@@ -9,7 +9,7 @@ use log::LevelFilter;
 use crate::agent::{
     create_agent, list_agents, load_agent_content, print_agent_content_report, print_agent_list,
     print_agent_stop_report, print_created_agent_report, print_updated_agent_report, run_agent,
-    stop_agents_with_systems, update_agent,
+    stop_agents_with_systems, update_agent, AgentRunOptions,
 };
 use crate::check::{check_waap, print_check_result};
 use crate::cli::{AgentCommand, Cli, Command, TicketCommand};
@@ -108,13 +108,23 @@ pub(crate) fn run() -> ExitCode {
                 }
                 Err(error) => command_error("failed to create agent", error),
             },
-            AgentCommand::Run { agent_id, system } => {
+            AgentCommand::Run {
+                agent_id,
+                system,
+                model,
+                reasoning_effort,
+            } => {
+                let options = AgentRunOptions {
+                    model,
+                    reasoning_effort,
+                };
                 match run_agent(
                     repository_root,
                     waap_root,
                     &cli.output_format,
                     &agent_id,
                     &system,
+                    &options,
                 ) {
                     Ok(status) => status,
                     Err(error) => {

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::agent::{AgentStatus, AgentSystem};
+use crate::agent::{AgentStatus, AgentSystem, CodexReasoningEffort};
 use crate::ticket::TicketStatus;
 
 #[derive(Debug, Parser)]
@@ -65,6 +65,14 @@ pub(crate) enum AgentCommand {
         /// Agent system used to run the agent.
         #[arg(long, value_enum, default_value = "opencode")]
         system: AgentSystem,
+
+        /// Codex model for this run (overrides CODEX_MODEL).
+        #[arg(long, value_parser = parse_non_empty_model)]
+        model: Option<String>,
+
+        /// Codex reasoning effort for this run (overrides CODEX_REASONING_EFFORT).
+        #[arg(long, value_enum)]
+        reasoning_effort: Option<CodexReasoningEffort>,
     },
     /// Get an existing agent's metadata and markdown content.
     Get {
@@ -92,6 +100,14 @@ pub(crate) enum AgentCommand {
         #[arg(long, value_enum)]
         status: Option<AgentStatus>,
     },
+}
+
+fn parse_non_empty_model(value: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        Err("model must not be empty".to_string())
+    } else {
+        Ok(value.to_string())
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -138,7 +154,7 @@ mod tests {
     use clap::Parser;
 
     use super::{AgentCommand, Cli, Command, TicketCommand};
-    use crate::agent::{AgentStatus, AgentSystem};
+    use crate::agent::{AgentStatus, AgentSystem, CodexReasoningEffort};
     use crate::cli::OutputFormat;
     use crate::ticket::TicketStatus;
 
@@ -471,6 +487,7 @@ mod tests {
                 command: AgentCommand::Run {
                     agent_id,
                     system: AgentSystem::Opencode,
+                    ..
                 }
             } if agent_id == "aa-3881fda0"
         ));
@@ -495,6 +512,7 @@ mod tests {
                 command: AgentCommand::Run {
                     agent_id,
                     system: AgentSystem::Claude,
+                    ..
                 }
             } if agent_id == "aa-3881fda0"
         ));
@@ -519,9 +537,112 @@ mod tests {
                 command: AgentCommand::Run {
                     agent_id,
                     system: AgentSystem::Codex,
+                    ..
                 }
             } if agent_id == "aa-3881fda0"
         ));
+    }
+
+    #[test]
+    fn parses_agent_run_with_codex_model_and_reasoning_effort() {
+        let cli = Cli::try_parse_from([
+            "waap",
+            "agent",
+            "run",
+            "--agent-id",
+            "aa-3881fda0",
+            "--system",
+            "codex",
+            "--model",
+            "gpt-5.4",
+            "--reasoning-effort",
+            "high",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Agent {
+                command: AgentCommand::Run {
+                    model: Some(model),
+                    reasoning_effort: Some(CodexReasoningEffort::High),
+                    ..
+                }
+            } if model == "gpt-5.4"
+        ));
+    }
+
+    #[test]
+    fn parses_codex_run_options_independently() {
+        let model = Cli::try_parse_from([
+            "waap",
+            "agent",
+            "run",
+            "--agent-id",
+            "aa-3881fda0",
+            "--model",
+            "gpt-5.4",
+        ])
+        .unwrap();
+        let effort = Cli::try_parse_from([
+            "waap",
+            "agent",
+            "run",
+            "--agent-id",
+            "aa-3881fda0",
+            "--reasoning-effort",
+            "ultra",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            model.command,
+            Command::Agent {
+                command: AgentCommand::Run {
+                    model: Some(model),
+                    reasoning_effort: None,
+                    ..
+                }
+            } if model == "gpt-5.4"
+        ));
+        assert!(matches!(
+            effort.command,
+            Command::Agent {
+                command: AgentCommand::Run {
+                    model: None,
+                    reasoning_effort: Some(CodexReasoningEffort::Ultra),
+                    ..
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn agent_run_rejects_invalid_effort_and_empty_model() {
+        let invalid_effort = Cli::try_parse_from([
+            "waap",
+            "agent",
+            "run",
+            "--agent-id",
+            "aa-3881fda0",
+            "--reasoning-effort",
+            "extreme",
+        ])
+        .unwrap_err();
+        let empty_model = Cli::try_parse_from([
+            "waap",
+            "agent",
+            "run",
+            "--agent-id",
+            "aa-3881fda0",
+            "--model",
+            "",
+        ])
+        .unwrap_err();
+
+        assert_eq!(invalid_effort.kind(), clap::error::ErrorKind::InvalidValue);
+        assert_eq!(empty_model.kind(), clap::error::ErrorKind::ValueValidation);
+        assert!(empty_model.to_string().contains("model must not be empty"));
     }
 
     #[test]
