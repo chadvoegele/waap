@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
 
-use crate::check::check_waap;
+use crate::check::{check_state, check_waap};
 use crate::cli::OutputFormat;
 use crate::git::{Committed, StateMutationContext, StateTransaction};
 use crate::record::WaapRecordKind;
@@ -31,8 +31,8 @@ pub(crate) fn print_ticket_report(
     }
 }
 
-pub(crate) fn create_ticket(
-    waap_root: &Path,
+pub(crate) fn create_ticket_in_context(
+    context: StateMutationContext,
     name: Option<&str>,
     depends_on: &[String],
 ) -> io::Result<Committed<TicketReport>> {
@@ -41,8 +41,12 @@ pub(crate) fn create_ticket(
         .read_to_string(&mut markdown)
         .map_err(|error| io::Error::new(error.kind(), format!("failed to read stdin: {error}")))?;
 
-    let context = StateMutationContext::legacy(waap_root)?;
-    let mut transaction = StateTransaction::begin(context, check_waap)?;
+    let validate = if context.is_central() {
+        check_state
+    } else {
+        check_waap
+    };
+    let mut transaction = StateTransaction::begin(context, validate)?;
     let state_root = transaction.state_root().to_path_buf();
     let report = create_ticket_with_markdown_in_transaction(
         &state_root,

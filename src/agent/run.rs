@@ -8,7 +8,7 @@ use crate::agent::{
     transition_agent_status, write_agent_record, AgentMetadata, AgentReport, AgentStatus,
     AgentSystem,
 };
-use crate::check::check_waap;
+use crate::check::{check_state, check_waap};
 use crate::cli::OutputFormat;
 use crate::git::{create_worktree, remove_worktree, StateMutationContext, StateTransaction};
 
@@ -31,44 +31,61 @@ fn print_run_agent_report(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn run_agent(
     waap_root: &Path,
     output_format: &OutputFormat,
     agent_id: &str,
     system: &AgentSystem,
 ) -> io::Result<ExitCode> {
-    require_ready_agent(waap_root, agent_id)?;
-    let mut backend = system.backend()?;
-    run_agent_with_backend(waap_root, output_format, agent_id, system, backend.as_mut())
+    run_agent_in_context(
+        StateMutationContext::legacy(waap_root)?,
+        output_format,
+        agent_id,
+        system,
+    )
 }
 
-fn run_agent_with_backend(
-    waap_root: &Path,
+pub(crate) fn run_agent_in_context(
+    context: StateMutationContext,
+    output_format: &OutputFormat,
+    agent_id: &str,
+    system: &AgentSystem,
+) -> io::Result<ExitCode> {
+    require_ready_agent(&context.state_root, agent_id)?;
+    let mut backend = system.backend()?;
+    run_agent_with_context(context, output_format, agent_id, system, backend.as_mut())
+}
+
+fn run_agent_with_context(
+    context: StateMutationContext,
     output_format: &OutputFormat,
     agent_id: &str,
     system: &AgentSystem,
     backend: &mut dyn AgentSystemBackend,
 ) -> io::Result<ExitCode> {
-    let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
+    let (mut metadata, body) = read_agent_record(&context.state_root, agent_id)?;
     metadata.system = Some(system.clone());
 
-    if let Err(error) = mark_running(waap_root, output_format, agent_id, &mut metadata, &body) {
-        let is_running = read_agent_record(waap_root, agent_id)
+    if let Err(error) =
+        mark_running_in_context(&context, output_format, agent_id, &mut metadata, &body)
+    {
+        let is_running = read_agent_record(&context.state_root, agent_id)
             .map(|(metadata, _)| metadata.status == AgentStatus::Running.as_str())
             .unwrap_or(false);
         return Err(if is_running {
-            persist_failed_after_error(waap_root, output_format, agent_id, error)
+            persist_failed_after_error_in_context(&context, output_format, agent_id, error)
         } else {
             error
         });
     }
-    let result = run_started_agent(waap_root, output_format, agent_id, system, backend);
+    let result = run_started_agent(&context, output_format, agent_id, system, backend);
 
     match result {
         Ok(RunOutcome::Completed) => {
-            if let Err(error) = mark_completed(waap_root, output_format, agent_id) {
-                return Err(persist_failed_after_error(
-                    waap_root,
+            if let Err(error) = mark_completed_in_context(&context, output_format, agent_id) {
+                return Err(persist_failed_after_error_in_context(
+                    &context,
                     output_format,
                     agent_id,
                     error,
@@ -77,11 +94,11 @@ fn run_agent_with_backend(
             Ok(ExitCode::SUCCESS)
         }
         Ok(RunOutcome::Failed(code)) => {
-            mark_failed(waap_root, output_format, agent_id)?;
+            mark_failed_in_context(&context, output_format, agent_id)?;
             Ok(code)
         }
-        Err(error) => Err(persist_failed_after_error(
-            waap_root,
+        Err(error) => Err(persist_failed_after_error_in_context(
+            &context,
             output_format,
             agent_id,
             error,
@@ -90,15 +107,15 @@ fn run_agent_with_backend(
 }
 
 fn run_started_agent(
-    waap_root: &Path,
+    context: &StateMutationContext,
     output_format: &OutputFormat,
     agent_id: &str,
     system: &AgentSystem,
     backend: &mut dyn AgentSystemBackend,
 ) -> io::Result<RunOutcome> {
-    let mut worktree = AgentWorktree::create(waap_root, agent_id)?;
-    let repository_root = waap_root.canonicalize()?;
-    let prompt = build_agent_goal(&repository_root, agent_id);
+    let mut worktree = AgentWorktree::create(&context.source_root, agent_id)?;
+    let repository_root = context.source_root.canonicalize()?;
+    let prompt = build_agent_goal(&context.state_root, agent_id);
     let run_result = backend
         .start(StartContext {
             agent_id,
@@ -107,8 +124,8 @@ fn run_started_agent(
             worktree_dir: worktree.dir(),
         })
         .and_then(|started| {
-            update_agent_session(
-                waap_root,
+            update_agent_session_in_context(
+                context,
                 output_format,
                 agent_id,
                 &started.session_id,
@@ -123,7 +140,7 @@ fn run_started_agent(
 fn build_agent_goal(repository_root: &Path, agent_id: &str) -> String {
     let instruction_path = repository_root.join(format!(".waap/agents/{agent_id}/agent.md"));
     format!(
-        "Complete when instructions in {} are satisfied",
+        "Complete when instructions in {} are satisfied. Use the waap CLI for state changes; do not edit waap state files directly.",
         instruction_path.display()
     )
 }
@@ -195,15 +212,19 @@ impl Drop for AgentWorktree {
     }
 }
 
-fn mark_running(
-    waap_root: &Path,
+fn mark_running_in_context(
+    context: &StateMutationContext,
     output_format: &OutputFormat,
     agent_id: &str,
     metadata: &mut AgentMetadata,
     body: &str,
 ) -> io::Result<()> {
-    let context = StateMutationContext::legacy(waap_root)?;
-    let mut transaction = StateTransaction::begin(context, check_waap)?;
+    let validate = if context.is_central() {
+        check_state
+    } else {
+        check_waap
+    };
+    let mut transaction = StateTransaction::begin(context.clone(), validate)?;
     let state_root = transaction.state_root().to_path_buf();
     let path = crate::agent::agent_path(&state_root, agent_id);
     transaction.snapshot_path(&path)?;
@@ -219,15 +240,19 @@ fn mark_running(
     Ok(())
 }
 
-fn update_agent_session(
-    waap_root: &Path,
+fn update_agent_session_in_context(
+    context: &StateMutationContext,
     output_format: &OutputFormat,
     agent_id: &str,
     session_id: &str,
     system: AgentSystem,
 ) -> io::Result<()> {
-    let context = StateMutationContext::legacy(waap_root)?;
-    let mut transaction = StateTransaction::begin(context, check_waap)?;
+    let validate = if context.is_central() {
+        check_state
+    } else {
+        check_waap
+    };
+    let mut transaction = StateTransaction::begin(context.clone(), validate)?;
     let state_root = transaction.state_root().to_path_buf();
     let (mut metadata, body) = read_agent_record(&state_root, agent_id)?;
     if metadata.status != AgentStatus::Running.as_str() {
@@ -271,13 +296,13 @@ fn update_agent_session(
     Ok(())
 }
 
-fn mark_completed(
-    waap_root: &Path,
+fn mark_completed_in_context(
+    context: &StateMutationContext,
     output_format: &OutputFormat,
     agent_id: &str,
 ) -> io::Result<()> {
-    transition_and_commit_status(
-        waap_root,
+    transition_and_commit_status_in_context(
+        context,
         output_format,
         agent_id,
         AgentStatus::Completed,
@@ -286,9 +311,13 @@ fn mark_completed(
     )
 }
 
-fn mark_failed(waap_root: &Path, output_format: &OutputFormat, agent_id: &str) -> io::Result<()> {
-    transition_and_commit_status(
-        waap_root,
+fn mark_failed_in_context(
+    context: &StateMutationContext,
+    output_format: &OutputFormat,
+    agent_id: &str,
+) -> io::Result<()> {
+    transition_and_commit_status_in_context(
+        context,
         output_format,
         agent_id,
         AgentStatus::Failed,
@@ -297,16 +326,20 @@ fn mark_failed(waap_root: &Path, output_format: &OutputFormat, agent_id: &str) -
     )
 }
 
-fn transition_and_commit_status(
-    waap_root: &Path,
+fn transition_and_commit_status_in_context(
+    context: &StateMutationContext,
     output_format: &OutputFormat,
     agent_id: &str,
     status: AgentStatus,
     header: &str,
     commit_message: &str,
 ) -> io::Result<()> {
-    let context = StateMutationContext::legacy(waap_root)?;
-    let mut transaction = StateTransaction::begin(context, check_waap)?;
+    let validate = if context.is_central() {
+        check_state
+    } else {
+        check_waap
+    };
+    let mut transaction = StateTransaction::begin(context.clone(), validate)?;
     let state_root = transaction.state_root().to_path_buf();
     let (mut metadata, body) = read_agent_record(&state_root, agent_id)?;
     if metadata.status == status.as_str() {
@@ -322,17 +355,127 @@ fn transition_and_commit_status(
     Ok(())
 }
 
+fn persist_failed_after_error_in_context(
+    context: &StateMutationContext,
+    output_format: &OutputFormat,
+    agent_id: &str,
+    primary: io::Error,
+) -> io::Error {
+    match mark_failed_in_context(context, output_format, agent_id) {
+        Ok(()) => primary,
+        Err(persistence_error) => io::Error::new(
+            primary.kind(),
+            format!("{primary}; failed to persist agent failure state: {persistence_error}"),
+        ),
+    }
+}
+
+#[cfg(test)]
+fn run_agent_with_backend(
+    waap_root: &Path,
+    output_format: &OutputFormat,
+    agent_id: &str,
+    system: &AgentSystem,
+    backend: &mut dyn AgentSystemBackend,
+) -> io::Result<ExitCode> {
+    run_agent_with_context(
+        StateMutationContext::legacy(waap_root)?,
+        output_format,
+        agent_id,
+        system,
+        backend,
+    )
+}
+
+#[cfg(test)]
+fn mark_running(
+    waap_root: &Path,
+    output_format: &OutputFormat,
+    agent_id: &str,
+    metadata: &mut AgentMetadata,
+    body: &str,
+) -> io::Result<()> {
+    mark_running_in_context(
+        &StateMutationContext::legacy(waap_root)?,
+        output_format,
+        agent_id,
+        metadata,
+        body,
+    )
+}
+
+#[cfg(test)]
+fn update_agent_session(
+    waap_root: &Path,
+    output_format: &OutputFormat,
+    agent_id: &str,
+    session_id: &str,
+    system: AgentSystem,
+) -> io::Result<()> {
+    update_agent_session_in_context(
+        &StateMutationContext::legacy(waap_root)?,
+        output_format,
+        agent_id,
+        session_id,
+        system,
+    )
+}
+
+#[cfg(test)]
+fn mark_completed(
+    waap_root: &Path,
+    output_format: &OutputFormat,
+    agent_id: &str,
+) -> io::Result<()> {
+    mark_completed_in_context(
+        &StateMutationContext::legacy(waap_root)?,
+        output_format,
+        agent_id,
+    )
+}
+
+#[cfg(test)]
+fn mark_failed(waap_root: &Path, output_format: &OutputFormat, agent_id: &str) -> io::Result<()> {
+    mark_failed_in_context(
+        &StateMutationContext::legacy(waap_root)?,
+        output_format,
+        agent_id,
+    )
+}
+
+#[cfg(test)]
+fn transition_and_commit_status(
+    waap_root: &Path,
+    output_format: &OutputFormat,
+    agent_id: &str,
+    status: AgentStatus,
+    header: &str,
+    commit_message: &str,
+) -> io::Result<()> {
+    transition_and_commit_status_in_context(
+        &StateMutationContext::legacy(waap_root)?,
+        output_format,
+        agent_id,
+        status,
+        header,
+        commit_message,
+    )
+}
+
+#[cfg(test)]
 fn persist_failed_after_error(
     waap_root: &Path,
     output_format: &OutputFormat,
     agent_id: &str,
     primary: io::Error,
 ) -> io::Error {
-    match mark_failed(waap_root, output_format, agent_id) {
-        Ok(()) => primary,
-        Err(persistence_error) => io::Error::new(
+    match StateMutationContext::legacy(waap_root) {
+        Ok(context) => {
+            persist_failed_after_error_in_context(&context, output_format, agent_id, primary)
+        }
+        Err(error) => io::Error::new(
             primary.kind(),
-            format!("{primary}; failed to persist agent failure state: {persistence_error}"),
+            format!("{primary}; failed to persist agent failure state: {error}"),
         ),
     }
 }
@@ -349,7 +492,8 @@ mod tests {
     use super::{
         agent_worktree_dir, build_agent_goal, collapse_errors, mark_completed, mark_failed,
         mark_running, persist_failed_after_error, require_ready_agent, run_agent,
-        run_agent_with_backend, transition_and_commit_status, update_agent_session, AgentWorktree,
+        run_agent_with_backend, run_agent_with_context, transition_and_commit_status,
+        update_agent_session, AgentWorktree,
     };
     use crate::agent::backend::{fake::FakeBackend, RunOutcome};
     use crate::agent::{
@@ -357,7 +501,9 @@ mod tests {
         AgentMetadata, AgentReport, AgentStatus, AgentSystem,
     };
     use crate::cli::OutputFormat;
-    use crate::git::{create_worktree, remove_worktree};
+    use crate::git::{
+        create_worktree, initialize_state_worktree, remove_worktree, StateMutationContext,
+    };
     use crate::test_git::{init_repo_with_commit, run as git};
 
     #[test]
@@ -689,12 +835,60 @@ mod tests {
     }
 
     #[test]
+    fn central_run_uses_the_application_source_and_state_instruction_path() {
+        let source = tempdir().unwrap();
+        let state_parent = tempdir().unwrap();
+        init_repo_with_commit(source.path());
+        let source_head = git(source.path(), &["rev-parse", "HEAD"]);
+        let state = state_parent.path().join("state");
+        initialize_state_worktree(source.path(), &state).unwrap();
+        write_file(
+            &state.join("agents/aa-00000001/agent.md"),
+            "+++\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"ready\"\n+++\n\n# Purpose\nDo work\n",
+        );
+        git(&state, &["add", "agents"]);
+        git(&state, &["commit", "-q", "-m", "seed agent"]);
+        let context = StateMutationContext::central(
+            state.clone(),
+            source.path().canonicalize().unwrap(),
+            source.path().join(".git"),
+        );
+        let mut backend = FakeBackend {
+            session_id: "ses_started".to_string(),
+            ..FakeBackend::default()
+        };
+
+        let status = run_agent_with_context(
+            context,
+            &OutputFormat::Json,
+            "aa-00000001",
+            &AgentSystem::Opencode,
+            &mut backend,
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert_eq!(git(source.path(), &["rev-parse", "HEAD"]), source_head);
+        assert_eq!(
+            backend.start_calls[0].repository_root,
+            source.path().canonicalize().unwrap()
+        );
+        assert_eq!(
+            backend.start_calls[0].prompt,
+            build_agent_goal(&state, "aa-00000001")
+        );
+        assert!(backend.start_calls[0]
+            .worktree_dir
+            .starts_with(source.path().canonicalize().unwrap()));
+    }
+
+    #[test]
     fn all_systems_use_the_same_detailed_instruction_prompt() {
         let repository_root = PathBuf::from("/repository");
 
         assert_eq!(
             build_agent_goal(&repository_root, "aa-00000001"),
-            "Complete when instructions in /repository/.waap/agents/aa-00000001/agent.md are satisfied"
+            "Complete when instructions in /repository/.waap/agents/aa-00000001/agent.md are satisfied. Use the waap CLI for state changes; do not edit waap state files directly."
         );
     }
 

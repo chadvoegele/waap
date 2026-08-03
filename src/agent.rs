@@ -33,10 +33,10 @@ static OPENCODE_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 pub(crate) use get::{load_agent_content, load_agent_report, print_agent_content_report};
 pub(crate) use list::{list_agents, print_agent_list};
-pub(crate) use new::{create_agent, print_created_agent_report};
-pub(crate) use run::run_agent;
-pub(crate) use stop::{print_agent_stop_report, stop_agents_with_systems};
-pub(crate) use update::{print_updated_agent_report, update_agent};
+pub(crate) use new::{create_agent_in_context, print_created_agent_report};
+pub(crate) use run::run_agent_in_context;
+pub(crate) use stop::{print_agent_stop_report, stop_agents_with_systems_in_context};
+pub(crate) use update::{print_updated_agent_report, update_agent_in_context};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AgentMetadata {

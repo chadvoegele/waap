@@ -22,8 +22,8 @@ mod update;
 
 pub(crate) use get::{get_ticket, print_ticket_get_report};
 pub(crate) use list::{list_tickets, print_ticket_list};
-pub(crate) use new::{create_ticket, print_ticket_report};
-pub(crate) use update::{print_updated_ticket_report, update_ticket};
+pub(crate) use new::{create_ticket_in_context, print_ticket_report};
+pub(crate) use update::{print_updated_ticket_report, update_ticket_in_context};
 
 pub(crate) struct TicketMetadata {
     pub(crate) ticket_id: String,

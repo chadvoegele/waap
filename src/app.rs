@@ -7,20 +7,21 @@ use env_logger::{Builder, Env, Target};
 use log::LevelFilter;
 
 use crate::agent::{
-    create_agent, list_agents, load_agent_content, print_agent_content_report, print_agent_list,
-    print_agent_stop_report, print_created_agent_report, print_updated_agent_report, run_agent,
-    stop_agents_with_systems, update_agent,
+    create_agent_in_context, list_agents, load_agent_content, print_agent_content_report,
+    print_agent_list, print_agent_stop_report, print_created_agent_report,
+    print_updated_agent_report, run_agent_in_context, stop_agents_with_systems_in_context,
+    update_agent_in_context,
 };
-use crate::check::{
-    check_central_state, check_waap, print_central_check_result, print_check_errors,
-};
+use crate::check::{check_central_state, print_central_check_result, print_check_errors};
 use crate::cli::{AgentCommand, Cli, Command, TicketCommand};
 use crate::init::{init_project, print_init_report};
 use crate::repair::{print_repair_report, repair_project};
-use crate::root::{resolve_check_project_context, resolve_init_project_context, resolve_waap_root};
+use crate::root::{
+    resolve_check_project_context, resolve_init_project_context, resolve_project_context,
+};
 use crate::ticket::{
-    create_ticket, get_ticket, list_tickets, print_ticket_get_report, print_ticket_list,
-    print_ticket_report, print_updated_ticket_report, update_ticket,
+    create_ticket_in_context, get_ticket, list_tickets, print_ticket_get_report, print_ticket_list,
+    print_ticket_report, print_updated_ticket_report, update_ticket_in_context,
 };
 
 fn command_error(context: &str, error: io::Error) -> ExitCode {
@@ -99,25 +100,25 @@ pub(crate) fn run() -> ExitCode {
         };
     }
 
-    // Keep legacy command dispatch until the central-state migration is
-    // activated for each command.
-    let waap_root = match resolve_waap_root(&cwd, cli.waap_root.as_deref()) {
-        Ok(root) => root,
+    let context = match resolve_project_context(&cwd, cli.waap_root.as_deref()) {
+        Ok(context) => context,
         Err(error) => {
             eprintln!("{error}");
             return ExitCode::from(1);
         }
     };
-    log::debug!("resolved waap root: {}", waap_root.display());
-    let waap_root = &waap_root;
+    log::debug!("resolved state directory: {}", context.state_root.display());
 
-    if matches!(&cli.command, Command::Agent { .. } | Command::Ticket { .. }) {
-        let errors = check_waap(waap_root);
-        if !errors.is_empty() {
-            print_check_errors(&cli.output_format, &errors);
-            return ExitCode::from(1);
-        }
+    let validation = check_central_state(&context, cli.waap_root.is_some());
+    for warning in &validation.warnings {
+        eprintln!("WARNING: {warning}");
     }
+    if !validation.errors.is_empty() {
+        print_check_errors(&cli.output_format, &validation.errors);
+        return ExitCode::from(1);
+    }
+
+    let state_root = &context.state_root;
 
     match cli.command {
         Command::Init | Command::Repair => {
@@ -125,23 +126,32 @@ pub(crate) fn run() -> ExitCode {
         }
         Command::Check => unreachable!("waap check returns after central-state resolution"),
         Command::Agent { command } => match command {
-            AgentCommand::New { name } => match create_agent(waap_root, name.as_deref()) {
+            AgentCommand::New { name } => match create_agent_in_context(
+                crate::git::StateMutationContext::from_project_context(&context),
+                name.as_deref(),
+            ) {
                 Ok(report) => {
                     print_created_agent_report(&cli.output_format, &report);
                     ExitCode::SUCCESS
                 }
                 Err(error) => command_error("failed to create agent", error),
             },
-            AgentCommand::Run { agent_id, system } => {
-                match run_agent(waap_root, &cli.output_format, &agent_id, &system) {
+            AgentCommand::Run { agent_id, system } => match context.application_source_root() {
+                Ok(_) => match run_agent_in_context(
+                    crate::git::StateMutationContext::from_project_context(&context),
+                    &cli.output_format,
+                    &agent_id,
+                    &system,
+                ) {
                     Ok(status) => status,
                     Err(error) => {
                         eprintln!("failed to run agent: {error}");
                         ExitCode::from(1)
                     }
-                }
-            }
-            AgentCommand::Get { agent_id } => match load_agent_content(waap_root, &agent_id) {
+                },
+                Err(error) => command_error("failed to run agent", error),
+            },
+            AgentCommand::Get { agent_id } => match load_agent_content(state_root, &agent_id) {
                 Ok((report, content)) => {
                     print_agent_content_report(&cli.output_format, &report, &content);
                     ExitCode::SUCCESS
@@ -152,7 +162,10 @@ pub(crate) fn run() -> ExitCode {
                 }
             },
             AgentCommand::Stop { agent_id } => {
-                match stop_agents_with_systems(waap_root, agent_id.as_deref()) {
+                match stop_agents_with_systems_in_context(
+                    crate::git::StateMutationContext::from_project_context(&context),
+                    agent_id.as_deref(),
+                ) {
                     Ok(report) => {
                         print_agent_stop_report(&cli.output_format, &report);
                         ExitCode::SUCCESS
@@ -164,8 +177,8 @@ pub(crate) fn run() -> ExitCode {
                 agent_id,
                 set_status,
                 set_session_id,
-            } => match update_agent(
-                waap_root,
+            } => match update_agent_in_context(
+                crate::git::StateMutationContext::from_project_context(&context),
                 &agent_id,
                 set_status.as_ref(),
                 set_session_id.as_deref(),
@@ -176,7 +189,7 @@ pub(crate) fn run() -> ExitCode {
                 }
                 Err(error) => command_error("failed to update agent", error),
             },
-            AgentCommand::List { status } => match list_agents(waap_root, status.as_ref()) {
+            AgentCommand::List { status } => match list_agents(state_root, status.as_ref()) {
                 Ok(reports) => {
                     print_agent_list(&cli.output_format, &reports);
                     ExitCode::SUCCESS
@@ -189,7 +202,11 @@ pub(crate) fn run() -> ExitCode {
         },
         Command::Ticket { command } => match command {
             TicketCommand::New { name, depends_on } => {
-                match create_ticket(waap_root, name.as_deref(), &depends_on) {
+                match create_ticket_in_context(
+                    crate::git::StateMutationContext::from_project_context(&context),
+                    name.as_deref(),
+                    &depends_on,
+                ) {
                     Ok(report) => {
                         print_ticket_report(&cli.output_format, &report);
                         ExitCode::SUCCESS
@@ -197,7 +214,7 @@ pub(crate) fn run() -> ExitCode {
                     Err(error) => command_error("failed to create ticket", error),
                 }
             }
-            TicketCommand::Get { ticket_id } => match get_ticket(waap_root, &ticket_id) {
+            TicketCommand::Get { ticket_id } => match get_ticket(state_root, &ticket_id) {
                 Ok(report) => {
                     print_ticket_get_report(&cli.output_format, &report);
                     ExitCode::SUCCESS
@@ -218,8 +235,8 @@ pub(crate) fn run() -> ExitCode {
                     eprintln!("at least one of --set-status, --add-depends-on, or --remove-depends-on must be provided");
                     return ExitCode::from(1);
                 }
-                match update_ticket(
-                    waap_root,
+                match update_ticket_in_context(
+                    crate::git::StateMutationContext::from_project_context(&context),
                     &ticket_id,
                     set_status.as_ref(),
                     &add_depends_on,
@@ -244,7 +261,7 @@ pub(crate) fn run() -> ExitCode {
                 } else {
                     None
                 };
-                match list_tickets(waap_root, status.as_ref(), blocked_filter) {
+                match list_tickets(state_root, status.as_ref(), blocked_filter) {
                     Ok(entries) => {
                         print_ticket_list(&cli.output_format, &entries);
                         ExitCode::SUCCESS

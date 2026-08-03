@@ -588,6 +588,10 @@ impl StateMutationContext {
             context.common_git_dir.clone(),
         )
     }
+
+    pub(crate) fn is_central(&self) -> bool {
+        self.require_state_branch
+    }
 }
 
 /// A serialized state mutation. It owns the per-repository lock from

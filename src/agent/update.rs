@@ -6,7 +6,7 @@ use crate::agent::{
     agent_report_json, print_agent_report_human, read_agent_record, transition_agent_status,
     write_agent_record, AgentReport, AgentStatus,
 };
-use crate::check::check_waap;
+use crate::check::{check_state, check_waap};
 use crate::cli::OutputFormat;
 use crate::git::{Committed, StateMutationContext, StateTransaction};
 
@@ -28,14 +28,18 @@ pub(crate) fn print_updated_agent_report(
     }
 }
 
-pub(crate) fn update_agent(
-    waap_root: &Path,
+pub(crate) fn update_agent_in_context(
+    context: StateMutationContext,
     agent_id: &str,
     set_status: Option<&AgentStatus>,
     set_session_id: Option<&str>,
 ) -> io::Result<Committed<AgentReport>> {
-    let context = StateMutationContext::legacy(waap_root)?;
-    let mut transaction = StateTransaction::begin(context, check_waap)?;
+    let validate = if context.is_central() {
+        check_state
+    } else {
+        check_waap
+    };
+    let mut transaction = StateTransaction::begin(context, validate)?;
     let state_root = transaction.state_root().to_path_buf();
     let report = update_agent_record_in_transaction(
         &state_root,
