@@ -1,7 +1,7 @@
 +++
 name = "Introduce central waap project context resolution"
 creation_date = 2026-08-02T23:45:59Z
-status = "pending"
+status = "in-progress"
 +++
 
 Implement the repository and state-resolution foundation in `specs/waap-state-worktree.md`.
