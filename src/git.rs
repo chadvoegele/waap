@@ -1,5 +1,3 @@
-#![allow(dead_code)] // Central-state primitives are intentionally unwired until activation.
-
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
@@ -38,8 +36,7 @@ pub(crate) fn remove_worktree(repo_root: &Path, relative_path: &Path) -> io::Res
     Ok(())
 }
 
-/// The dedicated branch used for central waap state. These primitives remain
-/// separate from command dispatch until central-state activation.
+/// The dedicated branch used for central waap state.
 pub(crate) const STATE_BRANCH: &str = "waap";
 const STATE_BRANCH_REF: &str = "refs/heads/waap";
 const STATE_LOCK_FILE: &str = "waap-state.lock";
@@ -48,7 +45,6 @@ const ORIGIN_STATE_BRANCH_REF: &str = "refs/remotes/origin/waap";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WorktreeRegistration {
     pub(crate) path: PathBuf,
-    pub(crate) head: String,
     pub(crate) branch: Option<String>,
 }
 
@@ -168,8 +164,7 @@ pub(crate) fn validate_state_history(repository_root: &Path, revision: &str) -> 
     Ok(())
 }
 
-/// Create or adopt the dedicated state worktree. This does not push. It is
-/// intentionally not called by normal command dispatch until activation.
+/// Create or adopt the dedicated state worktree. This does not push.
 pub(crate) fn initialize_state_worktree(
     repository_root: &Path,
     state_root: &Path,
@@ -422,13 +417,8 @@ fn worktree_registrations(repository_root: &Path) -> io::Result<Vec<WorktreeRegi
             }
             current = Some(WorktreeRegistration {
                 path: PathBuf::from(path),
-                head: String::new(),
                 branch: None,
             });
-        } else if let Some(head) = line.strip_prefix("HEAD ") {
-            if let Some(registration) = &mut current {
-                registration.head = head.to_owned();
-            }
         } else if let Some(branch) = line.strip_prefix("branch ") {
             if let Some(registration) = &mut current {
                 registration.branch = Some(branch.to_owned());
@@ -552,8 +542,7 @@ fn paths_match(left: &Path, right: &Path) -> bool {
 }
 
 /// Paths needed to mutate waap state without confusing the state checkout
-/// with the application checkout. Legacy dispatch supplies the same checkout
-/// for state and source; central-state activation will supply distinct paths.
+/// with the application checkout.
 #[derive(Clone, Debug)]
 pub(crate) struct StateMutationContext {
     pub(crate) state_root: PathBuf,
@@ -563,6 +552,7 @@ pub(crate) struct StateMutationContext {
 }
 
 impl StateMutationContext {
+    #[cfg(test)]
     pub(crate) fn legacy(waap_root: &Path) -> io::Result<Self> {
         let state_root = waap_root.canonicalize()?;
         let common_git_dir = common_git_dir(&state_root)?;
@@ -633,10 +623,6 @@ impl StateTransaction {
 
     pub(crate) fn state_root(&self) -> &Path {
         &self.context.state_root
-    }
-
-    pub(crate) fn source_root(&self) -> &Path {
-        &self.context.source_root
     }
 
     pub(crate) fn snapshot_path(&mut self, path: &Path) -> io::Result<()> {
@@ -882,6 +868,7 @@ fn ensure_state_branch(state_root: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn common_git_dir(path: &Path) -> io::Result<PathBuf> {
     let output = git_command(path, &os_args(["rev-parse", "--git-common-dir"]))?;
     if !output.status.success() {
@@ -942,14 +929,6 @@ pub(crate) fn commit_paths(waap_root: &Path, paths: &[&Path], message: &str) -> 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-pub(crate) fn is_inside_git_work_tree(path: &Path) -> io::Result<bool> {
-    let output = git_process(path)
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .output()
-        .map_err(|error| io::Error::new(error.kind(), format!("failed to run git: {error}")))?;
-    Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true")
-}
-
 fn git_process(waap_root: &Path) -> Command {
     let mut command = Command::new("git");
     command.current_dir(waap_root);
@@ -1001,8 +980,8 @@ mod tests {
 
     use super::{
         commit_paths, create_worktree, fetch_origin_state_branch, initialize_state_worktree,
-        inspect_state_worktree, is_inside_git_work_tree, query_origin_state_branch,
-        remove_worktree, OriginStateBranch, StateMutationContext, StateTransaction, STATE_BRANCH,
+        inspect_state_worktree, query_origin_state_branch, remove_worktree, OriginStateBranch,
+        StateMutationContext, StateTransaction, STATE_BRANCH,
     };
     use crate::test_git::{init_repo, init_repo_with_commit, isolate, run};
 
@@ -1304,21 +1283,6 @@ mod tests {
         let error = commit_paths(dir.path(), &[], "waap ticket new tt-x").unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-    }
-
-    #[test]
-    fn is_inside_git_work_tree_true_for_git_repo() {
-        let dir = tempdir().unwrap();
-        init_repo(dir.path());
-
-        assert!(is_inside_git_work_tree(dir.path()).unwrap());
-    }
-
-    #[test]
-    fn is_inside_git_work_tree_false_outside_git_repo() {
-        let dir = tempdir().unwrap();
-
-        assert!(!is_inside_git_work_tree(dir.path()).unwrap());
     }
 
     #[test]
