@@ -1,7 +1,7 @@
 +++
 name = "Implement central waap check and remote freshness validation"
 creation_date = 2026-08-02T23:45:59Z
-status = "pending"
+status = "in-progress"
 depends_on = ["tt-repair-moved-waap-state-worktrees-and-upstream-metadata"]
 +++
 
