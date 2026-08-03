@@ -1,7 +1,7 @@
 +++
 name = "Implement central waap init and remote adoption"
 creation_date = 2026-08-02T23:45:59Z
-status = "pending"
+status = "in-progress"
 depends_on = ["tt-add-serialized-central-waap-state-transactions"]
 +++
 
