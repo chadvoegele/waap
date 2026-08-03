@@ -88,6 +88,41 @@ fn fresh_init_uses_derived_state_and_leaves_application_unchanged() {
 }
 
 #[test]
+fn fresh_init_supports_an_unborn_application_repository() {
+    let repository = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    git(repository.path(), &["init", "-q", "--initial-branch=main"]);
+    git(repository.path(), &["config", "user.name", "Test"]);
+    git(
+        repository.path(),
+        &["config", "user.email", "test@example.com"],
+    );
+    let state = derived_state_directory(home.path(), repository.path());
+
+    let output = waap(repository.path(), &["init"], Some(home.path()));
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        git(repository.path(), &["symbolic-ref", "--short", "HEAD"]),
+        "main"
+    );
+    assert!(git(repository.path(), &["status", "--porcelain"]).is_empty());
+    let mut verify_head = Command::new("git");
+    isolate_git_config(&mut verify_head);
+    assert!(!verify_head
+        .current_dir(repository.path())
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert_eq!(git(&state, &["branch", "--show-current"]), "waap");
+    assert_eq!(git(&state, &["log", "-1", "--pretty=%s"]), "waap init");
+    assert!(state.join("agents/.gitkeep").is_file());
+    assert!(state.join("tickets/.gitkeep").is_file());
+}
+
+#[test]
 fn fresh_init_creates_a_parentless_state_history_and_pushes_its_upstream() {
     let repository = tempdir().unwrap();
     let remote_parent = tempdir().unwrap();

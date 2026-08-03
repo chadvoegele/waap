@@ -253,10 +253,16 @@ fn create_fresh_state_worktree(repository_root: &Path, state_root: &Path) -> io:
         )
     })?;
     fs::create_dir_all(parent)?;
-    let mut worktree_add = os_args(["worktree", "add", "--no-checkout", "--detach"]);
-    worktree_add.push(state_root.as_os_str().to_os_string());
-    run_git(repository_root, &worktree_add)?;
-    run_git(state_root, &os_args(["switch", "--orphan", STATE_BRANCH]))?;
+    if ref_hash(repository_root, "HEAD")?.is_some() {
+        let mut worktree_add = os_args(["worktree", "add", "--no-checkout", "--detach"]);
+        worktree_add.push(state_root.as_os_str().to_os_string());
+        run_git(repository_root, &worktree_add)?;
+        run_git(state_root, &os_args(["switch", "--orphan", STATE_BRANCH]))?;
+    } else {
+        let mut worktree_add = os_args(["worktree", "add", "--orphan", "-b", STATE_BRANCH]);
+        worktree_add.push(state_root.as_os_str().to_os_string());
+        run_git(repository_root, &worktree_add)?;
+    }
 
     let agents_marker = state_root.join("agents/.gitkeep");
     let tickets_marker = state_root.join("tickets/.gitkeep");
