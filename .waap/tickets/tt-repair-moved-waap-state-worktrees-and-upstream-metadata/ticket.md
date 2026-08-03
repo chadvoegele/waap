@@ -1,7 +1,7 @@
 +++
 name = "Repair moved waap state worktrees and upstream metadata"
 creation_date = 2026-08-02T23:45:59Z
-status = "pending"
+status = "in-progress"
 depends_on = ["tt-implement-legacy-waap-state-migration-repair"]
 +++
 
