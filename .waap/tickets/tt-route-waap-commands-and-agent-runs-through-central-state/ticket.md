@@ -1,7 +1,7 @@
 +++
 name = "Route waap commands and agent runs through central state"
 creation_date = 2026-08-02T23:45:59Z
-status = "pending"
+status = "in-progress"
 depends_on = ["tt-add-serialized-central-waap-state-transactions", "tt-implement-legacy-waap-state-migration-repair", "tt-implement-central-waap-check-and-remote-freshness-validation"]
 +++
 
