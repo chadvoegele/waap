@@ -1,7 +1,7 @@
 +++
 name = "Verify central waap state end to end"
 creation_date = 2026-08-02T23:45:59Z
-status = "pending"
+status = "in-progress"
 depends_on = ["tt-document-central-waap-state-and-agent-safety-guidance"]
 +++
 
