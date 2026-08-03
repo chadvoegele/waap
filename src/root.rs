@@ -173,7 +173,7 @@ fn resolve_gitdir_file(git_file: &Path) -> io::Result<PathBuf> {
         io::Error::new(
             error.kind(),
             format!(
-                "failed to resolve gitdir from {}: {error}",
+                "failed to resolve gitdir from {}: {error}; if this linked worktree followed a repository move, run waap repair from the primary repository",
                 git_file.display()
             ),
         )

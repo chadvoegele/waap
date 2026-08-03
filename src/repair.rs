@@ -9,7 +9,7 @@ use crate::check::{check_state, check_waap};
 use crate::cli::OutputFormat;
 use crate::git::{
     commit_paths, configure_state_upstream, initialize_state_worktree, query_origin_state_branch,
-    OriginStateBranch,
+    relocate_state_worktree, state_worktree_relocation_source, OriginStateBranch,
 };
 use crate::root::ProjectContext;
 
@@ -18,6 +18,7 @@ pub(crate) struct RepairReport {
     pub(crate) state_directory: PathBuf,
     pub(crate) migration_commit: Option<String>,
     pub(crate) legacy_removal_commit: Option<String>,
+    pub(crate) relocated_from: Option<PathBuf>,
 }
 
 /// Repair a state checkout or migrate the invocation worktree's legacy state.
@@ -33,13 +34,16 @@ pub(crate) fn repair_project(
             state_directory: context.state_root.clone(),
             migration_commit: None,
             legacy_removal_commit: None,
+            relocated_from: None,
         });
     }
 
     let legacy_state = context.invocation_worktree_root.join(".waap");
     let central_exists = context.state_root.exists();
-    match (legacy_state.exists(), central_exists) {
-        (true, true) => Err(io::Error::new(
+    let relocation_source =
+        state_worktree_relocation_source(&context.primary_repository_root, &context.state_root)?;
+    match (legacy_state.exists(), central_exists, relocation_source) {
+        (true, true, _) => Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
             format!(
                 "central state {} and legacy state {} coexist; reconcile them manually before retrying waap repair",
@@ -47,20 +51,45 @@ pub(crate) fn repair_project(
                 legacy_state.display()
             ),
         )),
-        (true, false) => migrate_legacy_state(context, &legacy_state),
-        (false, true) => {
+        (true, false, Some(source)) => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "registered waap state worktree {} and legacy state {} coexist; reconcile them manually before retrying waap repair",
+                source.display(),
+                legacy_state.display()
+            ),
+        )),
+        (true, false, None) => migrate_legacy_state(context, &legacy_state),
+        (false, false, Some(source)) => {
+            let state_directory = relocate_state_worktree(
+                &context.primary_repository_root,
+                &source,
+                &context.state_root,
+            )?;
+            validate_central_state(&state_directory)?;
+            configure_state_upstream(&context.primary_repository_root)?;
+            Ok(RepairReport {
+                state_directory,
+                migration_commit: None,
+                legacy_removal_commit: None,
+                relocated_from: Some(source),
+            })
+        }
+        (false, true, None) => {
             validate_central_state(&context.state_root)?;
             configure_state_upstream(&context.primary_repository_root)?;
             Ok(RepairReport {
                 state_directory: context.state_root.clone(),
                 migration_commit: None,
                 legacy_removal_commit: None,
+                relocated_from: None,
             })
         }
-        (false, false) => Err(io::Error::new(
+        (false, false, None) => Err(io::Error::new(
             io::ErrorKind::NotFound,
             "no legacy or central waap state was found; run waap init",
         )),
+        (false, true, Some(_)) => unreachable!("an occupied expected state path rejects relocation"),
     }
 }
 
@@ -131,6 +160,7 @@ fn migrate_legacy_state(context: &ProjectContext, legacy_state: &Path) -> io::Re
         state_directory: state_root,
         migration_commit: Some(migration_commit),
         legacy_removal_commit: Some(legacy_removal_commit),
+        relocated_from: None,
     })
 }
 
@@ -309,6 +339,7 @@ pub(crate) fn print_repair_report(output_format: &OutputFormat, report: &RepairR
                 "state_directory": report.state_directory.display().to_string(),
                 "migration_commit": report.migration_commit,
                 "legacy_removal_commit": report.legacy_removal_commit,
+                "relocated_from": report.relocated_from.as_ref().map(|path| path.display().to_string()),
             })
         ),
         OutputFormat::HumanReadable => {
@@ -318,6 +349,12 @@ pub(crate) fn print_repair_report(output_format: &OutputFormat, report: &RepairR
                     println!("Migrated legacy waap state");
                     println!("Migration commit: {migration}");
                     println!("Legacy removal commit: {removal}");
+                }
+                _ if report.relocated_from.is_some() => {
+                    println!(
+                        "Relocated waap state from {}",
+                        report.relocated_from.as_ref().unwrap().display()
+                    );
                 }
                 _ => println!("Waap state is already repaired"),
             }

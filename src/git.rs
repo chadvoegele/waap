@@ -305,6 +305,102 @@ pub(crate) fn configure_state_upstream(repository_root: &Path) -> io::Result<()>
     Ok(())
 }
 
+/// Find a state checkout registered at an old path after its primary
+/// repository moved. This is deliberately read-only: callers can reject other
+/// recovery conditions before altering worktree metadata.
+pub(crate) fn state_worktree_relocation_source(
+    repository_root: &Path,
+    expected_state_root: &Path,
+) -> io::Result<Option<PathBuf>> {
+    let inspection = inspect_state_worktree(repository_root, expected_state_root)?;
+    if inspection.waap_checkouts.is_empty() {
+        return Ok(None);
+    }
+    if inspection.waap_checkouts.len() != 1 {
+        let paths = inspection
+            .waap_checkouts
+            .iter()
+            .map(|registration| registration.path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "cannot safely identify the registered waap state worktree ({paths}); expected {}; inspect the worktrees and run waap repair from the primary repository",
+                expected_state_root.display()
+            ),
+        ));
+    }
+
+    let registered = &inspection.waap_checkouts[0];
+    if paths_match(&registered.path, expected_state_root) {
+        return Ok(None);
+    }
+    if expected_state_root.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "registered waap state worktree is at {}, but its expected path {} is occupied; move or remove the destination, then rerun waap repair from the primary repository",
+                registered.path.display(),
+                expected_state_root.display()
+            ),
+        ));
+    }
+    if !registered.path.is_dir()
+        || paths_match(&registered.path, repository_root)
+        || inspection.local_branch.is_none()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "cannot safely relocate registered waap worktree {} to {}; inspect the registered worktree and run waap repair from the primary repository",
+                registered.path.display(),
+                expected_state_root.display()
+            ),
+        ));
+    }
+    validate_state_history(repository_root, STATE_BRANCH_REF)?;
+    let state_errors = crate::check::check_state(&registered.path);
+    if !state_errors.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "cannot safely relocate registered waap worktree {} to {}: {}; repair the state contents before retrying waap repair",
+                registered.path.display(),
+                expected_state_root.display(),
+                state_errors.join("; ")
+            ),
+        ));
+    }
+    Ok(Some(registered.path.clone()))
+}
+
+/// Repair broken Git back-links and relocate the registered state checkout.
+/// `source` must have been returned by `state_worktree_relocation_source`.
+pub(crate) fn relocate_state_worktree(
+    repository_root: &Path,
+    source: &Path,
+    expected_state_root: &Path,
+) -> io::Result<PathBuf> {
+    run_git(repository_root, &os_args(["worktree", "repair"]))?;
+    let parent = expected_state_root.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "expected state worktree path {} has no parent",
+                expected_state_root.display()
+            ),
+        )
+    })?;
+    fs::create_dir_all(parent)?;
+    let mut move_args = os_args(["worktree", "move"]);
+    move_args.push(source.as_os_str().to_os_string());
+    move_args.push(expected_state_root.as_os_str().to_os_string());
+    run_git(repository_root, &move_args)?;
+    run_git(repository_root, &os_args(["worktree", "repair"]))?;
+    expected_state_root.canonicalize()
+}
+
 fn worktree_registrations(repository_root: &Path) -> io::Result<Vec<WorktreeRegistration>> {
     let output = git_stdout(
         repository_root,
