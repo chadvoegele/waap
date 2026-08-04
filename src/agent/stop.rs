@@ -9,9 +9,8 @@ use crate::agent::{
     agent_report_json, print_agent_report_human, read_agent_record, transition_agent_status,
     write_agent_record, AgentReport, AgentStatus,
 };
-use crate::check::{check_state, check_waap};
 use crate::cli::OutputFormat;
-use crate::git::{StateMutationContext, StateTransaction};
+use crate::git::{StateStore, StateTransaction};
 use crate::record::{list_record_ids, WaapRecordKind};
 
 #[derive(Debug)]
@@ -42,15 +41,10 @@ fn agent_stop_json(report: &AgentStopReport) -> serde_json::Value {
 }
 
 pub(crate) fn stop_agents_with_systems_in_context(
-    context: StateMutationContext,
+    store: StateStore,
     agent_id: Option<&str>,
 ) -> io::Result<AgentStopReport> {
-    let validate = if context.is_central() {
-        check_state
-    } else {
-        check_waap
-    };
-    let mut transaction = StateTransaction::begin(context, validate)?;
+    let mut transaction = StateTransaction::begin(store)?;
     let state_root = transaction.state_root().to_path_buf();
     for id in list_record_ids(&state_root, WaapRecordKind::Agent)? {
         transaction.snapshot_path(&crate::agent::agent_path(&state_root, &id))?;

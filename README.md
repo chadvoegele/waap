@@ -85,7 +85,7 @@ cd "$WAAP_STATE"
 git push
 ```
 
-`waap check` fetches `origin/waap` to detect remote-only commits and warns if the remote is ahead or branches diverge. The warning does not update, merge, rebase, or otherwise reconcile state; do that deliberately before pushing.
+`waap check` never accesses the network. When a cached `origin/waap` ref exists, it warns if that ref is ahead or diverged. Fetch state explicitly before checking remote freshness, then deliberately update or rebase before pushing.
 
 ## CLI and skill
 

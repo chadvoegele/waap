@@ -2,34 +2,22 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use super::backend::{AgentSystemBackend, RunOutcome, StartContext};
-use crate::agent::{
-    agent_report_json, load_agent_report, print_agent_report_human, read_agent_record,
-    transition_agent_status, write_agent_record, AgentMetadata, AgentReport, AgentStatus,
-    AgentSystem,
-};
-use crate::check::{check_state, check_waap};
-use crate::cli::OutputFormat;
-use crate::git::{create_worktree, remove_worktree, StateMutationContext, StateTransaction};
+mod state;
 
-fn print_run_agent_report(
-    output_format: &OutputFormat,
-    header: &str,
-    report: &AgentReport,
-    commit: &str,
-) {
-    match output_format {
-        OutputFormat::Json => {
-            let mut value = agent_report_json(report);
-            value["commit"] = serde_json::json!(commit);
-            println!("{value}");
-        }
-        OutputFormat::HumanReadable => {
-            print_agent_report_human(header, report);
-            println!("Commit: {commit}");
-        }
-    }
-}
+#[cfg(test)]
+use self::state::transition_status as transition_and_commit_status_in_context;
+use self::state::{
+    mark_completed as mark_completed_in_context, mark_failed as mark_failed_in_context,
+    mark_running as mark_running_in_context,
+    persist_failure as persist_failed_after_error_in_context,
+    update_session as update_agent_session_in_context,
+};
+use super::backend::{AgentSystemBackend, RunOutcome, StartContext};
+#[cfg(test)]
+use crate::agent::AgentMetadata;
+use crate::agent::{read_agent_record, AgentStatus, AgentSystem};
+use crate::cli::OutputFormat;
+use crate::git::{create_worktree, remove_worktree, StateStore};
 
 #[cfg(test)]
 pub(crate) fn run_agent(
@@ -39,7 +27,7 @@ pub(crate) fn run_agent(
     system: &AgentSystem,
 ) -> io::Result<ExitCode> {
     run_agent_in_context(
-        StateMutationContext::legacy(waap_root)?,
+        StateStore::legacy(waap_root)?,
         output_format,
         agent_id,
         system,
@@ -47,45 +35,45 @@ pub(crate) fn run_agent(
 }
 
 pub(crate) fn run_agent_in_context(
-    context: StateMutationContext,
+    store: StateStore,
     output_format: &OutputFormat,
     agent_id: &str,
     system: &AgentSystem,
 ) -> io::Result<ExitCode> {
-    require_ready_agent(&context.state_root, agent_id)?;
+    require_ready_agent(&store.state_root, agent_id)?;
     let mut backend = system.backend()?;
-    run_agent_with_context(context, output_format, agent_id, system, backend.as_mut())
+    run_agent_with_context(store, output_format, agent_id, system, backend.as_mut())
 }
 
 fn run_agent_with_context(
-    context: StateMutationContext,
+    store: StateStore,
     output_format: &OutputFormat,
     agent_id: &str,
     system: &AgentSystem,
     backend: &mut dyn AgentSystemBackend,
 ) -> io::Result<ExitCode> {
-    let (mut metadata, body) = read_agent_record(&context.state_root, agent_id)?;
+    let (mut metadata, body) = read_agent_record(&store.state_root, agent_id)?;
     metadata.system = Some(system.clone());
 
     if let Err(error) =
-        mark_running_in_context(&context, output_format, agent_id, &mut metadata, &body)
+        mark_running_in_context(&store, output_format, agent_id, &mut metadata, &body)
     {
-        let is_running = read_agent_record(&context.state_root, agent_id)
+        let is_running = read_agent_record(&store.state_root, agent_id)
             .map(|(metadata, _)| metadata.status == AgentStatus::Running.as_str())
             .unwrap_or(false);
         return Err(if is_running {
-            persist_failed_after_error_in_context(&context, output_format, agent_id, error)
+            persist_failed_after_error_in_context(&store, output_format, agent_id, error)
         } else {
             error
         });
     }
-    let result = run_started_agent(&context, output_format, agent_id, system, backend);
+    let result = run_started_agent(&store, output_format, agent_id, system, backend);
 
     match result {
         Ok(RunOutcome::Completed) => {
-            if let Err(error) = mark_completed_in_context(&context, output_format, agent_id) {
+            if let Err(error) = mark_completed_in_context(&store, output_format, agent_id) {
                 return Err(persist_failed_after_error_in_context(
-                    &context,
+                    &store,
                     output_format,
                     agent_id,
                     error,
@@ -94,11 +82,11 @@ fn run_agent_with_context(
             Ok(ExitCode::SUCCESS)
         }
         Ok(RunOutcome::Failed(code)) => {
-            mark_failed_in_context(&context, output_format, agent_id)?;
+            mark_failed_in_context(&store, output_format, agent_id)?;
             Ok(code)
         }
         Err(error) => Err(persist_failed_after_error_in_context(
-            &context,
+            &store,
             output_format,
             agent_id,
             error,
@@ -107,15 +95,15 @@ fn run_agent_with_context(
 }
 
 fn run_started_agent(
-    context: &StateMutationContext,
+    store: &StateStore,
     output_format: &OutputFormat,
     agent_id: &str,
     system: &AgentSystem,
     backend: &mut dyn AgentSystemBackend,
 ) -> io::Result<RunOutcome> {
-    let mut worktree = AgentWorktree::create(&context.source_root, agent_id)?;
-    let repository_root = context.source_root.canonicalize()?;
-    let prompt = build_agent_goal(&context.state_root, agent_id);
+    let mut worktree = AgentWorktree::create(&store.source_root, agent_id)?;
+    let repository_root = store.source_root.canonicalize()?;
+    let prompt = build_agent_goal(&store.state_root, agent_id);
     let run_result = backend
         .start(StartContext {
             agent_id,
@@ -125,7 +113,7 @@ fn run_started_agent(
         })
         .and_then(|started| {
             update_agent_session_in_context(
-                context,
+                store,
                 output_format,
                 agent_id,
                 &started.session_id,
@@ -145,8 +133,8 @@ fn build_agent_goal(state_root: &Path, agent_id: &str) -> String {
     )
 }
 
-fn require_ready_agent(waap_root: &Path, agent_id: &str) -> io::Result<()> {
-    let (metadata, _) = read_agent_record(waap_root, agent_id)?;
+fn require_ready_agent(state_root: &Path, agent_id: &str) -> io::Result<()> {
+    let (metadata, _) = read_agent_record(state_root, agent_id)?;
     let current = AgentStatus::parse(&metadata.status).expect("validated agent status");
     current.validate_transition(AgentStatus::Running)
 }
@@ -156,7 +144,7 @@ fn agent_worktree_dir(agent_id: &str) -> PathBuf {
 }
 
 struct AgentWorktree {
-    waap_root: PathBuf,
+    source_root: PathBuf,
     relative_path: PathBuf,
     worktree_dir: PathBuf,
     cleanup_pending: bool,
@@ -164,11 +152,11 @@ struct AgentWorktree {
 
 impl AgentWorktree {
     // Call only after committing the running state so the branch includes it.
-    fn create(waap_root: &Path, agent_id: &str) -> io::Result<Self> {
+    fn create(source_root: &Path, agent_id: &str) -> io::Result<Self> {
         let relative_path = agent_worktree_dir(agent_id);
-        let worktree_dir = create_worktree(waap_root, agent_id, &relative_path)?;
+        let worktree_dir = create_worktree(source_root, agent_id, &relative_path)?;
         Ok(Self {
-            waap_root: waap_root.to_path_buf(),
+            source_root: source_root.to_path_buf(),
             relative_path,
             worktree_dir,
             cleanup_pending: true,
@@ -183,7 +171,7 @@ impl AgentWorktree {
         if !self.cleanup_pending {
             return Ok(());
         }
-        remove_worktree(&self.waap_root, &self.relative_path)?;
+        remove_worktree(&self.source_root, &self.relative_path)?;
         self.cleanup_pending = false;
         Ok(())
     }
@@ -212,164 +200,6 @@ impl Drop for AgentWorktree {
     }
 }
 
-fn mark_running_in_context(
-    context: &StateMutationContext,
-    output_format: &OutputFormat,
-    agent_id: &str,
-    metadata: &mut AgentMetadata,
-    body: &str,
-) -> io::Result<()> {
-    let validate = if context.is_central() {
-        check_state
-    } else {
-        check_waap
-    };
-    let mut transaction = StateTransaction::begin(context.clone(), validate)?;
-    let state_root = transaction.state_root().to_path_buf();
-    let path = crate::agent::agent_path(&state_root, agent_id);
-    transaction.snapshot_path(&path)?;
-    transition_agent_status(metadata, AgentStatus::Running)?;
-    write_agent_record(&state_root, agent_id, metadata, body)?;
-
-    let report = load_agent_report(&state_root, agent_id)?;
-    let commit = transaction.commit(
-        &[report.path.as_path()],
-        &format!("waap agent run {agent_id}"),
-    )?;
-    print_run_agent_report(output_format, "Running agent", &report, &commit);
-    Ok(())
-}
-
-fn update_agent_session_in_context(
-    context: &StateMutationContext,
-    output_format: &OutputFormat,
-    agent_id: &str,
-    session_id: &str,
-    system: AgentSystem,
-) -> io::Result<()> {
-    let validate = if context.is_central() {
-        check_state
-    } else {
-        check_waap
-    };
-    let mut transaction = StateTransaction::begin(context.clone(), validate)?;
-    let state_root = transaction.state_root().to_path_buf();
-    let (mut metadata, body) = read_agent_record(&state_root, agent_id)?;
-    if metadata.status != AgentStatus::Running.as_str() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("agent {agent_id} must be running to assign a session"),
-        ));
-    }
-    if let Some(existing_session_id) = &metadata.session_id {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("agent {agent_id} already has session id {existing_session_id}"),
-        ));
-    }
-    if let Some(existing_system) = &metadata.system {
-        if existing_system != &system {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "agent {agent_id} system mismatch: expected {}, got {}",
-                    existing_system.as_str(),
-                    system.as_str()
-                ),
-            ));
-        }
-    }
-
-    let header = format!("{} session", system.as_str());
-    metadata.session_id = Some(session_id.to_string());
-    metadata.system = Some(system.clone());
-    let path = crate::agent::agent_path(&state_root, agent_id);
-    transaction.snapshot_path(&path)?;
-    write_agent_record(&state_root, agent_id, &metadata, &body)?;
-
-    let report = load_agent_report(&state_root, agent_id)?;
-    let commit = transaction.commit(
-        &[report.path.as_path()],
-        &format!("waap agent {} session {agent_id}", system.as_str()),
-    )?;
-    print_run_agent_report(output_format, &header, &report, &commit);
-    Ok(())
-}
-
-fn mark_completed_in_context(
-    context: &StateMutationContext,
-    output_format: &OutputFormat,
-    agent_id: &str,
-) -> io::Result<()> {
-    transition_and_commit_status_in_context(
-        context,
-        output_format,
-        agent_id,
-        AgentStatus::Completed,
-        "Completed agent",
-        &format!("waap agent completed {agent_id}"),
-    )
-}
-
-fn mark_failed_in_context(
-    context: &StateMutationContext,
-    output_format: &OutputFormat,
-    agent_id: &str,
-) -> io::Result<()> {
-    transition_and_commit_status_in_context(
-        context,
-        output_format,
-        agent_id,
-        AgentStatus::Failed,
-        "Failed agent",
-        &format!("waap agent failed {agent_id}"),
-    )
-}
-
-fn transition_and_commit_status_in_context(
-    context: &StateMutationContext,
-    output_format: &OutputFormat,
-    agent_id: &str,
-    status: AgentStatus,
-    header: &str,
-    commit_message: &str,
-) -> io::Result<()> {
-    let validate = if context.is_central() {
-        check_state
-    } else {
-        check_waap
-    };
-    let mut transaction = StateTransaction::begin(context.clone(), validate)?;
-    let state_root = transaction.state_root().to_path_buf();
-    let (mut metadata, body) = read_agent_record(&state_root, agent_id)?;
-    if metadata.status == status.as_str() {
-        return Ok(());
-    }
-    transition_agent_status(&mut metadata, status)?;
-    let path = crate::agent::agent_path(&state_root, agent_id);
-    transaction.snapshot_path(&path)?;
-    write_agent_record(&state_root, agent_id, &metadata, &body)?;
-    let report = load_agent_report(&state_root, agent_id)?;
-    let commit = transaction.commit(&[report.path.as_path()], commit_message)?;
-    print_run_agent_report(output_format, header, &report, &commit);
-    Ok(())
-}
-
-fn persist_failed_after_error_in_context(
-    context: &StateMutationContext,
-    output_format: &OutputFormat,
-    agent_id: &str,
-    primary: io::Error,
-) -> io::Error {
-    match mark_failed_in_context(context, output_format, agent_id) {
-        Ok(()) => primary,
-        Err(persistence_error) => io::Error::new(
-            primary.kind(),
-            format!("{primary}; failed to persist agent failure state: {persistence_error}"),
-        ),
-    }
-}
-
 #[cfg(test)]
 fn run_agent_with_backend(
     waap_root: &Path,
@@ -379,7 +209,7 @@ fn run_agent_with_backend(
     backend: &mut dyn AgentSystemBackend,
 ) -> io::Result<ExitCode> {
     run_agent_with_context(
-        StateMutationContext::legacy(waap_root)?,
+        StateStore::legacy(waap_root)?,
         output_format,
         agent_id,
         system,
@@ -396,7 +226,7 @@ fn mark_running(
     body: &str,
 ) -> io::Result<()> {
     mark_running_in_context(
-        &StateMutationContext::legacy(waap_root)?,
+        &StateStore::legacy(waap_root)?,
         output_format,
         agent_id,
         metadata,
@@ -413,7 +243,7 @@ fn update_agent_session(
     system: AgentSystem,
 ) -> io::Result<()> {
     update_agent_session_in_context(
-        &StateMutationContext::legacy(waap_root)?,
+        &StateStore::legacy(waap_root)?,
         output_format,
         agent_id,
         session_id,
@@ -427,20 +257,12 @@ fn mark_completed(
     output_format: &OutputFormat,
     agent_id: &str,
 ) -> io::Result<()> {
-    mark_completed_in_context(
-        &StateMutationContext::legacy(waap_root)?,
-        output_format,
-        agent_id,
-    )
+    mark_completed_in_context(&StateStore::legacy(waap_root)?, output_format, agent_id)
 }
 
 #[cfg(test)]
 fn mark_failed(waap_root: &Path, output_format: &OutputFormat, agent_id: &str) -> io::Result<()> {
-    mark_failed_in_context(
-        &StateMutationContext::legacy(waap_root)?,
-        output_format,
-        agent_id,
-    )
+    mark_failed_in_context(&StateStore::legacy(waap_root)?, output_format, agent_id)
 }
 
 #[cfg(test)]
@@ -453,7 +275,7 @@ fn transition_and_commit_status(
     commit_message: &str,
 ) -> io::Result<()> {
     transition_and_commit_status_in_context(
-        &StateMutationContext::legacy(waap_root)?,
+        &StateStore::legacy(waap_root)?,
         output_format,
         agent_id,
         status,
@@ -469,9 +291,9 @@ fn persist_failed_after_error(
     agent_id: &str,
     primary: io::Error,
 ) -> io::Error {
-    match StateMutationContext::legacy(waap_root) {
-        Ok(context) => {
-            persist_failed_after_error_in_context(&context, output_format, agent_id, primary)
+    match StateStore::legacy(waap_root) {
+        Ok(store) => {
+            persist_failed_after_error_in_context(&store, output_format, agent_id, primary)
         }
         Err(error) => io::Error::new(
             primary.kind(),
@@ -501,9 +323,7 @@ mod tests {
         AgentMetadata, AgentReport, AgentStatus, AgentSystem,
     };
     use crate::cli::OutputFormat;
-    use crate::git::{
-        create_worktree, initialize_state_worktree, remove_worktree, StateMutationContext,
-    };
+    use crate::git::{create_worktree, initialize_state_worktree, remove_worktree, StateStore};
     use crate::test_git::{init_repo_with_commit, run as git};
 
     #[test]
@@ -848,7 +668,7 @@ mod tests {
         );
         git(&state, &["add", "agents"]);
         git(&state, &["commit", "-q", "-m", "seed agent"]);
-        let context = StateMutationContext::central(
+        let context = StateStore::central(
             state.clone(),
             source.path().canonicalize().unwrap(),
             source.path().join(".git"),

@@ -35,47 +35,25 @@ impl ProjectContext {
     }
 }
 
-/// Resolve a context for an existing state directory. An explicit state root
-/// must contain the state directories directly.
+/// Whether an explicitly selected state directory must already be usable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StateRootRequirement {
+    Existing,
+    MayBeMissing,
+}
+
+/// Resolve repository and state paths for one command invocation.
 pub(crate) fn resolve_project_context(
     start: &Path,
     explicit_state_root: Option<&Path>,
-) -> io::Result<ProjectContext> {
-    resolve_project_context_inner(start, explicit_state_root, false)
-}
-
-/// Resolve a context for `waap check`. Check must report its selected state
-/// directory even when it is absent or malformed, so explicit paths do not
-/// have to contain the state directories yet.
-pub(crate) fn resolve_check_project_context(
-    start: &Path,
-    explicit_state_root: Option<&Path>,
-) -> io::Result<ProjectContext> {
-    resolve_project_context_inner(start, explicit_state_root, true)
-}
-
-/// Resolve a context for `waap init`. Unlike regular explicit resolution, an
-/// explicit state-root target may not exist yet.
-pub(crate) fn resolve_init_project_context(
-    start: &Path,
-    explicit_state_root: Option<&Path>,
-) -> io::Result<ProjectContext> {
-    resolve_project_context_inner(start, explicit_state_root, true)
-}
-
-fn resolve_project_context_inner(
-    start: &Path,
-    explicit_state_root: Option<&Path>,
-    allow_missing_explicit_state_root: bool,
+    requirement: StateRootRequirement,
 ) -> io::Result<ProjectContext> {
     let canonical_start = start.canonicalize()?;
     let invocation_worktree_root = find_invocation_worktree_root(&canonical_start)?;
     let common_git_dir = resolve_common_git_dir(&invocation_worktree_root)?;
     let primary_repository_root = resolve_primary_repository_root(&common_git_dir)?;
     let state_root = match explicit_state_root {
-        Some(path) => {
-            resolve_explicit_state_root(&canonical_start, path, allow_missing_explicit_state_root)?
-        }
+        Some(path) => resolve_explicit_state_root(&canonical_start, path, requirement)?,
         None => state_root_for_primary(&primary_repository_root, &home_directory()?)?,
     };
 
@@ -242,10 +220,11 @@ fn unsupported_separate_git_dir_error(common_git_dir: &Path) -> io::Error {
 fn resolve_explicit_state_root(
     start: &Path,
     explicit_state_root: &Path,
-    allow_missing: bool,
+    requirement: StateRootRequirement,
 ) -> io::Result<PathBuf> {
+    let may_be_missing = requirement == StateRootRequirement::MayBeMissing;
     let absolute = absolute_path(start, explicit_state_root);
-    if !allow_missing || absolute.exists() {
+    if !may_be_missing || absolute.exists() {
         let canonical = absolute.canonicalize().map_err(|_| {
             io::Error::new(
                 io::ErrorKind::NotFound,
@@ -258,7 +237,7 @@ fn resolve_explicit_state_root(
                 format!("{} is not a directory", explicit_state_root.display()),
             ));
         }
-        if !allow_missing
+        if !may_be_missing
             && (!canonical.join("agents").is_dir() || !canonical.join("tickets").is_dir())
         {
             return Err(io::Error::new(
@@ -347,8 +326,18 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{resolve_init_project_context, resolve_project_context, state_root_for_primary};
+    use super::{
+        resolve_project_context as resolve_context, state_root_for_primary, ProjectContext,
+        StateRootRequirement,
+    };
     use crate::test_git::{init_repo, isolate, run as git};
+
+    fn resolve_project_context(
+        start: &Path,
+        explicit_state_root: Option<&Path>,
+    ) -> std::io::Result<ProjectContext> {
+        resolve_context(start, explicit_state_root, StateRootRequirement::Existing)
+    }
 
     #[test]
     fn project_context_derives_state_from_canonical_primary_checkout() {
@@ -466,7 +455,12 @@ mod tests {
         let err = resolve_project_context(dir.path(), Some(&missing)).unwrap_err();
         assert!(err.to_string().contains("does not exist"));
 
-        let context = resolve_init_project_context(dir.path(), Some(&missing)).unwrap();
+        let context = resolve_context(
+            dir.path(),
+            Some(&missing),
+            StateRootRequirement::MayBeMissing,
+        )
+        .unwrap();
         assert_eq!(context.state_root, missing);
 
         fs::create_dir(&missing).unwrap();

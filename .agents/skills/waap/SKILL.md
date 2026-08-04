@@ -50,7 +50,7 @@ The first command uses the supplied directory directly. The second creates state
 
 If central state and legacy state coexist, reconcile them manually before `waap repair`; waap will not choose or merge them. After moving an application repository, run `waap repair` from its primary checkout.
 
-With `origin`, local `waap` tracks `origin/waap`, but synchronization and pushing are manual. `waap check` fetches to warn about remote-only or diverged state; the warning does not reconcile either branch.
+With `origin`, local `waap` tracks `origin/waap`, but synchronization and pushing are manual. `waap check` performs no network I/O; after an explicit fetch, it uses cached `origin/waap` to warn about remote-only or diverged state without reconciling either branch.
 
 ## Basic workflow
 

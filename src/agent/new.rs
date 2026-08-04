@@ -6,9 +6,8 @@ use crate::agent::{
     agent_path, agent_report_json, available_agent_id, print_agent_report_human,
     write_agent_record, AgentMetadata, AgentReport,
 };
-use crate::check::{check_state, check_waap};
 use crate::cli::OutputFormat;
-use crate::git::{Committed, StateMutationContext, StateTransaction};
+use crate::git::{Committed, StateStore, StateTransaction};
 use crate::record::WaapRecordKind;
 use crate::toml::current_toml_datetime;
 
@@ -31,7 +30,7 @@ pub(crate) fn print_created_agent_report(
 }
 
 pub(crate) fn create_agent_in_context(
-    context: StateMutationContext,
+    store: StateStore,
     name: Option<&str>,
 ) -> io::Result<Committed<AgentReport>> {
     let mut markdown = String::new();
@@ -39,12 +38,7 @@ pub(crate) fn create_agent_in_context(
         .read_to_string(&mut markdown)
         .map_err(|error| io::Error::new(error.kind(), format!("failed to read stdin: {error}")))?;
 
-    let validate = if context.is_central() {
-        check_state
-    } else {
-        check_waap
-    };
-    let mut transaction = StateTransaction::begin(context, validate)?;
+    let mut transaction = StateTransaction::begin(store)?;
     let state_root = transaction.state_root().to_path_buf();
     let report = create_agent_with_markdown_in_transaction(
         &state_root,

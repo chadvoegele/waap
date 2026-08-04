@@ -84,7 +84,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::init_project;
-    use crate::root::resolve_init_project_context;
+    use crate::root::{resolve_project_context, StateRootRequirement};
     use crate::test_git::{init_repo, init_repo_with_commit, run};
 
     #[test]
@@ -94,7 +94,12 @@ mod tests {
         let state = state_parent.path().join("state");
         init_repo_with_commit(repository.path());
         let application_head = run(repository.path(), &["rev-parse", "HEAD"]);
-        let context = resolve_init_project_context(repository.path(), Some(&state)).unwrap();
+        let context = resolve_project_context(
+            repository.path(),
+            Some(&state),
+            StateRootRequirement::MayBeMissing,
+        )
+        .unwrap();
 
         let committed = init_project(&context, true).unwrap();
 
@@ -116,7 +121,9 @@ mod tests {
         let repository = tempdir().unwrap();
         init_repo(repository.path());
         fs::create_dir_all(repository.path().join(".waap/agents")).unwrap();
-        let context = resolve_init_project_context(repository.path(), None).unwrap();
+        let context =
+            resolve_project_context(repository.path(), None, StateRootRequirement::MayBeMissing)
+                .unwrap();
 
         let error = init_project(&context, false).unwrap_err();
 

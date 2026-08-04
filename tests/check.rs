@@ -3,6 +3,7 @@
 mod common;
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -286,7 +287,7 @@ fn check_rejects_all_direct_state_changes_and_keeps_json_on_stdout() {
 }
 
 #[test]
-fn check_warns_but_passes_for_remote_only_state_and_fetch_failures() {
+fn check_uses_cached_remote_state_without_network_io() {
     let repository = tempdir().unwrap();
     let state_parent = tempdir().unwrap();
     let remote_parent = tempdir().unwrap();
@@ -319,6 +320,7 @@ fn check_warns_but_passes_for_remote_only_state_and_fetch_failures() {
     git(&source, &["add", "agents/.gitkeep"]);
     git(&source, &["commit", "-q", "-m", "remote state"]);
     git(&source, &["push", "-q", "origin", "waap"]);
+    git(repository.path(), &["fetch", "-q", "origin", "waap"]);
 
     let remote_only = waap(
         repository.path(),
@@ -332,15 +334,32 @@ fn check_warns_but_passes_for_remote_only_state_and_fetch_failures() {
         None,
     );
     assert!(remote_only.status.success(), "{}", stderr(&remote_only));
-    assert!(
-        serde_json::from_slice::<serde_json::Value>(&remote_only.stdout).unwrap()["valid"] == true
-    );
+    let report: serde_json::Value = serde_json::from_slice(&remote_only.stdout).unwrap();
+    assert_eq!(report["valid"], true);
+    assert!(report["warnings"]
+        .to_string()
+        .contains("commit(s) not in local waap"));
     assert!(stderr(&remote_only).contains("commit(s) not in local waap"));
 
-    git(&state, &["reset", "--hard", "HEAD"]);
     git(
         repository.path(),
-        &["remote", "set-url", "origin", "/definitely/missing/remote"],
+        &["update-ref", "-d", "refs/remotes/origin/waap"],
+    );
+    let network_marker = remote_parent.path().join("network-invoked");
+    let ssh = remote_parent.path().join("ssh");
+    fs::write(
+        &ssh,
+        format!("#!/bin/sh\ntouch {}\nexit 1\n", network_marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        repository.path(),
+        &["config", "core.sshCommand", ssh.to_str().unwrap()],
+    );
+    git(
+        repository.path(),
+        &["remote", "set-url", "origin", "ssh://example.invalid/waap"],
     );
     let unavailable = waap(
         repository.path(),
@@ -354,8 +373,9 @@ fn check_warns_but_passes_for_remote_only_state_and_fetch_failures() {
         None,
     );
     assert!(unavailable.status.success(), "{}", stderr(&unavailable));
-    assert!(
-        serde_json::from_slice::<serde_json::Value>(&unavailable.stdout).unwrap()["valid"] == true
-    );
-    assert!(stderr(&unavailable).contains("could not fetch origin/waap"));
+    let report: serde_json::Value = serde_json::from_slice(&unavailable.stdout).unwrap();
+    assert_eq!(report["valid"], true);
+    assert_eq!(report["warnings"], serde_json::json!([]));
+    assert!(unavailable.stderr.is_empty());
+    assert!(!network_marker.exists(), "waap check accessed the network");
 }

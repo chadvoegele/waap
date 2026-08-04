@@ -50,7 +50,7 @@ When central state and legacy `.waap` coexist, waap does not choose or merge the
 
 With `origin`, local `waap` tracks `origin/waap`, but waap never pushes automatically. Synchronization is manual, for example `git -C "$WAAP_STATE" push`.
 
-`waap check` fetches `origin/waap`. Remote-only commits, including divergence, produce a warning without failing an otherwise valid check. The warning does not fetch application branches, merge, rebase, or reconcile state.
+`waap check` performs no network I/O. When a cached `origin/waap` ref exists, remote-only commits, including divergence, produce a warning without failing an otherwise valid check. Users fetch state explicitly when they need current remote freshness; checking never merges, rebases, or reconciles state.
 
 ## Records
 

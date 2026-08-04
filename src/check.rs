@@ -8,8 +8,9 @@ use crate::agent::{is_agent_id, AgentMetadata};
 use crate::cli::OutputFormat;
 use crate::frontmatter::parse_frontmatter;
 use crate::git::{
-    fetch_origin_state_branch, has_origin, inspect_state_worktree, remote_only_state_commit_count,
-    state_worktree_changed_paths, validate_state_history, OriginStateBranch, STATE_BRANCH,
+    has_cached_origin_state_branch, has_origin, inspect_state_worktree,
+    remote_only_state_commit_count, state_worktree_changed_paths, validate_state_history,
+    STATE_BRANCH,
 };
 use crate::root::ProjectContext;
 use crate::ticket::{is_ticket_id, TicketMetadata};
@@ -167,22 +168,8 @@ pub(crate) fn check_central_state(
                 Err(error) => errors.push(format!("failed to inspect Git remotes: {error}")),
             }
 
-            match fetch_origin_state_branch(&context.primary_repository_root) {
-                Ok(OriginStateBranch::Present) if inspection.local_branch.is_some() => {
-                    match remote_only_state_commit_count(&context.primary_repository_root) {
-                        Ok(0) => {}
-                        Ok(count) => warnings.push(format!(
-                            "origin/waap has {count} commit(s) not in local waap; update or rebase local state"
-                        )),
-                        Err(error) => warnings.push(format!(
-                            "could not compare local waap with origin/waap: {error}"
-                        )),
-                    }
-                }
-                Ok(OriginStateBranch::Present | OriginStateBranch::NoOrigin | OriginStateBranch::Missing) => {}
-                Err(error) => warnings.push(format!(
-                    "could not fetch origin/waap to check remote state: {error}"
-                )),
+            if inspection.local_branch.is_some() {
+                check_cached_remote_freshness(&context.primary_repository_root, &mut warnings);
             }
         }
         Err(error) => errors.push(format!("failed to inspect state worktree: {error}")),
@@ -210,6 +197,26 @@ pub(crate) fn check_central_state(
     }
 }
 
+/// Compare local state with already-fetched remote state without network I/O.
+/// Fetching belongs to explicit synchronization operations, not validation.
+fn check_cached_remote_freshness(repository_root: &Path, warnings: &mut Vec<String>) {
+    match has_cached_origin_state_branch(repository_root) {
+        Ok(true) => match remote_only_state_commit_count(repository_root) {
+            Ok(0) => {}
+            Ok(count) => warnings.push(format!(
+                "cached origin/waap has {count} commit(s) not in local waap; update or rebase local state"
+            )),
+            Err(error) => warnings.push(format!(
+                "could not compare local waap with cached origin/waap: {error}"
+            )),
+        },
+        Ok(false) => {}
+        Err(error) => warnings.push(format!(
+            "could not inspect cached origin/waap state: {error}"
+        )),
+    }
+}
+
 pub(crate) fn print_central_check_result(
     output_format: &OutputFormat,
     report: &CentralCheckReport,
@@ -221,6 +228,7 @@ pub(crate) fn print_central_check_result(
                 "state_directory": report.state_directory.display().to_string(),
                 "valid": report.errors.is_empty(),
                 "errors": report.errors,
+                "warnings": report.warnings,
             })
         ),
         OutputFormat::HumanReadable => {

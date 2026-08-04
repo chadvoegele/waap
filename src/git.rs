@@ -1,40 +1,19 @@
 use std::collections::BTreeSet;
-use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 
-pub(crate) fn create_worktree(
-    repo_root: &Path,
-    branch: &str,
-    relative_path: &Path,
-) -> io::Result<PathBuf> {
-    run_git(
-        repo_root,
-        &[
-            "worktree".into(),
-            "add".into(),
-            "-b".into(),
-            branch.into(),
-            relative_path.as_os_str().to_os_string(),
-        ],
-    )?;
-    repo_root.join(relative_path).canonicalize()
-}
+mod command;
+mod transaction;
+mod worktree;
 
-pub(crate) fn remove_worktree(repo_root: &Path, relative_path: &Path) -> io::Result<()> {
-    run_git(
-        repo_root,
-        &[
-            "worktree".into(),
-            "remove".into(),
-            "--force".into(), // remove worktrees with uncommitted or untracked changes
-            relative_path.as_os_str().to_os_string(),
-        ],
-    )?;
-    Ok(())
-}
+use command::{
+    args as os_args, command_error as run_git_error, output as git_command, run as run_git,
+    stdout as git_stdout,
+};
+pub(crate) use command::{commit_paths, Committed};
+pub(crate) use transaction::{StateStore, StateTransaction};
+pub(crate) use worktree::{create as create_worktree, remove as remove_worktree};
 
 /// The dedicated branch used for central waap state.
 pub(crate) const STATE_BRANCH: &str = "waap";
@@ -137,28 +116,29 @@ pub(crate) fn fetch_origin_state_branch(repository_root: &Path) -> io::Result<Or
 /// files below `agents/` or `tickets/`. This deliberately never examines any
 /// application branch.
 pub(crate) fn validate_state_history(repository_root: &Path, revision: &str) -> io::Result<()> {
-    let commits = git_stdout(repository_root, &os_args(["rev-list", revision]))?;
-    if commits.is_empty() {
+    if ref_hash(repository_root, revision)?.is_none() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("state branch {revision} has no commits"),
         ));
     }
 
-    for commit in commits.lines() {
-        let paths = git_stdout(
-            repository_root,
-            &os_args(["ls-tree", "-r", "--name-only", commit]),
-        )?;
-        for path in paths.lines() {
-            if !is_state_path(path) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "state branch {revision} contains non-state path {path} in commit {commit}; repair or remove the conflicting state history before initializing"
-                    ),
-                ));
-            }
+    // Ask Git for all changed paths in one process. The previous per-commit
+    // ls-tree loop became progressively slower as state history grew.
+    let output = run_git(
+        repository_root,
+        &os_args(["log", "--format=", "--name-only", "-z", revision]),
+    )?;
+    for raw_path in output.stdout.split(|byte| *byte == 0) {
+        let path = String::from_utf8_lossy(raw_path);
+        let path = path.trim_matches(['\n', '\r']);
+        if !path.is_empty() && !is_state_path(path) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "state branch {revision} contains non-state path {path}; repair or remove the conflicting state history before initializing"
+                ),
+            ));
         }
     }
     Ok(())
@@ -438,6 +418,11 @@ pub(crate) fn has_origin(repository_root: &Path) -> io::Result<bool> {
 }
 
 /// Count commits present on `origin/waap` but not local `waap`.
+/// Whether a previously fetched `origin/waap` tracking ref is available.
+pub(crate) fn has_cached_origin_state_branch(repository_root: &Path) -> io::Result<bool> {
+    Ok(ref_hash(repository_root, ORIGIN_STATE_BRANCH_REF)?.is_some())
+}
+
 pub(crate) fn remote_only_state_commit_count(repository_root: &Path) -> io::Result<usize> {
     let commits = git_stdout(
         repository_root,
@@ -517,15 +502,6 @@ fn git_config_value(repository_root: &Path, key: &str) -> io::Result<Option<Stri
     }
 }
 
-fn git_stdout(repository_root: &Path, args: &[OsString]) -> io::Result<String> {
-    let output = run_git(repository_root, args)?;
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-}
-
-fn os_args<const N: usize>(args: [&str; N]) -> Vec<OsString> {
-    args.into_iter().map(OsString::from).collect()
-}
-
 fn is_state_path(path: &str) -> bool {
     path.strip_prefix("agents/")
         .is_some_and(|tail| !tail.is_empty())
@@ -541,434 +517,6 @@ fn paths_match(left: &Path, right: &Path) -> bool {
     }
 }
 
-/// Paths needed to mutate waap state without confusing the state checkout
-/// with the application checkout.
-#[derive(Clone, Debug)]
-pub(crate) struct StateMutationContext {
-    pub(crate) state_root: PathBuf,
-    pub(crate) source_root: PathBuf,
-    pub(crate) common_git_dir: PathBuf,
-    require_state_branch: bool,
-}
-
-impl StateMutationContext {
-    #[cfg(test)]
-    pub(crate) fn legacy(waap_root: &Path) -> io::Result<Self> {
-        let state_root = waap_root.canonicalize()?;
-        let common_git_dir = common_git_dir(&state_root)?;
-        Ok(Self {
-            source_root: state_root.clone(),
-            state_root,
-            common_git_dir,
-            require_state_branch: false,
-        })
-    }
-
-    pub(crate) fn central(
-        state_root: PathBuf,
-        source_root: PathBuf,
-        common_git_dir: PathBuf,
-    ) -> Self {
-        Self {
-            state_root,
-            source_root,
-            common_git_dir,
-            require_state_branch: true,
-        }
-    }
-
-    pub(crate) fn from_project_context(context: &crate::root::ProjectContext) -> Self {
-        Self::central(
-            context.state_root.clone(),
-            context.invocation_worktree_root.clone(),
-            context.common_git_dir.clone(),
-        )
-    }
-
-    pub(crate) fn is_central(&self) -> bool {
-        self.require_state_branch
-    }
-}
-
-/// A serialized state mutation. It owns the per-repository lock from
-/// validation through commit. Call `snapshot_path` before changing each file;
-/// dropping an unfinished transaction restores those files and their index
-/// entries to HEAD.
-pub(crate) struct StateTransaction {
-    context: StateMutationContext,
-    lock: StateLock,
-    snapshots: Vec<PathSnapshot>,
-    validate: fn(&Path) -> Vec<String>,
-    finished: bool,
-}
-
-impl StateTransaction {
-    pub(crate) fn begin(
-        context: StateMutationContext,
-        validate: fn(&Path) -> Vec<String>,
-    ) -> io::Result<Self> {
-        let lock = StateLock::acquire(&context.common_git_dir)?;
-        if context.require_state_branch {
-            ensure_state_branch(&context.state_root)?;
-        }
-        validate_state(&context.state_root, validate)?;
-        Ok(Self {
-            context,
-            lock,
-            snapshots: Vec::new(),
-            validate,
-            finished: false,
-        })
-    }
-
-    pub(crate) fn state_root(&self) -> &Path {
-        &self.context.state_root
-    }
-
-    pub(crate) fn snapshot_path(&mut self, path: &Path) -> io::Result<()> {
-        if !path.starts_with(&self.context.state_root) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "state mutation path {} is outside state directory {}",
-                    path.display(),
-                    self.context.state_root.display()
-                ),
-            ));
-        }
-        if self.snapshots.iter().any(|snapshot| snapshot.path == path) {
-            return Ok(());
-        }
-        ensure_path_unstaged(&self.context.state_root, path)?;
-        self.snapshots.push(PathSnapshot {
-            path: path.to_path_buf(),
-            contents: if path.exists() {
-                Some(fs::read(path)?)
-            } else {
-                None
-            },
-            missing_parent_dirs: missing_parent_dirs(path, &self.context.state_root),
-        });
-        Ok(())
-    }
-
-    pub(crate) fn validate(&self, validate: impl Fn(&Path) -> Vec<String>) -> io::Result<()> {
-        validate_state(&self.context.state_root, validate)
-    }
-
-    pub(crate) fn commit(mut self, paths: &[&Path], message: &str) -> io::Result<String> {
-        if paths.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "no paths to commit",
-            ));
-        }
-        for path in paths {
-            if !self.snapshots.iter().any(|snapshot| snapshot.path == *path) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("state mutation path {} was not snapshotted", path.display()),
-                ));
-            }
-        }
-        if let Err(error) = self.validate(self.validate) {
-            return Err(self.fail(error));
-        }
-        match commit_paths(&self.context.state_root, paths, message) {
-            Ok(commit) => {
-                self.finished = true;
-                Ok(commit)
-            }
-            Err(error) => Err(self.fail(error)),
-        }
-    }
-
-    fn fail(&mut self, error: io::Error) -> io::Error {
-        self.finished = true;
-        match self.restore() {
-            Ok(()) => error,
-            Err(restore_error) => io::Error::new(
-                error.kind(),
-                format!("{error}; failed to roll back waap state: {restore_error}"),
-            ),
-        }
-    }
-
-    fn restore(&self) -> io::Result<()> {
-        let paths: Vec<&Path> = self
-            .snapshots
-            .iter()
-            .map(|snapshot| snapshot.path.as_path())
-            .collect();
-        if !paths.is_empty() {
-            let mut reset_args: Vec<OsString> = vec!["reset".into(), "--".into()];
-            reset_args.extend(paths.iter().map(|path| path.as_os_str().to_os_string()));
-            run_git(&self.context.state_root, &reset_args)?;
-        }
-        for snapshot in &self.snapshots {
-            match &snapshot.contents {
-                Some(contents) => {
-                    if let Some(parent) = snapshot.path.parent() {
-                        fs::create_dir_all(parent)?;
-                    }
-                    fs::write(&snapshot.path, contents)?;
-                }
-                None if snapshot.path.exists() => fs::remove_file(&snapshot.path)?,
-                None => {}
-            }
-        }
-        for directory in self
-            .snapshots
-            .iter()
-            .flat_map(|snapshot| &snapshot.missing_parent_dirs)
-        {
-            match fs::remove_dir(directory) {
-                Ok(()) => {}
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
-                    ) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(())
-    }
-}
-
-fn missing_parent_dirs(path: &Path, state_root: &Path) -> Vec<PathBuf> {
-    let mut directories = Vec::new();
-    let mut current = path.parent();
-    while let Some(directory) = current {
-        if directory == state_root || directory.exists() {
-            break;
-        }
-        directories.push(directory.to_path_buf());
-        current = directory.parent();
-    }
-    directories
-}
-
-impl Drop for StateTransaction {
-    fn drop(&mut self) {
-        if !self.finished {
-            if let Err(error) = self.restore() {
-                log::error!("failed to roll back waap state transaction: {error}");
-            }
-        }
-        // Keep the lock field alive until after rollback.
-        let _ = &self.lock;
-    }
-}
-
-struct PathSnapshot {
-    path: PathBuf,
-    contents: Option<Vec<u8>>,
-    missing_parent_dirs: Vec<PathBuf>,
-}
-
-struct StateLock {
-    path: PathBuf,
-}
-
-impl StateLock {
-    fn acquire(common_git_dir: &Path) -> io::Result<Self> {
-        let path = common_git_dir.join(STATE_LOCK_FILE);
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                writeln!(file, "{}", std::process::id())?;
-                Ok(Self { path })
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                format!(
-                    "waap state transaction is already running ({}) ; retry after it finishes",
-                    path.display()
-                ),
-            )),
-            Err(error) => Err(io::Error::new(
-                error.kind(),
-                format!(
-                    "failed to acquire waap state lock {}: {error}",
-                    path.display()
-                ),
-            )),
-        }
-    }
-}
-
-impl Drop for StateLock {
-    fn drop(&mut self) {
-        if let Err(error) = fs::remove_file(&self.path) {
-            if error.kind() != io::ErrorKind::NotFound {
-                log::error!(
-                    "failed to remove waap state lock {}: {error}",
-                    self.path.display()
-                );
-            }
-        }
-    }
-}
-
-fn validate_state(state_root: &Path, validate: impl Fn(&Path) -> Vec<String>) -> io::Result<()> {
-    let errors = validate(state_root);
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("waap state is invalid: {}", errors.join("; ")),
-        ))
-    }
-}
-
-fn ensure_path_unstaged(state_root: &Path, path: &Path) -> io::Result<()> {
-    let args = vec![
-        "diff".into(),
-        "--cached".into(),
-        "--quiet".into(),
-        "--".into(),
-        path.as_os_str().to_os_string(),
-    ];
-    let output = git_command(state_root, &args)?;
-    match output.status.code() {
-        Some(0) => Ok(()),
-        Some(1) => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "state mutation path {} has staged changes; commit or unstage it before retrying",
-                path.display()
-            ),
-        )),
-        _ => Err(run_git_error(&args, &output)),
-    }
-}
-
-fn ensure_state_branch(state_root: &Path) -> io::Result<()> {
-    let output = git_command(state_root, &os_args(["branch", "--show-current"]))?;
-    if !output.status.success() {
-        return Err(run_git_error(
-            &os_args(["branch", "--show-current"]),
-            &output,
-        ));
-    }
-    if String::from_utf8_lossy(&output.stdout).trim() != STATE_BRANCH {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "state worktree {} must check out {STATE_BRANCH}",
-                state_root.display()
-            ),
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-fn common_git_dir(path: &Path) -> io::Result<PathBuf> {
-    let output = git_command(path, &os_args(["rev-parse", "--git-common-dir"]))?;
-    if !output.status.success() {
-        return Err(run_git_error(
-            &os_args(["rev-parse", "--git-common-dir"]),
-            &output,
-        ));
-    }
-    let git_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-    let git_dir = if git_dir.is_absolute() {
-        git_dir
-    } else {
-        path.join(git_dir)
-    };
-    git_dir.canonicalize()
-}
-
-#[derive(Debug)]
-pub(crate) struct Committed<T> {
-    pub(crate) value: T,
-    pub(crate) commit: String,
-}
-
-pub(crate) fn commit_paths(waap_root: &Path, paths: &[&Path], message: &str) -> io::Result<String> {
-    if paths.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "no paths to commit",
-        ));
-    }
-
-    let mut add_args: Vec<OsString> = vec!["add".into(), "--".into()];
-    add_args.extend(paths.iter().map(|path| path.as_os_str().to_os_string()));
-    run_git(waap_root, &add_args)?;
-
-    let mut diff_args: Vec<OsString> = vec![
-        "diff".into(),
-        "--cached".into(),
-        "--quiet".into(),
-        "--".into(),
-    ];
-    diff_args.extend(paths.iter().map(|path| path.as_os_str().to_os_string()));
-    let diff = git_command(waap_root, &diff_args)?;
-    let has_staged_changes = match diff.status.code() {
-        Some(0) => false,
-        Some(1) => true,
-        _ => return Err(run_git_error(&diff_args, &diff)),
-    };
-
-    if has_staged_changes {
-        let mut commit_args: Vec<OsString> =
-            vec!["commit".into(), "-m".into(), message.into(), "--".into()];
-        commit_args.extend(paths.iter().map(|path| path.as_os_str().to_os_string()));
-        run_git(waap_root, &commit_args)?;
-    }
-
-    let output = run_git(waap_root, &["rev-parse".into(), "HEAD".into()])?;
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn git_process(waap_root: &Path) -> Command {
-    let mut command = Command::new("git");
-    command.current_dir(waap_root);
-    #[cfg(test)]
-    crate::test_git::isolate(&mut command);
-    command
-}
-
-fn git_command(waap_root: &Path, args: &[OsString]) -> io::Result<Output> {
-    git_process(waap_root)
-        .args(args)
-        .output()
-        .map_err(|error| io::Error::new(error.kind(), format!("failed to run git: {error}")))
-}
-
-fn run_git_error(args: &[OsString], output: &Output) -> io::Error {
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stderr = stderr.trim();
-    let subcommand = args
-        .first()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let detail = if stderr.is_empty() {
-        format!("git {subcommand} exited with {}", output.status)
-    } else {
-        format!("git {subcommand} failed: {stderr}")
-    };
-    io::Error::other(detail)
-}
-
-fn run_git(waap_root: &Path, args: &[OsString]) -> io::Result<Output> {
-    let output = git_command(waap_root, args)?;
-
-    if !output.status.success() {
-        return Err(run_git_error(args, &output));
-    }
-
-    Ok(output)
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -981,7 +529,7 @@ mod tests {
     use super::{
         commit_paths, create_worktree, fetch_origin_state_branch, initialize_state_worktree,
         inspect_state_worktree, query_origin_state_branch, remove_worktree, OriginStateBranch,
-        StateMutationContext, StateTransaction, STATE_BRANCH,
+        StateStore, StateTransaction, STATE_BRANCH,
     };
     use crate::test_git::{init_repo, init_repo_with_commit, isolate, run};
 
@@ -990,8 +538,8 @@ mod tests {
         fs::write(path, contents).unwrap();
     }
 
-    fn central_context(root: &Path) -> StateMutationContext {
-        StateMutationContext::central(
+    fn central_context(root: &Path) -> StateStore {
+        StateStore::central(
             root.canonicalize().unwrap(),
             root.canonicalize().unwrap(),
             root.join(".git").canonicalize().unwrap(),
@@ -1043,8 +591,11 @@ mod tests {
         write_file(&unrelated, "user staged state\n");
         run(dir.path(), &["add", "tickets"]);
 
-        let mut transaction =
-            StateTransaction::begin(central_context(dir.path()), central_state_is_valid).unwrap();
+        let mut transaction = StateTransaction::begin_with_validator(
+            central_context(dir.path()),
+            central_state_is_valid,
+        )
+        .unwrap();
         transaction.snapshot_path(&changed).unwrap();
         write_file(&changed, "agent state\n");
         let commit = transaction
@@ -1070,8 +621,11 @@ mod tests {
         let path = dir.path().join("agents/.gitkeep");
         let before = run(dir.path(), &["rev-parse", "HEAD"]);
 
-        let mut transaction =
-            StateTransaction::begin(central_context(dir.path()), central_state_is_valid).unwrap();
+        let mut transaction = StateTransaction::begin_with_validator(
+            central_context(dir.path()),
+            central_state_is_valid,
+        )
+        .unwrap();
         transaction.snapshot_path(&path).unwrap();
         write_file(&path, "");
         let commit = transaction.commit(&[path.as_path()], "no-op").unwrap();
@@ -1085,9 +639,11 @@ mod tests {
         let dir = tempdir().unwrap();
         init_central_state_repo(dir.path());
         let invalid = dir.path().join("agents/.gitkeep");
-        let mut transaction =
-            StateTransaction::begin(central_context(dir.path()), central_state_marker_is_valid)
-                .unwrap();
+        let mut transaction = StateTransaction::begin_with_validator(
+            central_context(dir.path()),
+            central_state_marker_is_valid,
+        )
+        .unwrap();
         transaction.snapshot_path(&invalid).unwrap();
         write_file(&invalid, "changed\n");
         let error = transaction
@@ -1107,9 +663,11 @@ mod tests {
         let dir = tempdir().unwrap();
         init_central_state_repo(dir.path());
         let path = dir.path().join("agents/aa-new/agent.md");
-        let mut transaction =
-            StateTransaction::begin(central_context(dir.path()), central_state_has_no_new_agent)
-                .unwrap();
+        let mut transaction = StateTransaction::begin_with_validator(
+            central_context(dir.path()),
+            central_state_has_no_new_agent,
+        )
+        .unwrap();
         transaction.snapshot_path(&path).unwrap();
         write_file(&path, "agent state\n");
 
@@ -1126,20 +684,27 @@ mod tests {
     fn state_transaction_lock_contention_fails_without_changing_state() {
         let dir = tempdir().unwrap();
         init_central_state_repo(dir.path());
-        let transaction =
-            StateTransaction::begin(central_context(dir.path()), central_state_is_valid).unwrap();
-        let error =
-            match StateTransaction::begin(central_context(dir.path()), central_state_is_valid) {
-                Ok(_) => panic!("competing transaction unexpectedly acquired the lock"),
-                Err(error) => error,
-            };
+        let transaction = StateTransaction::begin_with_validator(
+            central_context(dir.path()),
+            central_state_is_valid,
+        )
+        .unwrap();
+        let error = match StateTransaction::begin_with_validator(
+            central_context(dir.path()),
+            central_state_is_valid,
+        ) {
+            Ok(_) => panic!("competing transaction unexpectedly acquired the lock"),
+            Err(error) => error,
+        };
 
         assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
         assert!(error.to_string().contains("retry"));
         drop(transaction);
-        assert!(
-            StateTransaction::begin(central_context(dir.path()), central_state_is_valid).is_ok()
-        );
+        assert!(StateTransaction::begin_with_validator(
+            central_context(dir.path()),
+            central_state_is_valid,
+        )
+        .is_ok());
         assert!(run(dir.path(), &["status", "--porcelain"]).is_empty());
     }
 

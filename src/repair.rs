@@ -22,6 +22,13 @@ pub(crate) struct RepairReport {
     pub(crate) relocated_from: Option<PathBuf>,
 }
 
+#[derive(Debug)]
+enum RepairPlan {
+    MigrateLegacy { legacy_state: PathBuf },
+    RelocateState { source: PathBuf },
+    ValidateExisting,
+}
+
 /// Repair a state checkout or migrate the invocation worktree's legacy state.
 /// An explicit state root is intentionally isolated from legacy-state discovery.
 pub(crate) fn repair_project(
@@ -39,29 +46,9 @@ pub(crate) fn repair_project(
         });
     }
 
-    let legacy_state = context.invocation_worktree_root.join(".waap");
-    let central_exists = context.state_root.exists();
-    let relocation_source =
-        state_worktree_relocation_source(&context.primary_repository_root, &context.state_root)?;
-    match (legacy_state.exists(), central_exists, relocation_source) {
-        (true, true, _) => Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!(
-                "central state {} and legacy state {} coexist; reconcile them manually before retrying waap repair",
-                context.state_root.display(),
-                legacy_state.display()
-            ),
-        )),
-        (true, false, Some(source)) => Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!(
-                "registered waap state worktree {} and legacy state {} coexist; reconcile them manually before retrying waap repair",
-                source.display(),
-                legacy_state.display()
-            ),
-        )),
-        (true, false, None) => migrate_legacy_state(context, &legacy_state),
-        (false, false, Some(source)) => {
+    match determine_repair_plan(context)? {
+        RepairPlan::MigrateLegacy { legacy_state } => migrate_legacy_state(context, &legacy_state),
+        RepairPlan::RelocateState { source } => {
             let state_directory = relocate_state_worktree(
                 &context.primary_repository_root,
                 &source,
@@ -76,7 +63,7 @@ pub(crate) fn repair_project(
                 relocated_from: Some(source),
             })
         }
-        (false, true, None) => {
+        RepairPlan::ValidateExisting => {
             validate_registered_central_state(context)?;
             configure_state_upstream(&context.primary_repository_root)?;
             Ok(RepairReport {
@@ -86,12 +73,50 @@ pub(crate) fn repair_project(
                 relocated_from: None,
             })
         }
-        (false, false, None) => Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "no legacy or central waap state was found; run waap init",
-        )),
-        (false, true, Some(_)) => unreachable!("an occupied expected state path rejects relocation"),
     }
+}
+
+fn determine_repair_plan(context: &ProjectContext) -> io::Result<RepairPlan> {
+    let legacy_state = context.invocation_worktree_root.join(".waap");
+    let central_exists = context.state_root.exists();
+    let relocation_source =
+        state_worktree_relocation_source(&context.primary_repository_root, &context.state_root)?;
+
+    if legacy_state.exists() {
+        if central_exists {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "central state {} and legacy state {} coexist; reconcile them manually before retrying waap repair",
+                    context.state_root.display(),
+                    legacy_state.display()
+                ),
+            ));
+        }
+        if let Some(source) = relocation_source {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "registered waap state worktree {} and legacy state {} coexist; reconcile them manually before retrying waap repair",
+                    source.display(),
+                    legacy_state.display()
+                ),
+            ));
+        }
+        return Ok(RepairPlan::MigrateLegacy { legacy_state });
+    }
+
+    if let Some(source) = relocation_source {
+        return Ok(RepairPlan::RelocateState { source });
+    }
+    if central_exists {
+        return Ok(RepairPlan::ValidateExisting);
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "no legacy or central waap state was found; run waap init",
+    ))
 }
 
 fn migrate_legacy_state(context: &ProjectContext, legacy_state: &Path) -> io::Result<RepairReport> {

@@ -3,9 +3,8 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use crate::check::{check_state, check_waap};
 use crate::cli::OutputFormat;
-use crate::git::{Committed, StateMutationContext, StateTransaction};
+use crate::git::{Committed, StateStore, StateTransaction};
 use crate::ticket::{
     is_ticket_id, load_tickets_metadata, print_ticket_report_human, read_ticket_record,
     ticket_path, ticket_report_json, write_ticket_record, TicketReport, TicketStatus,
@@ -30,18 +29,13 @@ pub(crate) fn print_updated_ticket_report(
 }
 
 pub(crate) fn update_ticket_in_context(
-    context: StateMutationContext,
+    store: StateStore,
     ticket_id: &str,
     set_status: Option<&TicketStatus>,
     add_depends_on: &[String],
     remove_depends_on: &[String],
 ) -> io::Result<Committed<TicketReport>> {
-    let validate = if context.is_central() {
-        check_state
-    } else {
-        check_waap
-    };
-    let mut transaction = StateTransaction::begin(context, validate)?;
+    let mut transaction = StateTransaction::begin(store)?;
     let state_root = transaction.state_root().to_path_buf();
     let report = update_ticket_record_in_transaction(
         &state_root,
