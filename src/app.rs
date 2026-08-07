@@ -14,7 +14,8 @@ use crate::agent::{
 use crate::check::{check_waap, print_check_errors, print_check_result};
 use crate::cli::{AgentCommand, Cli, Command, TicketCommand};
 use crate::init::{init_project, print_init_report};
-use crate::root::resolve_waap_root;
+use crate::repair::{print_repair_report, repair_project};
+use crate::root::{find_git_root, find_waap_root};
 use crate::ticket::{
     create_ticket, get_ticket, list_tickets, print_ticket_get_report, print_ticket_list,
     print_ticket_report, print_updated_ticket_report, update_ticket,
@@ -47,26 +48,34 @@ pub(crate) fn run() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let waap_root = match resolve_waap_root(&cwd, cli.waap_root.as_deref()) {
+    let repository_root = match find_git_root(&cwd) {
         Ok(root) => root,
         Err(error) => {
             eprintln!("{error}");
             return ExitCode::from(1);
         }
     };
-    log::debug!("resolved waap root: {}", waap_root.display());
+    let waap_root = match find_waap_root(&cwd, cli.waap_root.as_deref()) {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(1);
+        }
+    };
+    log::debug!("resolved waap state root: {}", waap_root.display());
+    let repository_root = &repository_root;
     let waap_root = &waap_root;
 
     if matches!(&cli.command, Command::Agent { .. } | Command::Ticket { .. }) {
         let errors = check_waap(waap_root);
         if !errors.is_empty() {
-            print_check_errors(&cli.output_format, &errors);
+            print_check_errors(&cli.output_format, waap_root, &errors);
             return ExitCode::from(1);
         }
     }
 
     match cli.command {
-        Command::Init => match init_project(waap_root) {
+        Command::Init => match init_project(repository_root, waap_root) {
             Ok(report) => {
                 print_init_report(&cli.output_format, &report);
                 ExitCode::SUCCESS
@@ -75,11 +84,20 @@ pub(crate) fn run() -> ExitCode {
         },
         Command::Check => {
             let errors = check_waap(waap_root);
-            print_check_result(&cli.output_format, &errors);
+            print_check_result(&cli.output_format, waap_root, &errors);
             if errors.is_empty() {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::from(1)
+            }
+        }
+        Command::Repair => {
+            match repair_project(repository_root, waap_root, cli.waap_root.is_some()) {
+                Ok(report) => {
+                    print_repair_report(&cli.output_format, &report);
+                    ExitCode::SUCCESS
+                }
+                Err(error) => command_error("failed to repair waap state", error),
             }
         }
         Command::Agent { command } => match command {
@@ -91,7 +109,13 @@ pub(crate) fn run() -> ExitCode {
                 Err(error) => command_error("failed to create agent", error),
             },
             AgentCommand::Run { agent_id, system } => {
-                match run_agent(waap_root, &cli.output_format, &agent_id, &system) {
+                match run_agent(
+                    repository_root,
+                    waap_root,
+                    &cli.output_format,
+                    &agent_id,
+                    &system,
+                ) {
                     Ok(status) => status,
                     Err(error) => {
                         eprintln!("failed to run agent: {error}");

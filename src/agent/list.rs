@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn agent_list_handles_empty_agent_directories() {
         let dir = tempdir().unwrap();
-        fs::create_dir_all(dir.path().join(".waap/agents")).unwrap();
+        fs::create_dir_all(dir.path().join("agents")).unwrap();
 
         let reports = list_agents(dir.path(), None).unwrap();
 
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn agent_list_rejects_non_directory_entries() {
         let dir = tempdir().unwrap();
-        write_file(&dir.path().join(".waap/agents/not-a-directory"), "oops");
+        write_file(&dir.path().join("agents/not-a-directory"), "oops");
 
         let error = list_agents(dir.path(), None).unwrap_err();
 
@@ -176,7 +176,7 @@ mod tests {
     fn agent_list_validates_agent_frontmatter() {
         let dir = tempdir().unwrap();
         write_file(
-            &dir.path().join(".waap/agents/aa-3881fda0/agent.md"),
+            &dir.path().join("agents/aa-3881fda0/agent.md"),
             "+++
 creation_date = 2026-06-18T15:00:34Z
 role = \"developer\"
@@ -196,7 +196,7 @@ status = \"pending\"
         let reports = vec![
             AgentReport {
                 agent_id: "aa-00000001".to_string(),
-                path: PathBuf::from(".waap/agents/aa-00000001/agent.md"),
+                path: PathBuf::from("agents/aa-00000001/agent.md"),
                 metadata: AgentMetadata {
                     name: None,
                     creation_date: "2026-06-18T15:00:34Z".to_string(),
@@ -208,7 +208,7 @@ status = \"pending\"
             },
             AgentReport {
                 agent_id: "aa-00000002".to_string(),
-                path: PathBuf::from(".waap/agents/aa-00000002/agent.md"),
+                path: PathBuf::from("agents/aa-00000002/agent.md"),
                 metadata: AgentMetadata {
                     name: None,
                     creation_date: "2026-06-18T15:00:34Z".to_string(),
@@ -275,7 +275,7 @@ status = \"pending\"
     fn report(agent_id: &str, status: &str) -> AgentReport {
         AgentReport {
             agent_id: agent_id.to_string(),
-            path: PathBuf::from(format!(".waap/agents/{agent_id}/agent.md")),
+            path: PathBuf::from(format!("agents/{agent_id}/agent.md")),
             metadata: AgentMetadata {
                 name: None,
                 creation_date: "2026-06-18T15:00:34Z".to_string(),
@@ -305,7 +305,7 @@ status = \"pending\"
         creation_date: &str,
     ) {
         write_file(
-            &waap_root.join(format!(".waap/agents/{agent_id}/agent.md")),
+            &waap_root.join(format!("agents/{agent_id}/agent.md")),
             &format!(
                 "+++\ncreation_date = {creation_date}\nrole = \"developer\"\nstatus = \"{status}\"\n+++\n\n# Purpose\n"
             ),

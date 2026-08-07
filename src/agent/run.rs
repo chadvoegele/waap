@@ -31,6 +31,7 @@ fn print_run_agent_report(
 }
 
 pub(crate) fn run_agent(
+    repository_root: &Path,
     waap_root: &Path,
     output_format: &OutputFormat,
     agent_id: &str,
@@ -38,10 +39,18 @@ pub(crate) fn run_agent(
 ) -> io::Result<ExitCode> {
     require_ready_agent(waap_root, agent_id)?;
     let mut backend = system.backend()?;
-    run_agent_with_backend(waap_root, output_format, agent_id, system, backend.as_mut())
+    run_agent_with_backend(
+        repository_root,
+        waap_root,
+        output_format,
+        agent_id,
+        system,
+        backend.as_mut(),
+    )
 }
 
 fn run_agent_with_backend(
+    repository_root: &Path,
     waap_root: &Path,
     output_format: &OutputFormat,
     agent_id: &str,
@@ -61,7 +70,14 @@ fn run_agent_with_backend(
             error
         });
     }
-    let result = run_started_agent(waap_root, output_format, agent_id, system, backend);
+    let result = run_started_agent(
+        repository_root,
+        waap_root,
+        output_format,
+        agent_id,
+        system,
+        backend,
+    );
 
     match result {
         Ok(RunOutcome::Completed) => {
@@ -89,15 +105,16 @@ fn run_agent_with_backend(
 }
 
 fn run_started_agent(
+    repository_root: &Path,
     waap_root: &Path,
     output_format: &OutputFormat,
     agent_id: &str,
     system: &AgentSystem,
     backend: &mut dyn AgentSystemBackend,
 ) -> io::Result<RunOutcome> {
-    let mut worktree = AgentWorktree::create(waap_root, agent_id)?;
-    let repository_root = waap_root.canonicalize()?;
-    let prompt = build_agent_goal(&repository_root, agent_id);
+    let repository_root = repository_root.canonicalize()?;
+    let mut worktree = AgentWorktree::create(&repository_root, agent_id)?;
+    let prompt = build_agent_goal(waap_root, agent_id);
     let run_result = backend
         .start(StartContext {
             agent_id,
@@ -119,8 +136,8 @@ fn run_started_agent(
     collapse_errors(run_result, cleanup_result)
 }
 
-fn build_agent_goal(repository_root: &Path, agent_id: &str) -> String {
-    let instruction_path = repository_root.join(format!(".waap/agents/{agent_id}/agent.md"));
+fn build_agent_goal(waap_root: &Path, agent_id: &str) -> String {
+    let instruction_path = waap_root.join(format!("agents/{agent_id}/agent.md"));
     format!(
         "Complete when instructions in {} are satisfied",
         instruction_path.display()
@@ -498,7 +515,7 @@ mod tests {
     fn run_report_json_includes_running_status_and_session_id() {
         let report = AgentReport {
             agent_id: "aa-3881fda0".to_string(),
-            path: std::path::PathBuf::from(".waap/agents/aa-3881fda0/agent.md"),
+            path: std::path::PathBuf::from("agents/aa-3881fda0/agent.md"),
             metadata: AgentMetadata {
                 name: None,
                 creation_date: "2026-06-18T15:00:34Z".to_string(),
@@ -517,7 +534,7 @@ mod tests {
             json,
             json!({
                 "agent_id": "aa-3881fda0",
-                "path": ".waap/agents/aa-3881fda0/agent.md",
+                "path": "agents/aa-3881fda0/agent.md",
                 "metadata": {
                     "name": null,
                     "creation_date": "2026-06-18T15:00:34Z",
@@ -535,7 +552,7 @@ mod tests {
     }
 
     fn seed_agent_record(root: &Path, agent_id: &str, status: &str) -> PathBuf {
-        let path = root.join(format!(".waap/agents/{agent_id}/agent.md"));
+        let path = root.join(format!("agents/{agent_id}/agent.md"));
         write_file(
             &path,
             &format!(
@@ -583,6 +600,7 @@ mod tests {
 
         let error = run_agent(
             dir.path(),
+            dir.path(),
             &OutputFormat::Json,
             agent_id,
             &AgentSystem::Opencode,
@@ -616,6 +634,7 @@ mod tests {
         seed_agent_record(dir.path(), agent_id, "ready");
 
         let error = run_agent(
+            dir.path(),
             dir.path(),
             &OutputFormat::Json,
             agent_id,
@@ -654,6 +673,7 @@ mod tests {
 
             let code = run_agent_with_backend(
                 dir.path(),
+                dir.path(),
                 &OutputFormat::Json,
                 agent_id,
                 &system,
@@ -676,16 +696,10 @@ mod tests {
             assert_eq!(metadata.status, "completed");
             assert_eq!(metadata.system, Some(system));
             assert_eq!(metadata.session_id.as_deref(), Some("ses_started"));
-            let running_record = git(
-                dir.path(),
-                &["show", "HEAD~2:.waap/agents/aa-00000001/agent.md"],
-            );
+            let running_record = git(dir.path(), &["show", "HEAD~2:agents/aa-00000001/agent.md"]);
             assert!(running_record.contains("status = \"running\""));
             assert!(!running_record.contains("session_id ="));
-            let started_record = git(
-                dir.path(),
-                &["show", "HEAD~1:.waap/agents/aa-00000001/agent.md"],
-            );
+            let started_record = git(dir.path(), &["show", "HEAD~1:agents/aa-00000001/agent.md"]);
             assert!(started_record.contains("session_id = \"ses_started\""));
         }
     }
@@ -696,7 +710,7 @@ mod tests {
 
         assert_eq!(
             build_agent_goal(&repository_root, "aa-00000001"),
-            "Complete when instructions in /repository/.waap/agents/aa-00000001/agent.md are satisfied"
+            "Complete when instructions in /repository/agents/aa-00000001/agent.md are satisfied"
         );
     }
 
@@ -713,6 +727,7 @@ mod tests {
 
         let code = run_agent_with_backend(
             dir.path(),
+            dir.path(),
             &OutputFormat::Json,
             agent_id,
             &AgentSystem::Codex,
@@ -725,10 +740,7 @@ mod tests {
         assert_eq!(backend.wait_calls.get(), 1);
         let (metadata, _) = read_agent_record(dir.path(), agent_id).unwrap();
         assert_eq!(metadata.session_id.as_deref(), Some("th_authentic"));
-        let running_record = git(
-            dir.path(),
-            &["show", "HEAD~2:.waap/agents/aa-00000001/agent.md"],
-        );
+        let running_record = git(dir.path(), &["show", "HEAD~2:agents/aa-00000001/agent.md"]);
         assert!(running_record.contains("status = \"running\""));
         assert!(!running_record.contains("session_id ="));
         let subjects = git(dir.path(), &["log", "-3", "--format=%s"]);
@@ -755,6 +767,7 @@ mod tests {
         };
 
         let code = run_agent_with_backend(
+            dir.path(),
             dir.path(),
             &OutputFormat::Json,
             agent_id,
@@ -791,6 +804,7 @@ mod tests {
 
         let code = run_agent_with_backend(
             dir.path(),
+            dir.path(),
             &OutputFormat::Json,
             agent_id,
             &AgentSystem::Opencode,
@@ -826,6 +840,7 @@ mod tests {
 
         let code = run_agent_with_backend(
             dir.path(),
+            dir.path(),
             &OutputFormat::Json,
             agent_id,
             &AgentSystem::Opencode,
@@ -857,6 +872,7 @@ mod tests {
 
         let error = run_agent_with_backend(
             dir.path(),
+            dir.path(),
             &OutputFormat::Json,
             agent_id,
             &AgentSystem::Opencode,
@@ -884,6 +900,7 @@ mod tests {
         let mut backend = FakeBackend::default();
 
         let error = run_agent_with_backend(
+            dir.path(),
             dir.path(),
             &OutputFormat::Json,
             agent_id,
@@ -914,6 +931,7 @@ mod tests {
         let mut backend = FakeBackend::default();
 
         let error = run_agent_with_backend(
+            dir.path(),
             dir.path(),
             &OutputFormat::Json,
             agent_id,
@@ -948,6 +966,7 @@ mod tests {
 
         let error = run_agent_with_backend(
             dir.path(),
+            dir.path(),
             &OutputFormat::Json,
             agent_id,
             &AgentSystem::Opencode,
@@ -975,6 +994,7 @@ mod tests {
         };
 
         let error = run_agent_with_backend(
+            dir.path(),
             dir.path(),
             &OutputFormat::Json,
             agent_id,
@@ -1007,6 +1027,7 @@ mod tests {
         };
 
         let error = run_agent_with_backend(
+            dir.path(),
             dir.path(),
             &OutputFormat::Json,
             agent_id,
@@ -1041,6 +1062,7 @@ mod tests {
 
         let error = run_agent_with_backend(
             dir.path(),
+            dir.path(),
             &OutputFormat::Json,
             agent_id,
             &AgentSystem::Opencode,
@@ -1072,6 +1094,7 @@ mod tests {
         };
 
         let error = run_agent_with_backend(
+            dir.path(),
             dir.path(),
             &OutputFormat::Json,
             agent_id,
@@ -1134,6 +1157,7 @@ mod tests {
             let mut backend = FakeBackend::default();
 
             let error = run_agent_with_backend(
+                dir.path(),
                 dir.path(),
                 &OutputFormat::Json,
                 agent_id,
@@ -1322,7 +1346,7 @@ mod tests {
         let agent_id = "aa-00000001";
         seed_agent_record(dir.path(), agent_id, "running");
 
-        let ticket_path = dir.path().join(".waap/tickets/tt-some-ticket/ticket.md");
+        let ticket_path = dir.path().join("tickets/tt-some-ticket/ticket.md");
         write_file(
             &ticket_path,
             "+++\ntitle = \"Some ticket\"\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"in-progress\"\n+++\n\n# Problem\nstuff\n",
@@ -1341,7 +1365,7 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let agent_id = "aa-3881fda0";
-        let path = dir.path().join(".waap/agents/aa-3881fda0/agent.md");
+        let path = dir.path().join("agents/aa-3881fda0/agent.md");
         write_file(
             &path,
             "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"ready\"\n+++\n\n# Purpose\nDo work\n",

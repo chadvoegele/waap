@@ -77,6 +77,7 @@ pub(crate) fn commit_paths(waap_root: &Path, paths: &[&Path], message: &str) -> 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+#[cfg(test)]
 pub(crate) fn is_inside_git_work_tree(path: &Path) -> io::Result<bool> {
     let output = git_process(path)
         .args(["rev-parse", "--is-inside-work-tree"])
@@ -115,7 +116,7 @@ fn run_git_error(args: &[OsString], output: &Output) -> io::Error {
     io::Error::other(detail)
 }
 
-fn run_git(waap_root: &Path, args: &[OsString]) -> io::Result<Output> {
+pub(crate) fn run_git(waap_root: &Path, args: &[OsString]) -> io::Result<Output> {
     let output = git_command(waap_root, args)?;
 
     if !output.status.success() {
@@ -123,6 +124,23 @@ fn run_git(waap_root: &Path, args: &[OsString]) -> io::Result<Output> {
     }
 
     Ok(output)
+}
+
+pub(crate) fn ref_exists(repo_root: &Path, reference: &str) -> io::Result<bool> {
+    let output = git_command(
+        repo_root,
+        &[
+            "show-ref".into(),
+            "--verify".into(),
+            "--quiet".into(),
+            reference.into(),
+        ],
+    )?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(run_git_error(&["show-ref".into()], &output)),
+    }
 }
 
 #[cfg(test)]
@@ -144,7 +162,7 @@ mod tests {
     fn commit_paths_creates_single_commit_with_returned_hash() {
         let dir = tempdir().unwrap();
         init_repo(dir.path());
-        let file = dir.path().join(".waap/tickets/tt-x/ticket.md");
+        let file = dir.path().join("tickets/tt-x/ticket.md");
         write_file(&file, "+++\n+++\n");
 
         let count_before = run(dir.path(), &["rev-list", "--count", "--all"])
@@ -172,7 +190,7 @@ mod tests {
         write_file(&unrelated, "user change\n");
         run(dir.path(), &["add", "unrelated.txt"]);
 
-        let tracked = dir.path().join(".waap/agents/aa-00000001/agent.md");
+        let tracked = dir.path().join("agents/aa-00000001/agent.md");
         write_file(&tracked, "+++\n+++\n");
 
         commit_paths(
@@ -186,7 +204,7 @@ mod tests {
             dir.path(),
             &["show", "--name-only", "--pretty=format:", "HEAD"],
         );
-        assert!(committed.contains(".waap/agents/aa-00000001/agent.md"));
+        assert!(committed.contains("agents/aa-00000001/agent.md"));
         assert!(!committed.contains("unrelated.txt"));
         // The unrelated change is still staged and uncommitted.
         let staged = run(dir.path(), &["diff", "--cached", "--name-only"]);
@@ -197,8 +215,8 @@ mod tests {
     fn commit_paths_commits_only_changed_path_among_many_modifications() {
         let dir = tempdir().unwrap();
         init_repo(dir.path());
-        let a = dir.path().join(".waap/agents/aa-00000001/agent.md");
-        let b = dir.path().join(".waap/agents/aa-00000002/agent.md");
+        let a = dir.path().join("agents/aa-00000001/agent.md");
+        let b = dir.path().join("agents/aa-00000002/agent.md");
         write_file(&a, "+++\nstatus = \"ready\"\n+++\n");
         write_file(&b, "+++\nstatus = \"ready\"\n+++\n");
         run(dir.path(), &["add", "-A"]);
@@ -222,7 +240,7 @@ mod tests {
     fn commit_paths_noop_returns_head_without_new_commit() {
         let dir = tempdir().unwrap();
         init_repo(dir.path());
-        let file = dir.path().join(".waap/agents/aa-00000001/agent.md");
+        let file = dir.path().join("agents/aa-00000001/agent.md");
         write_file(&file, "+++\nstatus = \"completed\"\n+++\n");
         // First write creates the commit; the second writes identical contents (no staged diff).
         let first =
@@ -245,7 +263,7 @@ mod tests {
     #[test]
     fn commit_paths_reports_failure_when_not_a_git_repo() {
         let dir = tempdir().unwrap();
-        let file = dir.path().join(".waap/tickets/tt-x/ticket.md");
+        let file = dir.path().join("tickets/tt-x/ticket.md");
         write_file(&file, "+++\n+++\n");
 
         let error =
@@ -260,7 +278,7 @@ mod tests {
         let waap_root = dir.path().join("nested/repo");
         fs::create_dir_all(&waap_root).unwrap();
         init_repo(&waap_root);
-        let file = waap_root.join(".waap/tickets/tt-x/ticket.md");
+        let file = waap_root.join("tickets/tt-x/ticket.md");
         write_file(&file, "+++\n+++\n");
 
         let hash = commit_paths(&waap_root, &[file.as_path()], "waap ticket new tt-x").unwrap();

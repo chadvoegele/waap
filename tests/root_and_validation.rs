@@ -13,12 +13,26 @@ fn waap(cwd: &Path, stdin: &str, args: &[&str]) -> Output {
     waap_with_log_level(cwd, stdin, args, None)
 }
 
+fn repository_root(cwd: &Path) -> Option<&Path> {
+    cwd.ancestors().find(|path| path.join(".git").exists())
+}
+
+fn state_root(repository_root: &Path) -> std::path::PathBuf {
+    let repository_root = repository_root.canonicalize().unwrap();
+    repository_root
+        .join(".test-home/.local/state/waap/data")
+        .join(repository_root.strip_prefix("/").unwrap())
+}
+
 fn waap_with_log_level(cwd: &Path, stdin: &str, args: &[&str], log_level: Option<&str>) -> Output {
     use std::io::Write;
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_waap"));
     isolate_git_config(&mut command);
     command.env_remove("WAAP_LOG_LEVEL");
+    if let Some(repository_root) = repository_root(cwd) {
+        command.env("HOME", repository_root.join(".test-home"));
+    }
     if let Some(log_level) = log_level {
         command.env("WAAP_LOG_LEVEL", log_level);
     }
@@ -57,8 +71,8 @@ fn verbose_logs_resolved_root() {
 
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(stderr(&output).contains(&format!(
-        "resolved waap root: {}",
-        dir.path().canonicalize().unwrap().display()
+        "resolved waap state root: {}",
+        state_root(dir.path()).display()
     )));
 }
 
@@ -71,7 +85,7 @@ fn waap_log_level_enables_debug_logging() {
     let output = waap_with_log_level(dir.path(), "", &["check"], Some("debug"));
 
     assert!(output.status.success(), "{}", stderr(&output));
-    assert!(stderr(&output).contains("resolved waap root:"));
+    assert!(stderr(&output).contains("resolved waap state root:"));
 }
 
 #[test]
@@ -88,7 +102,7 @@ fn verbose_overrides_log_level_and_preserves_json_stdout() {
     );
 
     assert!(output.status.success(), "{}", stderr(&output));
-    assert!(stderr(&output).contains("resolved waap root:"));
+    assert!(stderr(&output).contains("resolved waap state root:"));
     serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
 }
 
@@ -102,8 +116,8 @@ fn init_from_subdirectory_uses_git_root() {
     let output = waap(&sub, "", &["init"]);
 
     assert!(output.status.success(), "{}", stdout(&output));
-    assert!(dir.path().join(".waap").is_dir());
-    assert!(!sub.join(".waap").exists());
+    assert!(state_root(dir.path()).join("agents").is_dir());
+    assert!(!sub.join("agents").exists());
 }
 
 #[test]
@@ -111,7 +125,6 @@ fn init_with_explicit_root_uses_that_directory() {
     let dir = tempdir().unwrap();
     init_repo(dir.path());
     let project = dir.path().join("nested-project");
-    std::fs::create_dir_all(&project).unwrap();
 
     let output = waap(
         dir.path(),
@@ -120,8 +133,8 @@ fn init_with_explicit_root_uses_that_directory() {
     );
 
     assert!(output.status.success(), "{}", stdout(&output));
-    assert!(project.join(".waap").is_dir());
-    assert!(!dir.path().join(".waap").exists());
+    assert!(project.join("agents").is_dir());
+    assert!(!state_root(dir.path()).exists());
 }
 
 #[test]
@@ -151,7 +164,7 @@ fn agent_and_ticket_commands_do_not_initialize_missing_state() {
     assert!(!ticket.status.success());
     assert!(stderr(&agent).contains("run 'waap init'"));
     assert!(stderr(&ticket).contains("run 'waap init'"));
-    assert!(!dir.path().join(".waap").exists());
+    assert!(!state_root(dir.path()).exists());
 }
 
 #[test]
@@ -159,7 +172,7 @@ fn agent_and_ticket_commands_do_not_operate_on_invalid_state() {
     let dir = tempdir().unwrap();
     init_repo(dir.path());
     assert!(waap(dir.path(), "", &["init"]).status.success());
-    std::fs::create_dir_all(dir.path().join(".waap/agents/invalid-agent")).unwrap();
+    std::fs::create_dir_all(state_root(dir.path()).join("agents/invalid-agent")).unwrap();
 
     let agent = waap(dir.path(), "# Agent\n", &["agent", "new"]);
     let ticket = waap(
@@ -173,15 +186,15 @@ fn agent_and_ticket_commands_do_not_operate_on_invalid_state() {
     assert!(stderr(&agent).contains("must be named as an agent id"));
     assert!(stderr(&ticket).contains("must be named as an agent id"));
     assert_eq!(
-        std::fs::read_dir(dir.path().join(".waap/agents"))
+        std::fs::read_dir(state_root(dir.path()).join("agents"))
+            .unwrap()
+            .count(),
+        2
+    );
+    assert_eq!(
+        std::fs::read_dir(state_root(dir.path()).join("tickets"))
             .unwrap()
             .count(),
         1
-    );
-    assert_eq!(
-        std::fs::read_dir(dir.path().join(".waap/tickets"))
-            .unwrap()
-            .count(),
-        0
     );
 }

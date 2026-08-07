@@ -10,12 +10,14 @@
 
 I found that an effective pattern for running autonomous agents was making a `TODO.md` and pointing the agent to it with a `/goal`. `waap` formalizes this approach, promoting tickets and agents to first class. It persists context into files to get you out of the "my chat history is my context" approach, parallelizes agent execution, and rapidly gets you to [level 8](https://www.augmentcode.com/guides/steve-yegge-8-levels-ai-assisted-development).
 
+For each repository, waap stores state in a dedicated `waap` branch worktree under `~/.local/state/waap/data/`. The resolved worktree is referred to below as `${waap_data}` and is reported by `waap check`.
+
 ## Design
 
 `waap` uses two types:
 
-1. `waap` tickets describe implementation work and live at `.waap/tickets/<ticket-id>/ticket.md`.
-2. `waap` agents contain agent instructions, e.g. `AGENTS.md`, and live at `.waap/agents/<agent-id>/agent.md`.
+1. `waap` tickets describe implementation work and live at `${waap_data}/tickets/<ticket-id>/ticket.md`.
+2. `waap` agents contain agent instructions, e.g. `AGENTS.md`, and live at `${waap_data}/agents/<agent-id>/agent.md`.
 
 The records use TOML frontmatter for structured `waap` metadata and the markdown body for unstructured content. The schema is intentionally plain text for agent-friendliness, and can be validated anytime with `waap check` using the `waap` CLI. The records are persisted in `git` so that agents can refer to past context.
 
@@ -31,13 +33,15 @@ In a `git` repo, initialize a new `waap` project:
 waap init
 ```
 
+For a repository that still has `.waap`, run `scripts/migrate-legacy-waap.py` from its primary checkout instead. If the repository is moved later, run `waap repair` to relocate and repair its state worktree.
+
 Then create a ticket that describes the work to be done:
 
 ```
 printf "Implement the file picker" | waap ticket new --name="File Picker"
 ```
 
-This creates a `ticket.md` file at `.waap/tickets/tt-file-picker/ticket.md` like
+This creates a `ticket.md` file at `${waap_data}/tickets/tt-file-picker/ticket.md` like
 
 ```
 +++
@@ -55,7 +59,7 @@ Next create an agent to work on the ticket:
 printf "Continue working on `tt-file-picker` until done" | waap agent new --name="File Picker Implementer"
 ```
 
-This creates an `agent.md` file at `.waap/agents/aa-file-picker-implementer/agent.md` like
+This creates an `agent.md` file at `${waap_data}/agents/aa-file-picker-implementer/agent.md` like
 
 ```
 +++
