@@ -161,7 +161,9 @@ Run an agent:
 waap agent run --agent-id aa-1234abcd
 ```
 
-Pi RPC is the default system.
+Pi RPC is the default system. It requires Pi Coding Agent 0.82.1 or newer,
+installed as `pi` and authenticated in the current environment. Set
+`WAAP_PI_BIN` to select another executable.
 
 Run an agent with a different system:
 
@@ -171,6 +173,8 @@ waap agent run --agent-id aa-1234abcd --system codex
 waap agent run --agent-id aa-1234abcd --system opencode
 waap agent run --agent-id aa-1234abcd --system pi
 ```
+
+Use `--system` whenever the backend should not be inferred from the Pi default.
 
 Set a Pi or Codex model and reasoning effort for one run:
 
@@ -184,6 +188,10 @@ For Pi, they override `WAAP_PI_MODEL` and `WAAP_PI_REASONING_EFFORT`; set
 `WAAP_PI_BIN` to choose the executable. Accepted efforts are `none`,
 `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; Codex also accepts
 `ultra`. Pi maps `none` to `off` for its `--thinking` option.
+
+Default tests use fake backend processes and require no provider credentials.
+Keep provider-backed smoke tests opt-in and use an authenticated, disposable
+repository.
 
 For OpenCode, set `OPENCODE_SERVER_URL`, `OPENCODE_SERVER_USERNAME`, `OPENCODE_SERVER_PASSWORD`, and `OPENCODE_SERVER_MODEL`. The model accepts `provider/model` or `provider/model/variant`; recognized variants are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 
