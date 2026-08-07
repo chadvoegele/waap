@@ -5,8 +5,8 @@ use std::process::ExitCode;
 use super::backend::{AgentSystemBackend, RunOutcome, StartContext};
 use crate::agent::{
     agent_report_json, load_agent_report, print_agent_report_human, read_agent_record,
-    transition_agent_status, transition_agent_to_aborted, write_agent_record, AgentMetadata,
-    AgentReport, AgentRunOptions, AgentStatus, AgentSystem,
+    transition_agent_status, write_agent_record, AgentMetadata, AgentReport, AgentRunOptions,
+    AgentStatus, AgentSystem,
 };
 use crate::cli::OutputFormat;
 use crate::git::{commit_paths, create_worktree, remove_worktree};
@@ -336,18 +336,11 @@ fn transition_and_commit_status(
     commit_message: &str,
 ) -> io::Result<()> {
     let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
-    let previous_metadata = metadata.clone();
-    let changed = if status == AgentStatus::Aborted {
-        transition_agent_to_aborted(&mut metadata)?
-    } else if metadata.status == status.as_str() {
-        false
-    } else {
-        transition_agent_status(&mut metadata, status)?;
-        true
-    };
-    if !changed {
+    if metadata.status == status.as_str() {
         return Ok(());
     }
+    let previous_metadata = metadata.clone();
+    transition_agent_status(&mut metadata, status)?;
     let persistence_result = (|| {
         write_agent_record(waap_root, agent_id, &metadata, &body)?;
         let report = load_agent_report(waap_root, agent_id)?;

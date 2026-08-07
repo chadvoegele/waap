@@ -6,7 +6,7 @@ use serde_json::json;
 use super::backend::{AbortContext, AgentSystemBackend};
 use crate::agent::get::load_agent_report;
 use crate::agent::{
-    agent_report_json, print_agent_report_human, read_agent_record, transition_agent_to_aborted,
+    agent_report_json, print_agent_report_human, read_agent_record, transition_agent_status,
     write_agent_record, AgentReport, AgentStatus,
 };
 use crate::cli::OutputFormat;
@@ -102,6 +102,7 @@ fn stop_explicit_agent(waap_root: &Path, agent_id: &str) -> io::Result<Option<Ag
     match AgentStatus::parse(&report.metadata.status).expect("validated agent status") {
         AgentStatus::Ready => mark_agent_aborted(waap_root, agent_id),
         AgentStatus::Running => stop_agent_if_running(waap_root, agent_id),
+        AgentStatus::Aborted => Ok(None),
         status => {
             status.validate_transition(AgentStatus::Aborted)?;
             unreachable!("terminal agent transition unexpectedly allowed")
@@ -153,7 +154,9 @@ fn stop_agent_with_backend(
 
 fn mark_agent_aborted(waap_root: &Path, agent_id: &str) -> io::Result<Option<AgentReport>> {
     let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
-    if !transition_agent_to_aborted(&mut metadata)? {
+    let changed = metadata.status != AgentStatus::Aborted.as_str();
+    transition_agent_status(&mut metadata, AgentStatus::Aborted)?;
+    if !changed {
         return Ok(None);
     }
     write_agent_record(waap_root, agent_id, &metadata, &body)?;

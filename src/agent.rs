@@ -222,6 +222,7 @@ impl AgentStatus {
                     Self::Running,
                     Self::Completed | Self::Failed | Self::Aborted
                 )
+                | (Self::Aborted, Self::Aborted)
         );
         if allowed {
             Ok(())
@@ -251,14 +252,6 @@ pub(crate) fn transition_agent_status(
     current.validate_transition(next)?;
     metadata.status = next.as_str().to_string();
     Ok(())
-}
-
-pub(crate) fn transition_agent_to_aborted(metadata: &mut AgentMetadata) -> io::Result<bool> {
-    if metadata.status == AgentStatus::Aborted.as_str() {
-        return Ok(false);
-    }
-    transition_agent_status(metadata, AgentStatus::Aborted)?;
-    Ok(true)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -432,9 +425,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        agent_report_json, is_agent_id, transition_agent_status, transition_agent_to_aborted,
-        AgentMetadata, AgentReport, AgentRunOptions, AgentStatus, AgentSystem, CODEX_ENV_LOCK,
-        OPENCODE_ENV_LOCK,
+        agent_report_json, is_agent_id, transition_agent_status, AgentMetadata, AgentReport,
+        AgentRunOptions, AgentStatus, AgentSystem, CODEX_ENV_LOCK, OPENCODE_ENV_LOCK,
     };
     use crate::ids::random_hex_chars;
 
@@ -529,6 +521,7 @@ mod tests {
             (AgentStatus::Running, AgentStatus::Completed),
             (AgentStatus::Running, AgentStatus::Failed),
             (AgentStatus::Running, AgentStatus::Aborted),
+            (AgentStatus::Aborted, AgentStatus::Aborted),
         ];
 
         for current in statuses {
@@ -561,21 +554,6 @@ mod tests {
         let error = transition_agent_status(&mut metadata, AgentStatus::Ready).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         assert_eq!(metadata.status, "running");
-    }
-
-    #[test]
-    fn aborted_transition_is_idempotent() {
-        let mut metadata = AgentMetadata {
-            name: None,
-            creation_date: "2026-06-18T15:00:34Z".to_string(),
-            status: "running".to_string(),
-            session_id: None,
-            system: Some(AgentSystem::Codex),
-        };
-
-        assert!(transition_agent_to_aborted(&mut metadata).unwrap());
-        assert_eq!(metadata.status, "aborted");
-        assert!(!transition_agent_to_aborted(&mut metadata).unwrap());
     }
 
     #[test]
