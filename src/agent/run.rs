@@ -6,8 +6,8 @@ use super::backend::{AgentSystemBackend, RunOutcome, StartContext};
 use super::worktree::{collapse_errors, AgentWorktree};
 use crate::agent::{
     agent_report_json, load_agent_report, print_agent_report_human, read_agent_record,
-    transition_agent_status, write_agent_record, AgentMetadata, AgentReport, AgentRunOptions,
-    AgentStatus, AgentSystem,
+    transition_agent_status, transition_agent_to_aborted, write_agent_record, AgentMetadata,
+    AgentReport, AgentRunOptions, AgentStatus, AgentSystem,
 };
 use crate::cli::OutputFormat;
 use crate::git::commit_paths;
@@ -86,6 +86,12 @@ fn run_agent_with_backend(
         backend,
     );
 
+    if result.is_ok()
+        && read_agent_record(waap_root, agent_id)?.0.status == AgentStatus::Aborted.as_str()
+    {
+        return Ok(ExitCode::FAILURE);
+    }
+
     match result {
         Ok(RunOutcome::Completed) => {
             if let Err(error) = mark_completed(waap_root, output_format, agent_id) {
@@ -101,6 +107,10 @@ fn run_agent_with_backend(
         Ok(RunOutcome::Failed(code)) => {
             mark_failed(waap_root, output_format, agent_id)?;
             Ok(code)
+        }
+        Ok(RunOutcome::Aborted) => {
+            mark_aborted(waap_root, output_format, agent_id)?;
+            Ok(ExitCode::FAILURE)
         }
         Err(error) => Err(persist_failed_after_error(
             waap_root,
@@ -252,6 +262,17 @@ fn mark_failed(waap_root: &Path, output_format: &OutputFormat, agent_id: &str) -
     )
 }
 
+fn mark_aborted(waap_root: &Path, output_format: &OutputFormat, agent_id: &str) -> io::Result<()> {
+    transition_and_commit_status(
+        waap_root,
+        output_format,
+        agent_id,
+        AgentStatus::Aborted,
+        "Aborted agent",
+        &format!("waap agent aborted {agent_id}"),
+    )
+}
+
 fn transition_and_commit_status(
     waap_root: &Path,
     output_format: &OutputFormat,
@@ -262,11 +283,18 @@ fn transition_and_commit_status(
 ) -> io::Result<()> {
     let _lock = crate::state::StateLock::acquire(waap_root)?;
     let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
-    if metadata.status == status.as_str() {
+    let previous_metadata = metadata.clone();
+    let changed = if status == AgentStatus::Aborted {
+        transition_agent_to_aborted(&mut metadata)?
+    } else if metadata.status == status.as_str() {
+        false
+    } else {
+        transition_agent_status(&mut metadata, status)?;
+        true
+    };
+    if !changed {
         return Ok(());
     }
-    let previous_metadata = metadata.clone();
-    transition_agent_status(&mut metadata, status)?;
     let persistence_result = (|| {
         write_agent_record(waap_root, agent_id, &metadata, &body)?;
         let report = load_agent_report(waap_root, agent_id)?;
@@ -295,6 +323,11 @@ fn persist_failed_after_error(
     agent_id: &str,
     primary: io::Error,
 ) -> io::Error {
+    if read_agent_record(waap_root, agent_id)
+        .is_ok_and(|(metadata, _)| metadata.status == AgentStatus::Aborted.as_str())
+    {
+        return primary;
+    }
     match mark_failed(waap_root, output_format, agent_id) {
         Ok(()) => primary,
         Err(persistence_error) => io::Error::new(
@@ -314,7 +347,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        build_agent_goal, collapse_errors, mark_completed, mark_failed, mark_running,
+        build_agent_goal, collapse_errors, mark_aborted, mark_completed, mark_failed, mark_running,
         persist_failed_after_error, require_ready_agent, run_agent, run_agent_with_backend,
         transition_and_commit_status, update_agent_session, AgentWorktree,
     };
@@ -873,6 +906,74 @@ mod tests {
     }
 
     #[test]
+    fn run_agent_aborted_outcome_cleans_worktree_persists_aborted_and_exits_one() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let agent_id = "aa-00000001";
+        seed_agent_record(dir.path(), agent_id, "ready");
+        let mut backend = FakeBackend {
+            outcome: Some(RunOutcome::Aborted),
+            ..FakeBackend::default()
+        };
+
+        let code = run_agent_with_backend(
+            dir.path(),
+            dir.path(),
+            &OutputFormat::Json,
+            agent_id,
+            &AgentSystem::Codex,
+            &mut backend,
+        )
+        .unwrap();
+
+        assert_eq!(code, ExitCode::FAILURE);
+        assert_eq!(
+            read_agent_record(dir.path(), agent_id).unwrap().0.status,
+            "aborted"
+        );
+        assert!(!dir.path().join(agent_worktree_dir(agent_id)).exists());
+        assert_eq!(
+            git(dir.path(), &["log", "-1", "--format=%s"]),
+            "waap agent aborted aa-00000001"
+        );
+    }
+
+    #[test]
+    fn run_agent_aborted_outcome_accepts_stop_persisting_aborted_first() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let agent_id = "aa-00000001";
+        seed_agent_record(dir.path(), agent_id, "ready");
+        let root = dir.path().to_path_buf();
+        let mut backend = FakeBackend {
+            outcome: Some(RunOutcome::Aborted),
+            wait_action: Some(Box::new(move || abort_agent(&root, agent_id))),
+            ..FakeBackend::default()
+        };
+
+        let code = run_agent_with_backend(
+            dir.path(),
+            dir.path(),
+            &OutputFormat::Json,
+            agent_id,
+            &AgentSystem::Codex,
+            &mut backend,
+        )
+        .unwrap();
+
+        assert_eq!(code, ExitCode::FAILURE);
+        assert_eq!(
+            read_agent_record(dir.path(), agent_id).unwrap().0.status,
+            "aborted"
+        );
+        assert_eq!(
+            git(dir.path(), &["log", "-1", "--format=%s"]),
+            "abort agent"
+        );
+        assert!(!dir.path().join(agent_worktree_dir(agent_id)).exists());
+    }
+
+    #[test]
     fn successful_run_accepts_agent_persisted_completed_status() {
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path());
@@ -1132,7 +1233,7 @@ mod tests {
     }
 
     #[test]
-    fn run_agent_preserves_wait_error_when_failure_persistence_is_rejected() {
+    fn run_agent_preserves_wait_error_when_stop_persisted_aborted() {
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path());
         let agent_id = "aa-00000001";
@@ -1155,10 +1256,7 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::Other);
-        assert!(error.to_string().starts_with("wait failed;"));
-        assert!(error
-            .to_string()
-            .contains("failed to persist agent failure state"));
+        assert_eq!(error.to_string(), "wait failed");
         assert_eq!(
             read_agent_record(dir.path(), agent_id).unwrap().0.status,
             "aborted"
@@ -1166,7 +1264,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_run_does_not_overwrite_concurrent_abort() {
+    fn concurrent_stop_wins_over_successful_backend_outcome() {
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path());
         let agent_id = "aa-00000001";
@@ -1177,7 +1275,7 @@ mod tests {
             ..FakeBackend::default()
         };
 
-        let error = run_agent_with_backend(
+        let code = run_agent_with_backend(
             dir.path(),
             dir.path(),
             &OutputFormat::Json,
@@ -1185,11 +1283,9 @@ mod tests {
             &AgentSystem::Opencode,
             &mut backend,
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(error
-            .to_string()
-            .starts_with("invalid agent status transition: aborted -> completed;"));
+        assert_eq!(code, ExitCode::FAILURE);
         assert_eq!(
             read_agent_record(dir.path(), agent_id).unwrap().0.status,
             "aborted"
@@ -1377,6 +1473,21 @@ mod tests {
         let head_before = git(dir.path(), &["rev-parse", "HEAD"]);
 
         mark_failed(dir.path(), &OutputFormat::Json, agent_id).unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), contents_before);
+        assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), head_before);
+    }
+
+    #[test]
+    fn mark_aborted_is_idempotent_without_writing_or_committing() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let agent_id = "aa-00000001";
+        let path = seed_agent_record(dir.path(), agent_id, "aborted");
+        let contents_before = fs::read_to_string(&path).unwrap();
+        let head_before = git(dir.path(), &["rev-parse", "HEAD"]);
+
+        mark_aborted(dir.path(), &OutputFormat::Json, agent_id).unwrap();
 
         assert_eq!(fs::read_to_string(&path).unwrap(), contents_before);
         assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), head_before);
