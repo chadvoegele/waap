@@ -1,7 +1,8 @@
 +++
 name = "pi-backend-integration-verification-developer"
 creation_date = 2026-08-07T17:48:47Z
-status = "ready"
+status = "running"
+system = "codex"
 +++
 
 # Purpose
