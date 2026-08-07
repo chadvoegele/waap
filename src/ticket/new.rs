@@ -191,7 +191,7 @@ mod tests {
 
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("tt-missing"));
-        assert!(!dir.path().join(".waap/tickets/tt-bad-deps").exists());
+        assert!(!dir.path().join("tickets/tt-bad-deps").exists());
     }
 
     #[test]

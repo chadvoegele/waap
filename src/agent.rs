@@ -532,7 +532,7 @@ mod tests {
     fn agent_report_json_has_expected_shape() {
         let report = AgentReport {
             agent_id: "aa-3881fda0".to_string(),
-            path: PathBuf::from(".waap/agents/aa-3881fda0/agent.md"),
+            path: PathBuf::from("agents/aa-3881fda0/agent.md"),
             metadata: AgentMetadata {
                 name: None,
                 creation_date: "2026-06-18T15:00:34Z".to_string(),
@@ -547,7 +547,7 @@ mod tests {
             agent_report_json(&report),
             json!({
                 "agent_id": "aa-3881fda0",
-                "path": ".waap/agents/aa-3881fda0/agent.md",
+                "path": "agents/aa-3881fda0/agent.md",
                 "metadata": {
                     "name": null,
                     "creation_date": "2026-06-18T15:00:34Z",

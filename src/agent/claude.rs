@@ -202,7 +202,7 @@ mod tests {
             "aa-3881fda0",
             "11111111-2222-4333-8444-555555555555",
             PathBuf::from("/repo/with space").as_path(),
-            "Complete when instructions in /.waap/agents/aa-3881fda0/agent.md are satisfied",
+            "Complete when instructions in /agents/aa-3881fda0/agent.md are satisfied",
         );
 
         assert_eq!(
@@ -221,7 +221,7 @@ mod tests {
                     "{\"sandbox\":{\"enabled\":false}}".to_string(),
                     "--model".to_string(),
                     "opus".to_string(),
-                    "Complete when instructions in /.waap/agents/aa-3881fda0/agent.md are satisfied"
+                    "Complete when instructions in /agents/aa-3881fda0/agent.md are satisfied"
                         .to_string(),
                 ],
                 working_dir: PathBuf::from("/repo/with space"),
@@ -238,13 +238,13 @@ mod tests {
             "aa-3881fda0",
             "ses-uuid",
             PathBuf::from("/repo/with space").as_path(),
-            "Complete when instructions in /.waap/agents/aa-3881fda0/agent.md are satisfied",
+            "Complete when instructions in /agents/aa-3881fda0/agent.md are satisfied",
         );
 
         assert!(!command.args.iter().any(|arg| arg == "--model"));
         assert_eq!(
             command.args.last().map(String::as_str),
-            Some("Complete when instructions in /.waap/agents/aa-3881fda0/agent.md are satisfied")
+            Some("Complete when instructions in /agents/aa-3881fda0/agent.md are satisfied")
         );
     }
 

@@ -118,7 +118,7 @@ mod tests {
     fn agent_update_requires_at_least_one_update_field() {
         let dir = tempdir().unwrap();
         write_file(
-            &dir.path().join(".waap/agents/aa-3881fda0/agent.md"),
+            &dir.path().join("agents/aa-3881fda0/agent.md"),
             "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"ready\"\n+++\n\n# Purpose\n",
         );
 
@@ -137,15 +137,13 @@ mod tests {
                 .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
-        assert!(error
-            .to_string()
-            .contains(".waap/agents/aa-3881fda0/agent.md"));
+        assert!(error.to_string().contains("agents/aa-3881fda0/agent.md"));
     }
 
     #[test]
     fn agent_update_valid_transition_preserves_frontmatter_and_body() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join(".waap/agents/aa-3881fda0/agent.md");
+        let path = dir.path().join("agents/aa-3881fda0/agent.md");
         write_file(
             &path,
             "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"planner\"\nstatus = \"running\"\n+++\n\n# Purpose\nDo work\n",
@@ -174,7 +172,7 @@ mod tests {
     #[test]
     fn agent_update_rejects_aborting_running_agent_without_modifying_record() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join(".waap/agents/aa-3881fda0/agent.md");
+        let path = dir.path().join("agents/aa-3881fda0/agent.md");
         let original = "+++\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"running\"\nsession_id = \"ses_123\"\n+++\n\n# Purpose\n";
         write_file(&path, original);
 
@@ -193,7 +191,7 @@ mod tests {
     fn agent_update_allows_aborting_ready_agent() {
         let dir = tempdir().unwrap();
         write_file(
-            &dir.path().join(".waap/agents/aa-3881fda0/agent.md"),
+            &dir.path().join("agents/aa-3881fda0/agent.md"),
             "+++\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"ready\"\n+++\n\n# Purpose\n",
         );
 
@@ -207,7 +205,7 @@ mod tests {
     #[test]
     fn agent_update_rejects_existing_session_id() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join(".waap/agents/aa-3881fda0/agent.md");
+        let path = dir.path().join("agents/aa-3881fda0/agent.md");
         write_file(
             &path,
             "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"running\"\nsession_id = \"ses_old\"\n+++\n\n# Purpose\n",
@@ -233,7 +231,7 @@ mod tests {
             ("aborted", AgentStatus::Running),
         ] {
             let dir = tempdir().unwrap();
-            let path = dir.path().join(".waap/agents/aa-3881fda0/agent.md");
+            let path = dir.path().join("agents/aa-3881fda0/agent.md");
             write_file(
                 &path,
                 &format!(
@@ -257,7 +255,7 @@ mod tests {
     #[test]
     fn agent_update_assigns_session_only_to_running_agent_without_session() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join(".waap/agents/aa-3881fda0/agent.md");
+        let path = dir.path().join("agents/aa-3881fda0/agent.md");
         write_file(
             &path,
             "+++\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"running\"\n+++\n\n# Purpose\n",
@@ -272,7 +270,7 @@ mod tests {
     #[test]
     fn agent_update_rejects_session_assignment_when_status_changes() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join(".waap/agents/aa-3881fda0/agent.md");
+        let path = dir.path().join("agents/aa-3881fda0/agent.md");
         write_file(
             &path,
             "+++\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"running\"\n+++\n\n# Purpose\n",
@@ -295,7 +293,7 @@ mod tests {
     fn agent_update_json_output_includes_updated_metadata() {
         let report = AgentReport {
             agent_id: "aa-3881fda0".to_string(),
-            path: PathBuf::from(".waap/agents/aa-3881fda0/agent.md"),
+            path: PathBuf::from("agents/aa-3881fda0/agent.md"),
             metadata: AgentMetadata {
                 name: None,
                 creation_date: "2026-06-18T15:00:34Z".to_string(),
@@ -310,7 +308,7 @@ mod tests {
             agent_report_json(&report),
             json!({
                 "agent_id": "aa-3881fda0",
-                "path": ".waap/agents/aa-3881fda0/agent.md",
+                "path": "agents/aa-3881fda0/agent.md",
                 "metadata": {
                     "name": null,
                     "creation_date": "2026-06-18T15:00:34Z",

@@ -321,9 +321,7 @@ mod tests {
         let error = stop_agents(dir.path(), Some("aa-3881fda0")).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
-        assert!(error
-            .to_string()
-            .contains(".waap/agents/aa-3881fda0/agent.md"));
+        assert!(error.to_string().contains("agents/aa-3881fda0/agent.md"));
     }
 
     #[test]
@@ -486,7 +484,7 @@ mod tests {
     fn agent_stop_json_has_expected_shape() {
         let reports = vec![AgentReport {
             agent_id: "aa-3881fda0".to_string(),
-            path: PathBuf::from(".waap/agents/aa-3881fda0/agent.md"),
+            path: PathBuf::from("agents/aa-3881fda0/agent.md"),
             metadata: AgentMetadata {
                 name: None,
                 creation_date: "2026-06-18T15:00:34Z".to_string(),
@@ -506,7 +504,7 @@ mod tests {
                 "stopped_agents": [
                     {
                         "agent_id": "aa-3881fda0",
-                        "path": ".waap/agents/aa-3881fda0/agent.md",
+                        "path": "agents/aa-3881fda0/agent.md",
                         "metadata": {
                             "name": null,
                             "creation_date": "2026-06-18T15:00:34Z",
@@ -542,7 +540,7 @@ mod tests {
             .map(|session_id| format!("session_id = \"{session_id}\"\n"))
             .unwrap_or_default();
         write_file(
-            &waap_root.join(format!(".waap/agents/{agent_id}/agent.md")),
+            &waap_root.join(format!("agents/{agent_id}/agent.md")),
             &format!(
                 "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"{status}\"\n{session_id}+++\n\n# Purpose\n"
             ),
@@ -556,7 +554,7 @@ mod tests {
         session_id: &str,
     ) {
         write_file(
-            &waap_root.join(format!(".waap/agents/{agent_id}/agent.md")),
+            &waap_root.join(format!("agents/{agent_id}/agent.md")),
             &format!(
                 "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"{status}\"\nsession_id = \"{session_id}\"\nsystem = \"claude\"\n+++\n\n# Purpose\n"
             ),
@@ -570,7 +568,7 @@ mod tests {
         session_id: &str,
     ) {
         write_file(
-            &waap_root.join(format!(".waap/agents/{agent_id}/agent.md")),
+            &waap_root.join(format!("agents/{agent_id}/agent.md")),
             &format!(
                 "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"{status}\"\nsession_id = \"{session_id}\"\nsystem = \"codex\"\n+++\n\n# Purpose\n"
             ),

@@ -48,11 +48,11 @@ impl WaapRecordKind {
     }
 
     fn root_label(self) -> String {
-        format!(".waap/{}", self.directory_name())
+        self.directory_name().to_string()
     }
 
     pub(crate) fn root_path(self, waap_root: &Path) -> PathBuf {
-        waap_root.join(".waap").join(self.directory_name())
+        waap_root.join(self.directory_name())
     }
 }
 
@@ -74,6 +74,9 @@ pub(crate) fn list_record_ids(waap_root: &Path, kind: WaapRecordKind) -> io::Res
         let entry = entry?;
         let path = entry.path();
         let id = entry.file_name().to_string_lossy().into_owned();
+        if id == ".gitkeep" {
+            continue;
+        }
         let label = format!("{records_label}/{id}");
 
         if !path.is_dir() {

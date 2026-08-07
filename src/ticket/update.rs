@@ -138,7 +138,7 @@ mod tests {
     }
 
     fn make_ticket(dir: &Path, ticket_id: &str, extra_frontmatter: &str) {
-        let path = dir.join(format!(".waap/tickets/{ticket_id}/ticket.md"));
+        let path = dir.join(format!("tickets/{ticket_id}/ticket.md"));
         write_file(
             &path,
             &format!(
@@ -163,7 +163,7 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
         assert!(error
             .to_string()
-            .contains(".waap/tickets/tt-new-ticket/ticket.md"));
+            .contains("tickets/tt-new-ticket/ticket.md"));
     }
 
     #[test]
@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn ticket_update_migrates_legacy_title_and_preserves_body() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join(".waap/tickets/tt-new-ticket/ticket.md");
+        let path = dir.path().join("tickets/tt-new-ticket/ticket.md");
         let body = "# Description\nKeep this body exactly.\n";
         write_file(
             &path,
@@ -222,7 +222,7 @@ mod tests {
     fn ticket_report_json_has_expected_shape() {
         let report = TicketReport {
             ticket_id: "tt-new-ticket".to_string(),
-            path: PathBuf::from(".waap/tickets/tt-new-ticket/ticket.md"),
+            path: PathBuf::from("tickets/tt-new-ticket/ticket.md"),
             name: Some("New Ticket".to_string()),
             creation_date: "2026-06-22T12:00:00Z".to_string(),
             status: "pending".to_string(),
@@ -234,7 +234,7 @@ mod tests {
             ticket_report_json(&report),
             json!({
                 "ticket_id": "tt-new-ticket",
-                "path": ".waap/tickets/tt-new-ticket/ticket.md",
+                "path": "tickets/tt-new-ticket/ticket.md",
                 "metadata": {
                     "name": "New Ticket",
                     "creation_date": "2026-06-22T12:00:00Z",
@@ -263,7 +263,7 @@ mod tests {
 
         assert_eq!(report.depends_on, Some(vec!["tt-dep-a".to_string()]));
         let contents =
-            fs::read_to_string(dir.path().join(".waap/tickets/tt-my-ticket/ticket.md")).unwrap();
+            fs::read_to_string(dir.path().join("tickets/tt-my-ticket/ticket.md")).unwrap();
         assert!(contents.contains("depends_on = [\"tt-dep-a\"]"));
     }
 
@@ -362,7 +362,7 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("tt-missing"));
         let contents =
-            fs::read_to_string(dir.path().join(".waap/tickets/tt-my-ticket/ticket.md")).unwrap();
+            fs::read_to_string(dir.path().join("tickets/tt-my-ticket/ticket.md")).unwrap();
         assert!(!contents.contains("depends_on"));
     }
 

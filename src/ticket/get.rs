@@ -67,7 +67,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let contents = "+++\ntitle = \"New Ticket\"\ncreation_date = 2026-06-22T12:00:00Z\nstatus = \"pending\"\n+++\n\n# Description\nKeep this body exactly.\n";
         write_file(
-            &dir.path().join(".waap/tickets/tt-new-ticket/ticket.md"),
+            &dir.path().join("tickets/tt-new-ticket/ticket.md"),
             contents,
         );
 
@@ -90,7 +90,7 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
         assert!(error
             .to_string()
-            .contains(".waap/tickets/tt-new-ticket/ticket.md"));
+            .contains("tickets/tt-new-ticket/ticket.md"));
     }
 
     #[test]
@@ -107,7 +107,7 @@ mod tests {
     fn ticket_get_validates_ticket_frontmatter() {
         let dir = tempdir().unwrap();
         write_file(
-            &dir.path().join(".waap/tickets/tt-bad-ticket/ticket.md"),
+            &dir.path().join("tickets/tt-bad-ticket/ticket.md"),
             "+++
 title = \"Bad Ticket\"
 creation_date = 2026-06-18T15:00:34Z
@@ -127,7 +127,7 @@ status = \"ready\"
         let report = TicketGetReport {
             ticket: TicketReport {
                 ticket_id: "tt-new-ticket".to_string(),
-                path: PathBuf::from(".waap/tickets/tt-new-ticket/ticket.md"),
+                path: PathBuf::from("tickets/tt-new-ticket/ticket.md"),
                 name: Some("New Ticket".to_string()),
                 creation_date: "2026-06-22T12:00:00Z".to_string(),
                 status: "pending".to_string(),
@@ -141,7 +141,7 @@ status = \"ready\"
             ticket_get_report_json(&report),
             json!({
                 "ticket_id": "tt-new-ticket",
-                "path": ".waap/tickets/tt-new-ticket/ticket.md",
+                "path": "tickets/tt-new-ticket/ticket.md",
                 "metadata": {
                     "name": "New Ticket",
                     "creation_date": "2026-06-22T12:00:00Z",
@@ -159,7 +159,7 @@ status = \"ready\"
         let report = TicketGetReport {
             ticket: TicketReport {
                 ticket_id: "tt-feature".to_string(),
-                path: PathBuf::from(".waap/tickets/tt-feature/ticket.md"),
+                path: PathBuf::from("tickets/tt-feature/ticket.md"),
                 name: Some("Feature".to_string()),
                 creation_date: "2026-06-22T12:00:00Z".to_string(),
                 status: "pending".to_string(),
@@ -180,10 +180,7 @@ status = \"ready\"
     fn ticket_get_reads_depends_on_from_frontmatter() {
         let dir = tempdir().unwrap();
         let contents = "+++\ntitle = \"Feature\"\ncreation_date = 2026-06-22T12:00:00Z\nstatus = \"pending\"\ndepends_on = [\"tt-dep-one\", \"tt-dep-two\"]\n+++\n\n# Body\n";
-        write_file(
-            &dir.path().join(".waap/tickets/tt-feature/ticket.md"),
-            contents,
-        );
+        write_file(&dir.path().join("tickets/tt-feature/ticket.md"), contents);
 
         let report = get_ticket(dir.path(), "tt-feature").unwrap();
 

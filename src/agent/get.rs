@@ -81,16 +81,14 @@ mod tests {
         let error = load_agent_report(dir.path(), "aa-3881fda0").unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
-        assert!(error
-            .to_string()
-            .contains(".waap/agents/aa-3881fda0/agent.md"));
+        assert!(error.to_string().contains("agents/aa-3881fda0/agent.md"));
     }
 
     #[test]
     fn invalid_agent_frontmatter_is_reported() {
         let dir = tempdir().unwrap();
         write_file(
-            &dir.path().join(".waap/agents/aa-3881fda0/agent.md"),
+            &dir.path().join("agents/aa-3881fda0/agent.md"),
             "+++
 creation_date = 2026-06-18T15:00:34Z
 role = \"developer\"
@@ -117,18 +115,12 @@ session_id = \"ses_123\"
 
 # Purpose
 ";
-        write_file(
-            &dir.path().join(".waap/agents/aa-3881fda0/agent.md"),
-            contents,
-        );
+        write_file(&dir.path().join("agents/aa-3881fda0/agent.md"), contents);
 
         let report = load_agent_report(dir.path(), "aa-3881fda0").unwrap();
 
         assert_eq!(report.agent_id, "aa-3881fda0");
-        assert_eq!(
-            report.path,
-            dir.path().join(".waap/agents/aa-3881fda0/agent.md")
-        );
+        assert_eq!(report.path, dir.path().join("agents/aa-3881fda0/agent.md"));
         assert_eq!(report.metadata.creation_date, "2026-06-18T15:00:34Z");
         assert_eq!(report.metadata.status, "ready");
         assert_eq!(report.metadata.session_id.as_deref(), Some("ses_123"));
@@ -148,10 +140,7 @@ session_id = \"ses_123\"
 # Purpose
 Do work
 ";
-        write_file(
-            &dir.path().join(".waap/agents/aa-3881fda0/agent.md"),
-            contents,
-        );
+        write_file(&dir.path().join("agents/aa-3881fda0/agent.md"), contents);
 
         let (report, content) = load_agent_content(dir.path(), "aa-3881fda0").unwrap();
 
@@ -164,7 +153,7 @@ Do work
     fn agent_content_report_json_includes_markdown_body() {
         let report = AgentReport {
             agent_id: "aa-3881fda0".to_string(),
-            path: PathBuf::from(".waap/agents/aa-3881fda0/agent.md"),
+            path: PathBuf::from("agents/aa-3881fda0/agent.md"),
             metadata: AgentMetadata {
                 name: None,
                 creation_date: "2026-06-18T15:00:34Z".to_string(),
@@ -179,7 +168,7 @@ Do work
             agent_content_report_json(&report, "# Purpose\n"),
             json!({
                 "agent_id": "aa-3881fda0",
-                "path": ".waap/agents/aa-3881fda0/agent.md",
+                "path": "agents/aa-3881fda0/agent.md",
                 "metadata": {
                     "name": null,
                     "creation_date": "2026-06-18T15:00:34Z",

@@ -5,6 +5,19 @@ description: waap is a structured agent automation platform for specifying workf
 
 # waap
 
+## Central State
+
+waap stores each repository's state in a dedicated `waap` branch worktree under `~/.local/state/waap/data/`. This directory is referred to below as `${waap_data}`. Use the `waap` CLI for state changes and run `waap check` to report and validate the resolved directory.
+
+If `origin/waap` may already exist, fetch it before initialization:
+
+```sh
+git fetch origin waap
+waap init
+```
+
+Use `scripts/migrate-legacy-waap.py` for repositories with legacy `.waap` state. After moving a repository, run `waap repair` to relocate its registered state worktree.
+
 ## Basic Workflow
 
 First, specify to-be-completed work in waap tickets. The work is described in markdown format, e.g. `cool_feature.md`.
@@ -13,7 +26,7 @@ First, specify to-be-completed work in waap tickets. The work is described in ma
 $ cat cool_feature.md | waap ticket new --name "Cool Feature"
 ```
 
-This creates a ticket at `.waap/tickets/<ticket-id>/ticket.md`. Ticket IDs start with `tt-` and use lowercase filesystem-safe slugs, e.g. `tt-cool-feature`.
+This creates a ticket at `${waap_data}/tickets/<ticket-id>/ticket.md`. Ticket IDs start with `tt-` and use lowercase filesystem-safe slugs, e.g. `tt-cool-feature`.
 
 Next, create a waap agent to complete the work in the ticket. The agent's instructions are also described in markdown format, e.g. `agents.md`, and should indicate to work on the ticket.
 
@@ -21,13 +34,13 @@ Next, create a waap agent to complete the work in the ticket. The agent's instru
 $ cat agents.md | waap agent new
 Agent ID: aa-1234abcd
 ```
-This creates an agent at `.waap/agents/<agent-id>/agent.md`. Agent IDs start with `aa-` followed by eight lowercase hex characters.
+This creates an agent at `${waap_data}/agents/<agent-id>/agent.md`. Agent IDs start with `aa-` followed by eight lowercase hex characters.
 
 Then run the agent with `waap agent run --agent-id aa-1234abcd`.
 
 ## State Model
 
-waap stores state in the application repository under `.waap/`, and tracks it with `git`.
+waap tracks `${waap_data}` on the dedicated `waap` branch.
 
 All state is stored as plain text, but should be validated with `waap check` to ensure `waap` commands will work.
 
@@ -67,7 +80,7 @@ depends_on = ["tt-required-foundation"]
 
 The agent instructions should include the work to be completed, typically by referring to a waap ticket id.
 
-> Your role is to implement the functionality described in `.waap/tickets/${ticket_id}/ticket.md`.
+> Your role is to implement the functionality described in `${waap_data}/tickets/${ticket_id}/ticket.md`.
 
 When appropriate the instructions should also include to merge their changes back to the repository.
 
@@ -80,7 +93,7 @@ If your agents are repeating the same function, consider storing the common inst
 
 It is helpful to ensure continuity across agents, to also instruct the agent to update:
 
-1. An agent specific work log: `.waap/agents/<agent-id>/work_log.md`
+1. An agent specific work log: `${waap_data}/agents/<agent-id>/work_log.md`
     1. A chronological log summarizing the work the agent did during their session.
 1. Top-level shared `AGENTS.md`
     1. Include any project-specific details that might be helpful for futures agents like:

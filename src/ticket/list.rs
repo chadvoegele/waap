@@ -204,7 +204,7 @@ mod tests {
     #[test]
     fn ticket_list_handles_empty_ticket_directories() {
         let dir = tempdir().unwrap();
-        fs::create_dir_all(dir.path().join(".waap/tickets")).unwrap();
+        fs::create_dir_all(dir.path().join("tickets")).unwrap();
 
         let entries = list_tickets(dir.path(), None, None).unwrap();
 
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn ticket_list_rejects_non_directory_entries() {
         let dir = tempdir().unwrap();
-        write_file(&dir.path().join(".waap/tickets/not-a-directory"), "oops");
+        write_file(&dir.path().join("tickets/not-a-directory"), "oops");
 
         let error = list_tickets(dir.path(), None, None).unwrap_err();
 
@@ -235,7 +235,7 @@ mod tests {
     fn ticket_list_validates_ticket_frontmatter() {
         let dir = tempdir().unwrap();
         write_file(
-            &dir.path().join(".waap/tickets/tt-bad-ticket/ticket.md"),
+            &dir.path().join("tickets/tt-bad-ticket/ticket.md"),
             "+++
 title = \"Bad Ticket\"
 creation_date = 2026-06-18T15:00:34Z
@@ -256,7 +256,7 @@ status = \"ready\"
             TicketListEntry {
                 report: TicketReport {
                     ticket_id: "tt-one".to_string(),
-                    path: PathBuf::from(".waap/tickets/tt-one/ticket.md"),
+                    path: PathBuf::from("tickets/tt-one/ticket.md"),
                     name: Some("One".to_string()),
                     creation_date: "2026-06-22T12:00:00Z".to_string(),
                     status: "pending".to_string(),
@@ -268,7 +268,7 @@ status = \"ready\"
             TicketListEntry {
                 report: TicketReport {
                     ticket_id: "tt-two".to_string(),
-                    path: PathBuf::from(".waap/tickets/tt-two/ticket.md"),
+                    path: PathBuf::from("tickets/tt-two/ticket.md"),
                     name: Some("Two".to_string()),
                     creation_date: "2026-06-22T12:00:00Z".to_string(),
                     status: "completed".to_string(),
@@ -293,7 +293,7 @@ status = \"ready\"
         let entries = vec![TicketListEntry {
             report: TicketReport {
                 ticket_id: "tt-one".to_string(),
-                path: PathBuf::from(".waap/tickets/tt-one/ticket.md"),
+                path: PathBuf::from("tickets/tt-one/ticket.md"),
                 name: Some("One".to_string()),
                 creation_date: "2026-06-22T12:00:00Z".to_string(),
                 status: "in-progress".to_string(),
@@ -313,7 +313,7 @@ status = \"ready\"
             TicketListEntry {
                 report: TicketReport {
                     ticket_id: "tt-one".to_string(),
-                    path: PathBuf::from(".waap/tickets/tt-one/ticket.md"),
+                    path: PathBuf::from("tickets/tt-one/ticket.md"),
                     name: Some("One".to_string()),
                     creation_date: "2026-06-22T12:00:00Z".to_string(),
                     status: "completed".to_string(),
@@ -325,7 +325,7 @@ status = \"ready\"
             TicketListEntry {
                 report: TicketReport {
                     ticket_id: "tt-feature".to_string(),
-                    path: PathBuf::from(".waap/tickets/tt-feature/ticket.md"),
+                    path: PathBuf::from("tickets/tt-feature/ticket.md"),
                     name: Some("Feature".to_string()),
                     creation_date: "2026-06-22T12:00:00Z".to_string(),
                     status: "pending".to_string(),
@@ -337,7 +337,7 @@ status = \"ready\"
             TicketListEntry {
                 report: TicketReport {
                     ticket_id: "tt-ready".to_string(),
-                    path: PathBuf::from(".waap/tickets/tt-ready/ticket.md"),
+                    path: PathBuf::from("tickets/tt-ready/ticket.md"),
                     name: Some("Ready".to_string()),
                     creation_date: "2026-06-22T12:00:00Z".to_string(),
                     status: "completed".to_string(),
@@ -362,7 +362,7 @@ status = \"ready\"
         let entries = vec![TicketListEntry {
             report: TicketReport {
                 ticket_id: "tt-one".to_string(),
-                path: PathBuf::from(".waap/tickets/tt-one/ticket.md"),
+                path: PathBuf::from("tickets/tt-one/ticket.md"),
                 name: Some("One".to_string()),
                 creation_date: "2026-06-22T12:00:00Z".to_string(),
                 status: "completed".to_string(),
@@ -384,7 +384,7 @@ status = \"ready\"
         let entries = vec![TicketListEntry {
             report: TicketReport {
                 ticket_id: "tt".to_string(),
-                path: PathBuf::from(".waap/tickets/tt/ticket.md"),
+                path: PathBuf::from("tickets/tt/ticket.md"),
                 name: Some("Short".to_string()),
                 creation_date: "2026-06-22T12:00:00Z".to_string(),
                 status: "pending".to_string(),
@@ -523,7 +523,7 @@ status = \"ready\"
             format!("depends_on = [{}]\n", items.join(", "))
         };
         write_file(
-            &waap_root.join(format!(".waap/tickets/{ticket_id}/ticket.md")),
+            &waap_root.join(format!("tickets/{ticket_id}/ticket.md")),
             &format!(
                 "+++\ntitle = \"Test Ticket\"\ncreation_date = {creation_date}\nstatus = \"{status}\"\n{deps_line}+++\n\n# Description\n"
             ),

@@ -127,16 +127,14 @@ mod tests {
 
         assert_eq!(report.agent_id, "aa-custom-agent123");
         assert_eq!(report.metadata.name.as_deref(), Some("Custom Agent_123"));
-        assert!(report
-            .path
-            .ends_with(".waap/agents/aa-custom-agent123/agent.md"));
+        assert!(report.path.ends_with("agents/aa-custom-agent123/agent.md"));
         assert!(check_waap(dir.path()).is_empty());
     }
 
     #[test]
     fn create_agent_name_conflict_appends_hex_suffix() {
         let dir = tempdir().unwrap();
-        fs::create_dir_all(dir.path().join(".waap/agents/aa-custom-agent")).unwrap();
+        fs::create_dir_all(dir.path().join("agents/aa-custom-agent")).unwrap();
 
         let report =
             create_agent_with_markdown(dir.path(), Some("Custom Agent"), "# Purpose\n").unwrap();

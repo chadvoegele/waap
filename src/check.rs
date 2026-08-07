@@ -11,70 +11,84 @@ use crate::ticket::{is_ticket_id, TicketMetadata};
 
 pub(crate) fn check_waap(waap_root: &Path) -> Vec<String> {
     let mut errors = Vec::new();
-    let waap_dir = waap_root.join(".waap");
-    let agents_dir = waap_dir.join("agents");
-    let tickets_dir = waap_dir.join("tickets");
+    let agents_dir = waap_root.join("agents");
+    let tickets_dir = waap_root.join("tickets");
 
-    if !waap_dir.exists() {
+    if !waap_root.is_dir() {
         errors.push("no waap project found; run 'waap init'".to_string());
         return errors;
     }
 
-    if !waap_dir.is_dir() {
-        errors.push(".waap must be a directory".to_string());
+    if !agents_dir.exists() && !tickets_dir.exists() {
+        errors.push("no waap project found; run 'waap init'".to_string());
         return errors;
     }
 
-    if agents_dir.exists() && agents_dir.is_dir() {
+    if agents_dir.is_dir() {
         check_agents(&agents_dir, &mut errors);
     } else if agents_dir.exists() {
-        errors.push(".waap/agents must be a directory".to_string());
+        errors.push("agents must be a directory".to_string());
     }
 
-    if tickets_dir.exists() && tickets_dir.is_dir() {
+    if tickets_dir.is_dir() {
         check_tickets(&tickets_dir, &mut errors);
     } else if tickets_dir.exists() {
-        errors.push(".waap/tickets must be a directory".to_string());
+        errors.push("tickets must be a directory".to_string());
     }
 
     errors
 }
 
-pub(crate) fn print_check_result(output_format: &OutputFormat, errors: &[String]) {
-    println!("{}", format_check_result(output_format, errors));
+pub(crate) fn print_check_result(
+    output_format: &OutputFormat,
+    state_root: &Path,
+    errors: &[String],
+    to_stderr: bool,
+) {
+    let result = format_check_result(output_format, state_root, errors);
+    if to_stderr {
+        eprintln!("{result}");
+    } else {
+        println!("{result}");
+    }
 }
 
-pub(crate) fn print_check_errors(output_format: &OutputFormat, errors: &[String]) {
-    eprintln!("{}", format_check_result(output_format, errors));
-}
-
-fn format_check_result(output_format: &OutputFormat, errors: &[String]) -> String {
+fn format_check_result(
+    output_format: &OutputFormat,
+    state_root: &Path,
+    errors: &[String],
+) -> String {
     match output_format {
         OutputFormat::Json => json!({
+            "state_directory": state_root.display().to_string(),
             "valid": errors.is_empty(),
             "errors": errors,
         })
         .to_string(),
         OutputFormat::HumanReadable => {
+            let mut output = format!("State directory: {}", state_root.display());
             if errors.is_empty() {
-                "OK: .waap is valid".to_string()
+                output.push_str("\nOK: waap state is valid");
             } else {
-                let mut output = "ERROR: .waap is invalid".to_string();
+                output.push_str("\nERROR: waap state is invalid");
                 for error in errors {
                     output.push_str(&format!("\n- {error}"));
                 }
-                output
             }
+            output
         }
     }
 }
 
 fn check_agents(agents_dir: &Path, errors: &mut Vec<String>) {
-    let entries = read_dir(agents_dir, ".waap/agents", errors);
+    let entries = read_dir(agents_dir, "agents", errors);
     for entry in entries {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
-        let label = format!(".waap/agents/{name}");
+        if name == ".gitkeep" {
+            continue;
+        }
+        let label = format!("agents/{name}");
 
         if !path.is_dir() {
             errors.push(format!("{label} must be an agent directory"));
@@ -106,13 +120,16 @@ fn check_agent_frontmatter(path: &Path, errors: &mut Vec<String>) {
 }
 
 fn check_tickets(tickets_dir: &Path, errors: &mut Vec<String>) {
-    let entries = read_dir(tickets_dir, ".waap/tickets", errors);
+    let entries = read_dir(tickets_dir, "tickets", errors);
     let mut tickets = Vec::new();
 
     for entry in entries {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
-        let label = format!(".waap/tickets/{name}");
+        if name == ".gitkeep" {
+            continue;
+        }
+        let label = format!("tickets/{name}");
 
         if !path.is_dir() {
             errors.push(format!("{label} must be a ticket directory"));
@@ -154,7 +171,7 @@ fn check_dependencies_exist(tickets: &[TicketMetadata], errors: &mut Vec<String>
         for dep in ticket.depends_on.iter().flatten() {
             if !known_ids.contains(dep.as_str()) {
                 errors.push(format!(
-                    ".waap/tickets/{}/ticket.md depends_on {dep:?} which does not exist",
+                    "tickets/{}/ticket.md depends_on {dep:?} which does not exist",
                     ticket.ticket_id
                 ));
             }
@@ -253,15 +270,15 @@ mod tests {
     fn valid_waap_state_passes() {
         let dir = tempdir().unwrap();
         write_file(
-            &dir.path().join(".waap/agents/aa-3881fda0/agent.md"),
+            &dir.path().join("agents/aa-3881fda0/agent.md"),
             "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"ready\"\n+++\n\n# Purpose\n",
         );
         write_file(
-            &dir.path().join(".waap/agents/aa-3881fda0/work_log.md"),
+            &dir.path().join("agents/aa-3881fda0/work_log.md"),
             "# Work Log\n",
         );
         write_file(
-            &dir.path().join(".waap/tickets/tt-list-tickets/ticket.md"),
+            &dir.path().join("tickets/tt-list-tickets/ticket.md"),
             "+++\ntitle = \"List Tickets\"\ncreation_date = 2026-06-18T10:15:02Z\nstatus = \"pending\"\n+++\n\n# Description\n",
         );
 
@@ -279,9 +296,9 @@ mod tests {
     }
 
     #[test]
-    fn missing_child_directories_pass() {
+    fn missing_child_directory_passes() {
         let dir = tempdir().unwrap();
-        fs::create_dir_all(dir.path().join(".waap")).unwrap();
+        fs::create_dir_all(dir.path().join("agents")).unwrap();
 
         assert!(check_waap(dir.path()).is_empty());
     }
@@ -290,13 +307,10 @@ mod tests {
     fn agent_directories_allow_extra_files() {
         let dir = tempdir().unwrap();
         write_file(
-            &dir.path().join(".waap/agents/aa-3881fda0/agent.md"),
+            &dir.path().join("agents/aa-3881fda0/agent.md"),
             "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"ready\"\n+++\n",
         );
-        write_file(
-            &dir.path().join(".waap/agents/aa-3881fda0/notes.md"),
-            "# Notes\n",
-        );
+        write_file(&dir.path().join("agents/aa-3881fda0/notes.md"), "# Notes\n");
 
         assert!(check_waap(dir.path()).is_empty());
     }
@@ -304,29 +318,21 @@ mod tests {
     #[test]
     fn existing_state_paths_must_be_directories() {
         let dir = tempdir().unwrap();
-        write_file(&dir.path().join(".waap"), "not a directory");
+        write_file(&dir.path().join("agents"), "not a directory");
+        write_file(&dir.path().join("tickets"), "not a directory");
 
         let errors = check_waap(dir.path());
 
-        assert_eq!(errors, vec![".waap must be a directory"]);
-
-        let dir = tempdir().unwrap();
-        fs::create_dir_all(dir.path().join(".waap")).unwrap();
-        write_file(&dir.path().join(".waap/agents"), "not a directory");
-        write_file(&dir.path().join(".waap/tickets"), "not a directory");
-
-        let errors = check_waap(dir.path());
-
-        assert!(errors.contains(&".waap/agents must be a directory".to_string()));
-        assert!(errors.contains(&".waap/tickets must be a directory".to_string()));
+        assert!(errors.contains(&"agents must be a directory".to_string()));
+        assert!(errors.contains(&"tickets must be a directory".to_string()));
     }
 
     #[test]
     fn invalid_agent_frontmatter_fails() {
         let dir = tempdir().unwrap();
-        fs::create_dir_all(dir.path().join(".waap/tickets")).unwrap();
+        fs::create_dir_all(dir.path().join("tickets")).unwrap();
         write_file(
-            &dir.path().join(".waap/agents/aa-3881fda0/agent.md"),
+            &dir.path().join("agents/aa-3881fda0/agent.md"),
             "+++\ncreation_date = \"not a datetime\"\nstatus = \"ready\"\n+++\n",
         );
 
@@ -340,9 +346,9 @@ mod tests {
     #[test]
     fn deprecated_role_field_is_tolerated() {
         let dir = tempdir().unwrap();
-        fs::create_dir_all(dir.path().join(".waap/tickets")).unwrap();
+        fs::create_dir_all(dir.path().join("tickets")).unwrap();
         write_file(
-            &dir.path().join(".waap/agents/aa-3881fda0/agent.md"),
+            &dir.path().join("agents/aa-3881fda0/agent.md"),
             "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"designer\"\nstatus = \"ready\"\n+++\n\n# Purpose\n",
         );
 
@@ -353,7 +359,7 @@ mod tests {
     fn unknown_ticket_field_fails_with_path_and_field() {
         let dir = tempdir().unwrap();
         write_file(
-            &dir.path().join(".waap/tickets/tt-child/ticket.md"),
+            &dir.path().join("tickets/tt-child/ticket.md"),
             "+++\ntitle = \"Child\"\ncreation_date = 2026-06-18T10:15:02Z\nstatus = \"pending\"\ndependencies = [\"tt-base\"]\n+++\n",
         );
 
@@ -362,29 +368,31 @@ mod tests {
         assert!(errors
             .iter()
             .any(|e| e.contains("unknown field dependencies")
-                && e.contains(".waap/tickets/tt-child/ticket.md")));
+                && e.contains("tickets/tt-child/ticket.md")));
     }
 
     #[test]
     fn unknown_agent_field_fails_with_path_and_field() {
         let dir = tempdir().unwrap();
         write_file(
-            &dir.path().join(".waap/agents/aa-3881fda0/agent.md"),
+            &dir.path().join("agents/aa-3881fda0/agent.md"),
             "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"ready\"\nworktree = \"some/path\"\n+++\n",
         );
 
         let errors = check_waap(dir.path());
 
-        assert!(errors.iter().any(|e| e.contains("unknown field worktree")
-            && e.contains(".waap/agents/aa-3881fda0/agent.md")));
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("unknown field worktree")
+                && e.contains("agents/aa-3881fda0/agent.md")));
     }
 
     #[test]
     fn invalid_ticket_id_fails() {
         let dir = tempdir().unwrap();
-        fs::create_dir_all(dir.path().join(".waap/agents")).unwrap();
+        fs::create_dir_all(dir.path().join("agents")).unwrap();
         write_file(
-            &dir.path().join(".waap/tickets/tt-Bad--Ticket/ticket.md"),
+            &dir.path().join("tickets/tt-Bad--Ticket/ticket.md"),
             "+++\ntitle = \"Bad Ticket\"\ncreation_date = 2026-06-18T10:15:02Z\nstatus = \"pending\"\n+++\n",
         );
 
@@ -399,7 +407,7 @@ mod tests {
     fn depends_on_missing_ticket_fails() {
         let dir = tempdir().unwrap();
         write_file(
-            &dir.path().join(".waap/tickets/tt-child/ticket.md"),
+            &dir.path().join("tickets/tt-child/ticket.md"),
             "+++\ntitle = \"Child\"\ncreation_date = 2026-06-18T10:15:02Z\nstatus = \"pending\"\ndepends_on = [\"tt-nonexistent\"]\n+++\n",
         );
 
@@ -414,7 +422,7 @@ mod tests {
     fn depends_on_self_cycle_fails() {
         let dir = tempdir().unwrap();
         write_file(
-            &dir.path().join(".waap/tickets/tt-self/ticket.md"),
+            &dir.path().join("tickets/tt-self/ticket.md"),
             "+++\ntitle = \"Self\"\ncreation_date = 2026-06-18T10:15:02Z\nstatus = \"pending\"\ndepends_on = [\"tt-self\"]\n+++\n",
         );
 
@@ -429,11 +437,11 @@ mod tests {
     fn depends_on_two_ticket_cycle_fails() {
         let dir = tempdir().unwrap();
         write_file(
-            &dir.path().join(".waap/tickets/tt-alpha/ticket.md"),
+            &dir.path().join("tickets/tt-alpha/ticket.md"),
             "+++\ntitle = \"Alpha\"\ncreation_date = 2026-06-18T10:15:02Z\nstatus = \"pending\"\ndepends_on = [\"tt-beta\"]\n+++\n",
         );
         write_file(
-            &dir.path().join(".waap/tickets/tt-beta/ticket.md"),
+            &dir.path().join("tickets/tt-beta/ticket.md"),
             "+++\ntitle = \"Beta\"\ncreation_date = 2026-06-18T10:15:02Z\nstatus = \"pending\"\ndepends_on = [\"tt-alpha\"]\n+++\n",
         );
 
@@ -446,15 +454,15 @@ mod tests {
     fn depends_on_valid_graph_passes() {
         let dir = tempdir().unwrap();
         write_file(
-            &dir.path().join(".waap/tickets/tt-base/ticket.md"),
+            &dir.path().join("tickets/tt-base/ticket.md"),
             "+++\ntitle = \"Base\"\ncreation_date = 2026-06-18T10:15:02Z\nstatus = \"completed\"\n+++\n",
         );
         write_file(
-            &dir.path().join(".waap/tickets/tt-mid/ticket.md"),
+            &dir.path().join("tickets/tt-mid/ticket.md"),
             "+++\ntitle = \"Mid\"\ncreation_date = 2026-06-18T10:15:02Z\nstatus = \"pending\"\ndepends_on = [\"tt-base\"]\n+++\n",
         );
         write_file(
-            &dir.path().join(".waap/tickets/tt-top/ticket.md"),
+            &dir.path().join("tickets/tt-top/ticket.md"),
             "+++\ntitle = \"Top\"\ncreation_date = 2026-06-18T10:15:02Z\nstatus = \"pending\"\ndepends_on = [\"tt-base\", \"tt-mid\"]\n+++\n",
         );
 
@@ -465,7 +473,7 @@ mod tests {
     fn depends_on_invalid_ticket_id_format_fails() {
         let dir = tempdir().unwrap();
         write_file(
-            &dir.path().join(".waap/tickets/tt-child/ticket.md"),
+            &dir.path().join("tickets/tt-child/ticket.md"),
             "+++\ntitle = \"Child\"\ncreation_date = 2026-06-18T10:15:02Z\nstatus = \"pending\"\ndepends_on = [\"not-a-ticket-id\"]\n+++\n",
         );
 

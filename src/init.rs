@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -5,122 +6,140 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use crate::cli::OutputFormat;
-use crate::git::{commit_paths, is_inside_git_work_tree, Committed};
+use crate::git::{commit_paths, ref_exists, run_git, Committed};
+
+const STATE_BRANCH: &str = "waap";
 
 #[derive(Debug)]
 pub(crate) struct InitReport {
     pub(crate) path: PathBuf,
-    pub(crate) marker: PathBuf,
 }
 
-pub(crate) fn init_project(waap_root: &Path) -> io::Result<Committed<InitReport>> {
-    let waap_dir = waap_root.join(".waap");
-    if waap_dir.exists() {
+fn args(values: &[&str]) -> Vec<OsString> {
+    values.iter().map(OsString::from).collect()
+}
+
+fn has_origin(repository_root: &Path) -> io::Result<bool> {
+    let output = run_git(repository_root, &args(&["remote"]))?;
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|remote| remote == "origin"))
+}
+
+fn create_state_worktree(repository_root: &Path, state_root: &Path) -> io::Result<bool> {
+    if state_root.exists() {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
-            format!("{} already exists", waap_dir.display()),
+            format!("{} already exists", state_root.display()),
         ));
     }
+    if let Some(parent) = state_root.parent() {
+        fs::create_dir_all(parent)?;
+    }
 
-    if !is_inside_git_work_tree(waap_root)? {
+    let local_branch = ref_exists(repository_root, "refs/heads/waap")?;
+    let remote_branch = ref_exists(repository_root, "refs/remotes/origin/waap")?;
+    let state_path = state_root.as_os_str().to_os_string();
+    if local_branch {
+        run_git(
+            repository_root,
+            &[
+                "worktree".into(),
+                "add".into(),
+                state_path,
+                STATE_BRANCH.into(),
+            ],
+        )?;
+    } else if remote_branch {
+        run_git(
+            repository_root,
+            &[
+                "worktree".into(),
+                "add".into(),
+                "--track".into(),
+                "-b".into(),
+                STATE_BRANCH.into(),
+                state_path,
+                "origin/waap".into(),
+            ],
+        )?;
+    } else {
+        run_git(
+            repository_root,
+            &[
+                "worktree".into(),
+                "add".into(),
+                "--orphan".into(),
+                "-b".into(),
+                STATE_BRANCH.into(),
+                state_path,
+            ],
+        )?;
+    }
+
+    if has_origin(repository_root)? {
+        run_git(
+            repository_root,
+            &args(&["config", "branch.waap.remote", "origin"]),
+        )?;
+        run_git(
+            repository_root,
+            &args(&["config", "branch.waap.merge", "refs/heads/waap"]),
+        )?;
+    }
+
+    Ok(!local_branch && !remote_branch)
+}
+
+pub(crate) fn init_project(
+    repository_root: &Path,
+    state_root: &Path,
+) -> io::Result<Committed<InitReport>> {
+    let fresh = create_state_worktree(repository_root, state_root)?;
+    if fresh {
+        fs::create_dir_all(state_root.join("agents"))?;
+        fs::create_dir_all(state_root.join("tickets"))?;
+        let agent_marker = state_root.join("agents/.gitkeep");
+        let ticket_marker = state_root.join("tickets/.gitkeep");
+        fs::write(&agent_marker, "")?;
+        fs::write(&ticket_marker, "")?;
+        commit_paths(
+            state_root,
+            &[agent_marker.as_path(), ticket_marker.as_path()],
+            "waap init",
+        )?;
+    }
+
+    if !state_root.join("agents").is_dir() || !state_root.join("tickets").is_dir() {
         return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "{} is not inside a git repository; waap projects must be inside git",
-                waap_root.display()
-            ),
+            io::ErrorKind::InvalidData,
+            format!("{} is missing agents or tickets", state_root.display()),
         ));
     }
 
-    fs::create_dir_all(waap_dir.join("agents"))?;
-    fs::create_dir_all(waap_dir.join("tickets"))?;
-    let marker = waap_dir.join(".gitkeep");
-    fs::write(&marker, "")?;
-
-    let path = waap_root
-        .canonicalize()
-        .unwrap_or_else(|_| waap_root.to_path_buf());
-
-    let report = InitReport { path, marker };
-    let commit =
-        commit_paths(waap_root, &[report.marker.as_path()], "waap init").map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("failed to commit waap state change: {error}"),
-            )
-        })?;
-
+    let path = state_root.canonicalize()?;
+    let commit = run_git(&path, &args(&["rev-parse", "HEAD"]))?;
     Ok(Committed {
-        value: report,
-        commit,
+        value: InitReport { path },
+        commit: String::from_utf8_lossy(&commit.stdout).trim().to_owned(),
     })
 }
 
 pub(crate) fn print_init_report(output_format: &OutputFormat, committed: &Committed<InitReport>) {
     let report = &committed.value;
     match output_format {
-        OutputFormat::Json => {
-            println!(
-                "{}",
-                json!({
-                    "path": report.path.display().to_string(),
-                    "commit": committed.commit,
-                })
-            );
-        }
+        OutputFormat::Json => println!(
+            "{}",
+            json!({
+                "path": report.path.display().to_string(),
+                "state_directory": report.path.display().to_string(),
+                "commit": committed.commit,
+            })
+        ),
         OutputFormat::HumanReadable => {
-            println!("Initialized waap project at {}", report.path.display());
+            println!("Initialized waap project");
+            println!("State directory: {}", report.path.display());
             println!("Commit: {}", committed.commit);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use tempfile::tempdir;
-
-    use super::init_project;
-    use crate::check::check_waap;
-    use crate::test_git::init_repo;
-
-    #[test]
-    fn init_creates_waap_skeleton_in_fresh_git_repo() {
-        let dir = tempdir().unwrap();
-        init_repo(dir.path());
-
-        let committed = init_project(dir.path()).unwrap();
-        let report = committed.value;
-
-        assert!(dir.path().join(".waap").is_dir());
-        assert!(dir.path().join(".waap/agents").is_dir());
-        assert!(dir.path().join(".waap/tickets").is_dir());
-        assert_eq!(report.path, dir.path().canonicalize().unwrap());
-        assert_eq!(report.marker, dir.path().join(".waap/.gitkeep"));
-        assert!(!committed.commit.is_empty());
-        assert!(check_waap(dir.path()).is_empty());
-    }
-
-    #[test]
-    fn init_errors_when_waap_already_exists() {
-        let dir = tempdir().unwrap();
-        init_repo(dir.path());
-        fs::create_dir_all(dir.path().join(".waap")).unwrap();
-
-        let err = init_project(dir.path()).unwrap_err();
-
-        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
-        assert!(err.to_string().contains(".waap"));
-    }
-
-    #[test]
-    fn init_errors_outside_git_repository() {
-        let dir = tempdir().unwrap();
-
-        let err = init_project(dir.path()).unwrap_err();
-
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-        assert!(!dir.path().join(".waap").exists());
     }
 }
