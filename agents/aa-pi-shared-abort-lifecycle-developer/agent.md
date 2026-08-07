@@ -2,6 +2,7 @@
 name = "pi-shared-abort-lifecycle-developer"
 creation_date = 2026-08-07T17:20:25Z
 status = "running"
+session_id = "019fdd3d-d932-7d81-9e9c-78e412c081a4"
 system = "codex"
 +++
 
