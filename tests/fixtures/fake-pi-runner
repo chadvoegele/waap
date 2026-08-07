@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+script=${WAAP_FAKE_PI_SCRIPT:-"$PWD/fake-pi"}
+exec /bin/sh "$script" "$@"

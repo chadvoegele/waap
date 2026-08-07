@@ -72,6 +72,19 @@ Continue working on `tt-file-picker` until done
 ```
 
 Then run your agent with `waap agent run --agent-id aa-file-picker-implementer`.
+Pi RPC is the default backend. It requires Pi Coding Agent 0.82.1 or newer,
+installed as `pi` and authenticated in the current environment. Set
+`WAAP_PI_BIN` to use another executable. Select a backend explicitly with
+`--system pi`, `opencode`, `claude`, or `codex`.
+
+Pi and Codex accept `--model` and `--reasoning-effort`. Command-line values
+override `WAAP_PI_MODEL` and `WAAP_PI_REASONING_EFFORT` for Pi or `CODEX_MODEL`
+and `CODEX_REASONING_EFFORT` for Codex. Pi accepts efforts from `none` through
+`max` and maps `none` to `off`; Codex also accepts `ultra`.
+
+The default test suite uses fake backend processes and needs no provider
+credentials. Run provider-backed smoke tests only with an authenticated,
+disposable repository.
 
 ## `waap` Loop
 

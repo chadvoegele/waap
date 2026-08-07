@@ -398,20 +398,6 @@ fn agent_stop_commits_and_reports_the_commit() {
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let agent_id = value["agent_id"].as_str().unwrap().to_string();
 
-    let output = waap(
-        dir.path(),
-        "",
-        &[
-            "agent",
-            "update",
-            "--agent-id",
-            &agent_id,
-            "--set-status",
-            "running",
-        ],
-    );
-    assert!(output.status.success());
-
     let before = commit_count(dir.path());
     let output = waap(
         dir.path(),
