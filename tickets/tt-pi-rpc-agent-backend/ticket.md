@@ -1,7 +1,7 @@
 +++
 name = "Pi RPC agent backend"
 creation_date = 2026-08-07T17:19:54Z
-status = "pending"
+status = "in-progress"
 depends_on = ["tt-pi-shared-abort-lifecycle"]
 +++
 
