@@ -43,16 +43,14 @@ pub(crate) fn print_check_result(
     output_format: &OutputFormat,
     state_root: &Path,
     errors: &[String],
+    to_stderr: bool,
 ) {
-    println!("{}", format_check_result(output_format, state_root, errors));
-}
-
-pub(crate) fn print_check_errors(
-    output_format: &OutputFormat,
-    state_root: &Path,
-    errors: &[String],
-) {
-    eprintln!("{}", format_check_result(output_format, state_root, errors));
+    let result = format_check_result(output_format, state_root, errors);
+    if to_stderr {
+        eprintln!("{result}");
+    } else {
+        println!("{result}");
+    }
 }
 
 fn format_check_result(

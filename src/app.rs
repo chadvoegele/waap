@@ -11,7 +11,7 @@ use crate::agent::{
     print_agent_stop_report, print_created_agent_report, print_updated_agent_report, run_agent,
     stop_agents_with_systems, update_agent,
 };
-use crate::check::{check_waap, print_check_errors, print_check_result};
+use crate::check::{check_waap, print_check_result};
 use crate::cli::{AgentCommand, Cli, Command, TicketCommand};
 use crate::init::{init_project, print_init_report};
 use crate::repair::{print_repair_report, repair_project};
@@ -69,7 +69,7 @@ pub(crate) fn run() -> ExitCode {
     if matches!(&cli.command, Command::Agent { .. } | Command::Ticket { .. }) {
         let errors = check_waap(waap_root);
         if !errors.is_empty() {
-            print_check_errors(&cli.output_format, waap_root, &errors);
+            print_check_result(&cli.output_format, waap_root, &errors, true);
             return ExitCode::from(1);
         }
     }
@@ -84,7 +84,7 @@ pub(crate) fn run() -> ExitCode {
         },
         Command::Check => {
             let errors = check_waap(waap_root);
-            print_check_result(&cli.output_format, waap_root, &errors);
+            print_check_result(&cli.output_format, waap_root, &errors, false);
             if errors.is_empty() {
                 ExitCode::SUCCESS
             } else {
