@@ -1,6 +1,6 @@
 use std::io;
 use std::path::Path;
-use std::process::{ExitCode, ExitStatus};
+use std::process::{Command as ProcessCommand, ExitCode, ExitStatus};
 
 #[derive(Debug, PartialEq)]
 pub(super) enum RunOutcome {
@@ -49,6 +49,24 @@ pub(super) trait AgentSystemBackend {
     #[cfg(test)]
     fn type_name(&self) -> &'static str {
         std::any::type_name::<Self>()
+    }
+}
+
+pub(super) fn signal_agent_run(agent_id: &str) -> io::Result<()> {
+    let mut command = ProcessCommand::new("pkill");
+    command
+        .arg("-TERM")
+        .arg("-f")
+        .arg(format!("agent run --agent-id {agent_id}"));
+    map_pkill_status(command)
+}
+
+fn map_pkill_status(mut command: ProcessCommand) -> io::Result<()> {
+    let status = command.status()?;
+    match status.code() {
+        Some(0) | Some(1) => Ok(()),
+        Some(code) => Err(io::Error::other(format!("pkill exited with status {code}"))),
+        None => Err(io::Error::other("pkill terminated by signal")),
     }
 }
 
@@ -166,6 +184,7 @@ pub(super) mod fake {
 #[cfg(test)]
 mod tests {
     use std::os::unix::process::ExitStatusExt;
+    use std::process::Command as ProcessCommand;
 
     use super::*;
 
@@ -183,5 +202,21 @@ mod tests {
             RunOutcome::from_exit_status(ExitStatus::from_raw(9)),
             RunOutcome::Failed(ExitCode::from(1))
         );
+    }
+
+    #[test]
+    fn signal_status_accepts_match_and_no_match() {
+        for code in [0, 1] {
+            let mut command = ProcessCommand::new("sh");
+            command.arg("-c").arg(format!("exit {code}"));
+            assert!(map_pkill_status(command).is_ok());
+        }
+
+        let mut command = ProcessCommand::new("sh");
+        command.arg("-c").arg("exit 2");
+        assert!(map_pkill_status(command)
+            .unwrap_err()
+            .to_string()
+            .contains("status 2"));
     }
 }
