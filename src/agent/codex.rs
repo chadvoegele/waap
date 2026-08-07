@@ -20,7 +20,7 @@ pub(super) struct CodexBackend {
 impl CodexBackend {
     pub(super) fn from_env(options: &AgentRunOptions) -> io::Result<Self> {
         Ok(Self {
-            config: codex_run_config_from_env(options)?,
+            config: get_codex_run_config(options)?,
         })
     }
 }
@@ -88,7 +88,7 @@ struct CodexRunConfig {
     reasoning_effort: Option<ReasoningEffort>,
 }
 
-fn codex_run_config_from_env(options: &AgentRunOptions) -> io::Result<CodexRunConfig> {
+fn get_codex_run_config(options: &AgentRunOptions) -> io::Result<CodexRunConfig> {
     let model = options.model.clone().or_else(|| {
         env::var("CODEX_MODEL")
             .ok()
@@ -608,14 +608,14 @@ mod tests {
         env::set_var("CODEX_MODEL", "env-model");
         env::set_var("CODEX_REASONING_EFFORT", "low");
 
-        let fallback = codex_run_config_from_env(&AgentRunOptions::default()).unwrap();
-        let overrides = codex_run_config_from_env(&AgentRunOptions {
+        let fallback = get_codex_run_config(&AgentRunOptions::default()).unwrap();
+        let overrides = get_codex_run_config(&AgentRunOptions {
             model: Some("cli-model".to_string()),
             reasoning_effort: Some(ReasoningEffort::High),
         })
         .unwrap();
         env::set_var("CODEX_REASONING_EFFORT", "invalid-but-overridden");
-        let invalid_override = codex_run_config_from_env(&AgentRunOptions {
+        let invalid_override = get_codex_run_config(&AgentRunOptions {
             model: None,
             reasoning_effort: Some(ReasoningEffort::Max),
         })
@@ -649,12 +649,12 @@ mod tests {
 
         for expected in ReasoningEffort::value_variants() {
             env::set_var("CODEX_REASONING_EFFORT", expected.as_str());
-            let config = codex_run_config_from_env(&AgentRunOptions::default()).unwrap();
+            let config = get_codex_run_config(&AgentRunOptions::default()).unwrap();
             assert_eq!(config.reasoning_effort, Some(*expected));
         }
         for invalid in ["", "HIGH", "extreme"] {
             env::set_var("CODEX_REASONING_EFFORT", invalid);
-            let error = codex_run_config_from_env(&AgentRunOptions::default()).unwrap_err();
+            let error = get_codex_run_config(&AgentRunOptions::default()).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
             let message = error.to_string();
             assert!(message.contains("CODEX_REASONING_EFFORT"));
@@ -665,7 +665,7 @@ mod tests {
 
         env::remove_var("CODEX_REASONING_EFFORT");
         assert_eq!(
-            codex_run_config_from_env(&AgentRunOptions::default()).unwrap(),
+            get_codex_run_config(&AgentRunOptions::default()).unwrap(),
             CodexRunConfig::default()
         );
 
