@@ -1,7 +1,8 @@
 +++
 name = "pi-shared-abort-lifecycle-developer"
 creation_date = 2026-08-07T17:20:25Z
-status = "ready"
+status = "running"
+system = "codex"
 +++
 
 # Purpose
