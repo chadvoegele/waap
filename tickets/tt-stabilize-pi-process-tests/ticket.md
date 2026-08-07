@@ -1,7 +1,7 @@
 +++
 name = "Stabilize Pi process tests"
 creation_date = 2026-08-07T17:58:16Z
-status = "in-progress"
+status = "completed"
 depends_on = ["tt-pi-backend-integration-verification"]
 +++
 
