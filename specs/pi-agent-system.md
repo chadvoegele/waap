@@ -295,11 +295,11 @@ therefore follows the existing Codex owner-signal pattern:
 5. The owner observes Pi settlement, returns `RunOutcome::Aborted`, cleans the
    worktree, and exits 1 without reporting a transition error.
 
-Use one shared idempotent aborted-transition helper from both stop orchestration
-and `RunOutcome::Aborted` handling. If the record is already `aborted`, it is a
-successful no-op with no extra commit. Thus either process may observe the
-other's write without attempting `aborted -> failed` or `failed -> aborted`.
-Apply the same outcome and transition behavior to Codex interruption.
+Allow `aborted -> aborted` in shared agent state-transition validation. If the
+record is already `aborted`, persistence is a successful no-op with no extra
+commit. Thus either process may observe the other's write without attempting
+`aborted -> failed` or `failed -> aborted`. Apply the same outcome and
+transition behavior to Codex interruption.
 
 Factor the argv-targeted signal and `pkill` status mapping out of `codex.rs` so
 Codex and Pi use one tested helper. Exit statuses 0 (signaled) and 1 (already
