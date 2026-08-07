@@ -41,6 +41,8 @@ one-way and offers no advantage over RPC for a long-lived child.
 - Treat Pi's fully settled result as the backend outcome.
 - Stream assistant text to the operator.
 - Let `waap agent stop` abort the live Pi operation and preserve `aborted` state.
+- Make interrupted Pi and Codex owners exit nonzero without terminal-state
+  transition errors.
 - Inherit the user's Pi auth, settings, extensions, skills, context files, and
   proxy configuration without depending on pi-web.
 - Preserve the shared WAAP lifecycle, commits, reports, cleanup, and exit-code
@@ -231,10 +233,14 @@ Outcome mapping:
 | Final condition | `RunOutcome` |
 | --- | --- |
 | latest assistant `stopReason == "stop"` | `Completed` |
-| `stopReason` is `error`, `aborted`, `length`, or `toolUse` | `Failed(1)` |
-| owner interrupt was requested | `Failed(1)` |
+| `stopReason` is `error`, `length`, or `toolUse` | `Failed(1)` |
+| `stopReason == "aborted"` or owner interrupt was requested | `Aborted` |
 | settled without an assistant result | protocol `io::Error` |
 | malformed JSON, failed RPC response, or EOF before settlement | protocol `io::Error` |
+
+Add `RunOutcome::Aborted` to the shared backend outcome. Shared orchestration
+maps it to exit code 1 and an idempotent `aborted` transition. Codex must map
+`TurnStatus::Interrupted` to the same outcome instead of `Failed(1)`.
 
 Tool-result errors alone do not fail the run; the model may recover and finish
 normally. Unknown stop reasons are protocol errors rather than assumed success.
@@ -296,10 +302,16 @@ therefore follows the existing Codex owner-signal pattern:
    `waap agent run --agent-id <id>` owner process.
 3. The owner's Pi run loop observes its signal flag and sends the RPC `abort`
    command over the connection it owns.
-4. The stop process writes and commits WAAP's `aborted` state after signaling.
-5. The owner observes Pi settlement, returns failure, and cleans the worktree.
-   Shared transition validation must not overwrite the already committed
-   `aborted` state.
+4. The stop process idempotently writes and commits WAAP's `aborted` state
+   after signaling.
+5. The owner observes Pi settlement, returns `RunOutcome::Aborted`, cleans the
+   worktree, and exits 1 without reporting a transition error.
+
+Use one shared idempotent aborted-transition helper from both stop orchestration
+and `RunOutcome::Aborted` handling. If the record is already `aborted`, it is a
+successful no-op with no extra commit. Thus either process may observe the
+other's write without attempting `aborted -> failed` or `failed -> aborted`.
+Apply the same outcome and transition behavior to Codex interruption.
 
 Factor the argv-targeted signal and `pkill` status mapping out of `codex.rs` so
 Codex and Pi use one tested helper. Exit statuses 0 (signaled) and 1 (already
@@ -325,8 +337,8 @@ The existing shared sequence remains authoritative:
 6. Persist and commit the session ID.
 7. Submit the prompt and wait for settlement.
 8. Clean the worktree.
-9. Commit `completed` or `failed`, unless a concurrent stop already committed
-   `aborted`.
+9. Commit `completed` or `failed`, or idempotently converge on `aborted` for an
+   interrupted run.
 
 The Pi backend must not write agent records, create commits, choose worktree
 paths, or update ticket state.
@@ -382,6 +394,8 @@ Cover:
 - cancellation responses for every dialog-style extension UI request;
 - fire-and-forget extension UI requests not blocking;
 - SIGTERM causing exactly one RPC `abort` command;
+- Pi and Codex interruption converging on `aborted` in either process order,
+  with owner exit 1 and no transition error;
 - child shutdown and reaping after success, error, and dropped handles.
 
 Extend backend/lifecycle tests to include `AgentSystem::Pi` for:
@@ -414,13 +428,14 @@ default test suite.
   construction.
 - `src/agent/pi.rs`: add Pi configuration, RPC client, run handle, event
   classification, and abort implementation.
-- `src/agent/backend.rs`: host a shared owner-signal helper if factored from
-  Codex.
-- `src/agent/codex.rs`: reuse the shared signal helper.
+- `src/agent/backend.rs`: add `RunOutcome::Aborted` and host a shared
+  owner-signal helper if factored from Codex.
+- `src/agent/codex.rs`: reuse the shared signal helper and map interrupted turns
+  to `RunOutcome::Aborted`.
+- `src/agent/run.rs`: handle aborted outcomes idempotently and return exit 1
+  without a transition error.
+- `src/agent/stop.rs`: reuse the idempotent aborted transition.
 - `src/cli.rs`: update `--model` and `--reasoning-effort` help and ownership.
-- `src/agent/run.rs`: no production lifecycle redesign; extend focused tests as
-  needed.
-- `src/agent/stop.rs`: no production redesign; extend system coverage.
 - `README.md` and `.agents/skills/waap/SKILL.md`: document the new system and
   run options.
 - `Cargo.toml`: no async runtime is required; use the standard library,
@@ -480,6 +495,8 @@ commit a precondition for task execution.
 - [ ] Wait for `agent_settled` and map the final assistant stop reason.
 - [ ] Forward assistant text deltas.
 - [ ] Implement owner-signal-to-RPC-abort behavior and child reaping.
+- [ ] Add idempotent aborted outcomes for Pi and Codex without transition
+      errors.
 - [ ] Preserve shared state transitions, commits, reports, and cleanup.
 - [ ] Add fake-process protocol and lifecycle tests.
 - [ ] Update user documentation and the WAAP skill.
