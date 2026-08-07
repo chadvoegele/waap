@@ -1,0 +1,493 @@
+# Add Pi as an agent-run system
+
+Specification for adding `pi` to `waap agent run --system`, alongside
+`opencode`, `claude`, and `codex`.
+
+## Decision
+
+WAAP should invoke the Pi Coding Agent directly through **Pi RPC mode**:
+
+```text
+waap (Rust) -> local `pi --mode rpc` child -> model provider
+```
+
+WAAP must not call pi-web or its session daemon. Pi-web is a UI and session
+host, not the agent boundary WAAP needs. The dockerops deployment builds
+`@earendil-works/pi-coding-agent` into the pi-web image, mounts the user's Pi
+configuration and workspaces, and pi-web embeds Pi through the TypeScript SDK.
+That deployment proves the required Pi configuration is available, but it does
+not make pi-web a dependency of this backend.
+
+RPC mode is the right direct boundary because WAAP is written in Rust. It is
+Pi's language-neutral process-integration API and provides:
+
+- an authentic Pi session ID before work starts;
+- correlated command responses and streamed lifecycle events;
+- explicit prompt acceptance and abort commands;
+- session persistence and future steering without scraping terminal output;
+- process isolation from Pi's Node.js runtime.
+
+The TypeScript SDK is preferable for Node.js applications such as pi-web, but
+using it from WAAP would require a maintained Node sidecar and a second private
+protocol. Print mode is too weak for controlled aborts. JSON event mode is
+one-way and offers no advantage over RPC for a long-lived child.
+
+## Goals
+
+- Accept `waap agent run --agent-id <id> --system pi`.
+- Run the agent in WAAP's existing per-agent worktree.
+- Persist Pi's authentic session UUID in agent frontmatter before submitting the
+  task prompt.
+- Treat Pi's fully settled result as the backend outcome.
+- Stream assistant text to the operator.
+- Let `waap agent stop` abort the live Pi operation and preserve `aborted` state.
+- Inherit the user's Pi auth, settings, extensions, skills, context files, and
+  proxy configuration without depending on pi-web.
+- Preserve the shared WAAP lifecycle, commits, reports, cleanup, and exit-code
+  behavior.
+
+## Non-goals
+
+- Exposing Pi's full RPC surface through the WAAP CLI.
+- Replacing pi-web or changing dockerops deployment topology.
+- Running Pi remotely over HTTP.
+- Resuming or steering a completed WAAP agent.
+- Adding a JavaScript runtime to the WAAP process.
+- Defining a new sandbox or permission model. Pi and the current WAAP backends
+  are trusted-user automation.
+
+## Current deployment findings
+
+The dockerops Pi stack:
+
+- builds pi-web and Pi Coding Agent from local source;
+- installs a `pi` executable in the runtime image;
+- mounts the same absolute workspace paths inside and outside the container;
+- bind-mounts `~/.pi`, so auth, settings, and session transcripts persist;
+- supplies SSH, GPG, Docker, CA, proxy, skills, extensions, and MCP access to Pi.
+
+Pi-web itself imports `createAgentSessionRuntime`,
+`createAgentSessionServices`, and `createAgentSessionFromServices` from the Pi
+SDK. It does not spawn `pi --mode rpc`. This distinction supports using RPC in
+WAAP: pi-web is already in Node.js and can use the SDK directly; WAAP is not.
+
+The Pi backend runs wherever the `waap` process runs. In the current pi-web
+container, it inherits the mounted workspace and Pi configuration. Outside that
+container, installing and authenticating the `pi` CLI is an operator
+precondition.
+
+## User interface and configuration
+
+### System label
+
+Add `AgentSystem::Pi` with the stable label `"pi"`. This enables:
+
+```bash
+waap agent run --agent-id aa-12345678 --system pi
+```
+
+and persisted frontmatter:
+
+```toml
+system = "pi"
+session_id = "019fdcce-5d74-7a54-8139-ce66c24dd93f"
+```
+
+The default system remains `opencode`.
+
+### Run options
+
+Pi and Codex both accept `--model`; the option help must no longer call it
+Codex-only. The selected backend interprets the value:
+
+```bash
+waap agent run --agent-id aa-12345678 --system pi \
+  --model openai-codex/gpt-5.6-sol --thinking high
+```
+
+Add a Pi-only `--thinking` option with these values:
+
+- `off`
+- `minimal`
+- `low`
+- `medium`
+- `high`
+- `xhigh`
+- `max`
+
+Keep `--reasoning-effort` Codex-only. Reject unsupported option/system
+combinations before changing agent state:
+
+| Option | OpenCode | Claude | Codex | Pi |
+| --- | --- | --- | --- | --- |
+| `--model` | reject | reject | accept | accept |
+| `--reasoning-effort` | reject | reject | accept | reject |
+| `--thinking` | reject | reject | reject | accept |
+
+Add `PiThinkingLevel` rather than reusing `ReasoningEffort`; Pi says `off`,
+while Codex says `none`, and Codex currently accepts `ultra` while Pi does not.
+
+### Environment
+
+Use WAAP-prefixed variables to avoid confusing Pi's session metadata variables:
+
+| Variable | Meaning |
+| --- | --- |
+| `WAAP_PI_BIN` | Pi executable; default `pi` |
+| `WAAP_PI_MODEL` | Optional Pi model; overridden by `--model` |
+| `WAAP_PI_THINKING` | Optional Pi thinking level; overridden by `--thinking` |
+
+Do not use `PI_MODEL` or `PI_REASONING_LEVEL` as configuration. Pi injects
+those variables into commands to describe the current session, and WAAP may
+itself be running inside a Pi session.
+
+Before spawning the child, remove inherited parent-session metadata:
+
+- `PI_SESSION_ID`
+- `PI_SESSION_FILE`
+- `PI_PROVIDER`
+- `PI_MODEL`
+- `PI_REASONING_LEVEL`
+
+Preserve `HOME`, `PI_CODING_AGENT_DIR`, provider credentials, proxy variables,
+CA settings, and the rest of the environment. Never place API keys on the
+command line.
+
+Invalid `WAAP_PI_MODEL`, `WAAP_PI_THINKING`, or CLI values must fail before the
+agent enters `running`. Stop operations construct a configuration-free Pi
+backend, as Codex stop does, so an invalid run-only environment cannot prevent
+stopping an existing agent.
+
+## Pi process invocation
+
+Spawn one Pi child for one WAAP run:
+
+```text
+pi --mode rpc --approve --name "waap aa-12345678" \
+  [--model <model>] [--thinking <level>]
+```
+
+Process configuration:
+
+- `current_dir`: the agent worktree;
+- stdin: piped;
+- stdout: piped;
+- stderr: inherited;
+- session persistence: enabled; do not pass `--no-session`.
+
+`--approve` deterministically trusts project-local Pi settings and resources
+for this autonomous run. It is Pi project trust, not command-by-command
+permission approval. The worktree remains the authority boundary already
+chosen by WAAP.
+
+The session name improves discovery in Pi's session list and provides operator
+context. It is not used as the WAAP session identity.
+
+## Backend design
+
+Add `src/agent/pi.rs` with `PiBackend`, `PiRunConfig`, `PiRpcClient`, and
+`PiRun`. Implement the existing `AgentSystemBackend` trait; do not move shared
+WAAP lifecycle behavior into the backend.
+
+### Start
+
+`PiBackend::start(StartContext)` performs only session startup:
+
+1. Install the same SIGTERM-to-interrupt flag used by direct process backends.
+2. Spawn Pi in the worktree.
+3. Start a dedicated stdout reader that applies strict LF-delimited JSONL
+   framing and sends parsed records to the owning thread.
+4. Send a correlated `get_state` command.
+5. Read interleaved records until the matching successful response arrives.
+6. Extract non-empty `data.sessionId`.
+7. Return `StartedRun { session_id, handle }` without sending the task prompt.
+
+Deferring the prompt is intentional. Shared orchestration persists the session
+ID before calling `RunHandle::wait`, so an abort or persistence failure cannot
+leave untracked Pi work running. This matches Codex's thread-before-turn
+shape.
+
+Pi also returns `sessionFile`; WAAP does not persist it. The session ID is Pi's
+stable, resume-capable identity, and the session file remains discoverable
+through Pi's session store.
+
+### Wait
+
+`PiRun::wait`:
+
+1. Subscribe logically before submission by retaining all records received by
+   the reader.
+2. Send a correlated `prompt` command containing WAAP's existing common prompt.
+3. Require a matching `success: true` response. This means accepted, not
+   completed.
+4. Pump events until `agent_settled`.
+5. If the owner receives SIGTERM, send one correlated `abort` command and keep
+   pumping until settlement or child exit.
+6. Classify the final assistant message.
+7. Close Pi stdin, wait for orderly child exit, and reap it.
+
+Use `agent_settled`, not `agent_end`. `agent_end` may be followed by automatic
+retry, overflow compaction, or queued continuation. `agent_settled` is Pi's
+session-level completion boundary.
+
+Outcome mapping:
+
+| Final condition | `RunOutcome` |
+| --- | --- |
+| latest assistant `stopReason == "stop"` | `Completed` |
+| `stopReason` is `error`, `aborted`, `length`, or `toolUse` | `Failed(1)` |
+| owner interrupt was requested | `Failed(1)` |
+| settled without an assistant result | protocol `io::Error` |
+| malformed JSON, failed RPC response, or EOF before settlement | protocol `io::Error` |
+
+Tool-result errors alone do not fail the run; the model may recover and finish
+normally. Unknown stop reasons are protocol errors rather than assumed success.
+
+### Output
+
+For `message_update` events whose `assistantMessageEvent.type` is
+`text_delta`, write `delta` to stdout and flush. Do not emit thinking deltas or
+raw RPC records. Pi stderr remains attached for startup and provider
+diagnostics.
+
+The client must still consume every record promptly to avoid backpressure.
+
+### Extension UI requests
+
+Project or global extensions can issue RPC UI requests. WAAP has no interactive
+UI, so the backend must prevent them from hanging a run:
+
+- respond with `{ "type": "extension_ui_response", "id": ..., "cancelled": true }`
+  for `select`, `confirm`, `input`, and `editor`;
+- ignore fire-and-forget `notify`, `setStatus`, `setWidget`, `setTitle`, and
+  `set_editor_text` requests after optionally logging concise diagnostics.
+
+Cancellation is the safe default for permission or confirmation extensions.
+
+## RPC transport
+
+Pi RPC uses strict LF-delimited JSONL:
+
+- split only on byte `0x0a`;
+- strip one trailing `\r` for CRLF input;
+- preserve Unicode `U+2028` and `U+2029` inside JSON strings;
+- serialize one JSON object plus `\n` per command;
+- correlate responses by string request ID;
+- process events and extension UI requests while awaiting any response.
+
+A dedicated reader thread and an `mpsc` channel let the owner poll for the
+SIGTERM flag while waiting for records. This avoids doing I/O in a signal
+handler and avoids an indefinitely blocked `read_line` preventing abort.
+
+Use a bounded startup/command-response timeout, defaulting to 30 seconds. Do
+not impose an overall agent runtime timeout. EOF, reader failure, or child exit
+must reject pending requests and include available stderr/process status in the
+error without exposing credentials.
+
+`PiRpcClient` must own and reap the child. On normal settlement, close stdin so
+Pi disposes its runtime and exits. On startup failure or `PiRun` drop before
+`wait`, close stdin, terminate if needed, and reap the child so session
+persistence failures do not leak processes or zombies.
+
+## Stop behavior
+
+Pi's session ID identifies persisted conversation state but cannot attach a
+second process to the live RPC stdin/stdout connection. `waap agent stop`
+therefore follows the existing Codex owner-signal pattern:
+
+1. The stop process resolves `system = "pi"` and calls `PiBackend::abort`.
+2. `abort` sends SIGTERM to the live
+   `waap agent run --agent-id <id>` owner process.
+3. The owner's Pi run loop observes its signal flag and sends the RPC `abort`
+   command over the connection it owns.
+4. The stop process writes and commits WAAP's `aborted` state after signaling.
+5. The owner observes Pi settlement, returns failure, and cleans the worktree.
+   Shared transition validation must not overwrite the already committed
+   `aborted` state.
+
+Factor the argv-targeted signal and `pkill` status mapping out of `codex.rs` so
+Codex and Pi use one tested helper. Exit statuses 0 (signaled) and 1 (already
+exited) are accepted; other statuses are errors.
+
+This retains the existing argv-matching limitation. Persisting owner PIDs or a
+control socket would be a separate lifecycle change.
+
+The start ordering narrows the existing sessionless-running race: Pi does not
+receive the task prompt until the session ID has been committed. If stop marks
+a sessionless run aborted, late session persistence fails and dropping the
+handle shuts Pi down before task execution.
+
+## Shared lifecycle
+
+The existing shared sequence remains authoritative:
+
+1. Validate that the agent is `ready`.
+2. Validate Pi configuration and options.
+3. Mark and commit `running` with `system = "pi"`.
+4. Create the agent worktree.
+5. Start Pi and obtain its session ID.
+6. Persist and commit the session ID.
+7. Submit the prompt and wait for settlement.
+8. Clean the worktree.
+9. Commit `completed` or `failed`, unless a concurrent stop already committed
+   `aborted`.
+
+The Pi backend must not write agent records, create commits, choose worktree
+paths, or update ticket state.
+
+## Security and isolation
+
+Pi runs with the privileges and mounted resources of the `waap` process. In the
+current dockerops pi-web runtime this includes the workspace, SSH/GPG agents,
+password store, Docker socket, browser service, and network credentials. RPC
+mode is process isolation, not a security sandbox.
+
+Operational requirements:
+
+- never send secrets in argv, logs, frontmatter, or RPC diagnostics;
+- inherit auth through Pi's credential store or provider environment;
+- keep Pi local to the WAAP execution environment;
+- do not expose an RPC port; communication is private stdio;
+- cancel extension dialogs rather than auto-approving them;
+- retain WAAP's isolated Git worktree.
+
+## Compatibility
+
+Target Pi Coding Agent `0.82.1` or newer, which provides the documented
+`agent_settled` event, strict JSONL framing, `get_state`, prompt preflight
+responses, and extension UI protocol used here.
+
+WAAP should not parse Pi's session JSONL files to drive live state. Session
+format is durable storage, while RPC events are the live protocol. A future Pi
+protocol change should fail closed as a protocol error.
+
+## Test strategy
+
+### Unit tests
+
+Use a fake Pi executable or child-process fixture that speaks the RPC protocol;
+do not call a model provider.
+
+Cover:
+
+- command construction, cwd, inherited environment, and parent `PI_*` removal;
+- CLI-over-environment model and thinking precedence;
+- invalid Pi options failing before `running`;
+- `get_state` session extraction before prompt submission;
+- shared session persistence occurring before `prompt` is written;
+- interleaved events and correlated responses;
+- strict LF framing with CRLF, chunked UTF-8, `U+2028`, and `U+2029`;
+- assistant text forwarding without duplicate final text;
+- completion only after `agent_settled`, including an `agent_end` followed by
+  retry events;
+- every stop-reason mapping;
+- prompt rejection, malformed JSON, unknown status, reader failure, timeout,
+  and premature EOF;
+- cancellation responses for every dialog-style extension UI request;
+- fire-and-forget extension UI requests not blocking;
+- SIGTERM causing exactly one RPC `abort` command;
+- child shutdown and reaping after success, error, and dropped handles.
+
+Extend backend/lifecycle tests to include `AgentSystem::Pi` for:
+
+- enum parsing, labels, and frontmatter validation;
+- backend construction and type selection;
+- common prompt and worktree context;
+- session commit ordering;
+- completed, failed, errored, and concurrently aborted outcomes;
+- mixed-system stop dispatch.
+
+### Integration smoke test
+
+With an authenticated Pi installation and a disposable repository:
+
+1. create a WAAP agent that writes and commits a small file;
+2. run it with `--system pi`;
+3. verify running, session, and completed commits;
+4. verify the Pi session appears under the worktree cwd;
+5. verify the worktree is removed;
+6. repeat with a long-running prompt, call `waap agent stop`, and verify the
+   final state is `aborted`, Pi exits, and the worktree is removed.
+
+The provider-backed smoke test is manual or opt-in and must not run in the
+default test suite.
+
+## Affected files
+
+- `src/agent.rs`: add `AgentSystem::Pi`, Pi option validation, and backend
+  construction.
+- `src/agent/pi.rs`: add Pi configuration, RPC client, run handle, event
+  classification, and abort implementation.
+- `src/agent/backend.rs`: host a shared owner-signal helper if factored from
+  Codex.
+- `src/agent/codex.rs`: reuse the shared signal helper.
+- `src/cli.rs`: update `--model` help and add Pi-only `--thinking`.
+- `src/agent/run.rs`: no production lifecycle redesign; extend focused tests as
+  needed.
+- `src/agent/stop.rs`: no production redesign; extend system coverage.
+- `README.md` and `.agents/skills/waap/SKILL.md`: document the new system and
+  run options.
+- `Cargo.toml`: no async runtime is required; use the standard library,
+  `serde_json`, and existing `signal-hook`.
+
+## Rejected alternatives
+
+### Call pi-web
+
+Rejected because it couples WAAP execution to a UI deployment, HTTP auth,
+network availability, pi-web APIs, and session-daemon lifecycle. It would also
+make local CLI use depend on dockerops topology.
+
+### Embed the TypeScript SDK
+
+Rejected because WAAP is Rust. A Node bridge would recreate RPC with an
+additional package and protocol to version. Pi's own documentation recommends
+RPC for non-Node integrations.
+
+### Use print mode
+
+Rejected because it does not expose a live control channel, prompt acceptance,
+or extension UI handling.
+
+### Use JSON event mode
+
+Rejected because it is one-way. It can stream output but cannot issue a
+protocol-level abort or support future control operations.
+
+### Parse session files for completion
+
+Rejected because session JSONL is persistence, not a live synchronization
+protocol. Polling it introduces races and couples WAAP to storage internals.
+
+### Treat process exit zero as task success
+
+Rejected because the RPC process is a session host and normally remains alive
+until stdin closes. Agent completion and model errors are represented by events
+and assistant stop reasons, not by child exit alone.
+
+### Run the prompt during `start`
+
+Rejected because shared orchestration cannot persist the returned session ID
+until `start` returns. Deferring the prompt to `wait` makes the durable session
+commit a precondition for task execution.
+
+## Implementation checklist
+
+- [ ] Add `pi` to CLI and frontmatter system values without changing the
+      default.
+- [ ] Add Pi-specific thinking configuration and validate option ownership.
+- [ ] Spawn direct `pi --mode rpc` in the agent worktree.
+- [ ] Implement strict LF JSONL parsing and correlated responses.
+- [ ] Obtain and persist `get_state.data.sessionId` before prompting.
+- [ ] Cancel extension dialogs and ignore fire-and-forget UI safely.
+- [ ] Wait for `agent_settled` and map the final assistant stop reason.
+- [ ] Forward assistant text deltas.
+- [ ] Implement owner-signal-to-RPC-abort behavior and child reaping.
+- [ ] Preserve shared state transitions, commits, reports, and cleanup.
+- [ ] Add fake-process protocol and lifecycle tests.
+- [ ] Update user documentation and the WAAP skill.
+- [ ] Run `cargo fmt --check`.
+- [ ] Run `cargo clippy --all-targets -- -D warnings`.
+- [ ] Run `cargo build` and `cargo build --release`.
+- [ ] Run `cargo test` outside the command sandbox.
+- [ ] Run `waap check`.
