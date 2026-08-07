@@ -11,13 +11,6 @@ WAAP should invoke the Pi Coding Agent directly through **Pi RPC mode**:
 waap (Rust) -> local `pi --mode rpc` child -> model provider
 ```
 
-WAAP must not call pi-web or its session daemon. Pi-web is a UI and session
-host, not the agent boundary WAAP needs. The dockerops deployment builds
-`@earendil-works/pi-coding-agent` into the pi-web image, mounts the user's Pi
-configuration and workspaces, and pi-web embeds Pi through the TypeScript SDK.
-That deployment proves the required Pi configuration is available, but it does
-not make pi-web a dependency of this backend.
-
 RPC mode is the right direct boundary because WAAP is written in Rust. It is
 Pi's language-neutral process-integration API and provides:
 
@@ -27,10 +20,10 @@ Pi's language-neutral process-integration API and provides:
 - session persistence and future steering without scraping terminal output;
 - process isolation from Pi's Node.js runtime.
 
-The TypeScript SDK is preferable for Node.js applications such as pi-web, but
-using it from WAAP would require a maintained Node sidecar and a second private
-protocol. Print mode is too weak for controlled aborts. JSON event mode is
-one-way and offers no advantage over RPC for a long-lived child.
+The TypeScript SDK is preferable for Node.js applications, but using it from
+WAAP would require a maintained Node sidecar and a second private protocol.
+Print mode is too weak for controlled aborts. JSON event mode is one-way and
+offers no advantage over RPC for a long-lived child.
 
 ## Goals
 
@@ -44,39 +37,24 @@ one-way and offers no advantage over RPC for a long-lived child.
 - Make interrupted Pi and Codex owners exit nonzero without terminal-state
   transition errors.
 - Inherit the user's Pi auth, settings, extensions, skills, context files, and
-  proxy configuration without depending on pi-web.
+  proxy configuration.
 - Preserve the shared WAAP lifecycle, commits, reports, cleanup, and exit-code
   behavior.
 
 ## Non-goals
 
 - Exposing Pi's full RPC surface through the WAAP CLI.
-- Replacing pi-web or changing dockerops deployment topology.
 - Running Pi remotely over HTTP.
 - Resuming or steering a completed WAAP agent.
 - Adding a JavaScript runtime to the WAAP process.
 - Defining a new sandbox or permission model. Pi and the current WAAP backends
   are trusted-user automation.
 
-## Current deployment findings
+## Runtime preconditions
 
-The dockerops Pi stack:
-
-- builds pi-web and Pi Coding Agent from local source;
-- installs a `pi` executable in the runtime image;
-- mounts the same absolute workspace paths inside and outside the container;
-- bind-mounts `~/.pi`, so auth, settings, and session transcripts persist;
-- supplies SSH, GPG, Docker, CA, proxy, skills, extensions, and MCP access to Pi.
-
-Pi-web itself imports `createAgentSessionRuntime`,
-`createAgentSessionServices`, and `createAgentSessionFromServices` from the Pi
-SDK. It does not spawn `pi --mode rpc`. This distinction supports using RPC in
-WAAP: pi-web is already in Node.js and can use the SDK directly; WAAP is not.
-
-The Pi backend runs wherever the `waap` process runs. In the current pi-web
-container, it inherits the mounted workspace and Pi configuration. Outside that
-container, installing and authenticating the `pi` CLI is an operator
-precondition.
+The Pi backend runs in the `waap` process's environment. The `pi` CLI must be
+installed and authenticated, and the agent worktree and WAAP state directory
+must be accessible at the paths passed to Pi.
 
 ## User interface and configuration
 
@@ -147,9 +125,8 @@ Before spawning the child, remove inherited parent-session metadata:
 Preserve `HOME`, `PI_CODING_AGENT_DIR`, provider credentials, proxy variables,
 CA settings, and the rest of the environment. Pi normally reads auth, settings,
 models, extensions, skills, and sessions from `~/.pi/agent`; the
-`PI_CODING_AGENT_DIR` override replaces that directory. In dockerops, the host
-`~/.pi` is mounted at `/home/piweb/.pi`. Never place API keys on the command
-line.
+`PI_CODING_AGENT_DIR` override replaces that directory. Never place API keys on
+the command line.
 
 Invalid `WAAP_PI_MODEL`, `WAAP_PI_REASONING_EFFORT`, or CLI values must fail
 before the agent enters `running`. Stop operations construct a
@@ -345,10 +322,10 @@ paths, or update ticket state.
 
 ## Security and isolation
 
-Pi runs with the privileges and mounted resources of the `waap` process. In the
-current dockerops pi-web runtime this includes the workspace, SSH/GPG agents,
-password store, Docker socket, browser service, and network credentials. RPC
-mode is process isolation, not a security sandbox.
+Pi runs with the privileges and resources of the `waap` process. These may
+include the workspace, credential agents, password stores, container sockets,
+browser services, and network credentials. RPC mode is process isolation, not
+a security sandbox.
 
 Operational requirements:
 
@@ -442,12 +419,6 @@ default test suite.
   `serde_json`, and existing `signal-hook`.
 
 ## Rejected alternatives
-
-### Call pi-web
-
-Rejected because it couples WAAP execution to a UI deployment, HTTP auth,
-network availability, pi-web APIs, and session-daemon lifecycle. It would also
-make local CLI use depend on dockerops topology.
 
 ### Embed the TypeScript SDK
 
