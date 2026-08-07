@@ -72,6 +72,9 @@ Continue working on `tt-file-picker` until done
 ```
 
 Then run your agent with `waap agent run --agent-id aa-file-picker-implementer`.
+Pi RPC is the default backend; use `--system opencode`, `claude`, or `codex` to
+select another backend. Pi and Codex accept `--model` and
+`--reasoning-effort`.
 
 Steer a running agent with `waap agent steer --agent-id aa-file-picker-implementer --prompt "Focus on keyboard navigation"`.
 Stop a running agent with `waap agent stop --agent-id aa-file-picker-implementer`.
