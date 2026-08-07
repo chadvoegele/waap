@@ -6,6 +6,7 @@ use std::process::{ExitCode, ExitStatus};
 pub(super) enum RunOutcome {
     Completed,
     Failed(ExitCode),
+    Aborted,
 }
 
 impl RunOutcome {

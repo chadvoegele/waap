@@ -6,7 +6,7 @@ use serde_json::json;
 use super::backend::{AbortContext, AgentSystemBackend};
 use crate::agent::get::load_agent_report;
 use crate::agent::{
-    agent_report_json, print_agent_report_human, read_agent_record, transition_agent_status,
+    agent_report_json, print_agent_report_human, read_agent_record, transition_agent_to_aborted,
     write_agent_record, AgentReport, AgentStatus,
 };
 use crate::cli::OutputFormat;
@@ -115,8 +115,14 @@ fn stop_agent_if_running(waap_root: &Path, agent_id: &str) -> io::Result<Option<
         return Ok(None);
     }
 
+    let system = report.metadata.system.clone().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid agent metadata: running agent {agent_id} has no persisted system"),
+        )
+    })?;
+
     if report.metadata.session_id.is_some() {
-        let system = report.metadata.system.clone().unwrap_or_default();
         let mut backend = system.backend(None)?;
         return stop_agent_with_backend(waap_root, agent_id, backend.as_mut());
     }
@@ -147,7 +153,9 @@ fn stop_agent_with_backend(
 
 fn mark_agent_aborted(waap_root: &Path, agent_id: &str) -> io::Result<Option<AgentReport>> {
     let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
-    transition_agent_status(&mut metadata, AgentStatus::Aborted)?;
+    if !transition_agent_to_aborted(&mut metadata)? {
+        return Ok(None);
+    }
     write_agent_record(waap_root, agent_id, &metadata, &body)?;
 
     load_agent_report(waap_root, agent_id).map(Some)
@@ -269,6 +277,27 @@ mod tests {
                 .metadata
                 .status,
             "failed"
+        );
+    }
+
+    #[test]
+    fn agent_stop_rejects_running_agent_without_persisted_system() {
+        let dir = tempdir().unwrap();
+        write_agent_without_system(dir.path(), "aa-00000001", "running", Some("ses_123"));
+
+        let error = stop_agents(dir.path(), Some("aa-00000001")).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "invalid agent metadata: running agent aa-00000001 has no persisted system"
+        );
+        assert_eq!(
+            load_agent_report(dir.path(), "aa-00000001")
+                .unwrap()
+                .metadata
+                .status,
+            "running"
         );
     }
 
@@ -481,6 +510,24 @@ mod tests {
     }
 
     #[test]
+    fn agent_stop_is_a_noop_when_owner_persisted_aborted_first() {
+        let dir = tempdir().unwrap();
+        write_agent(dir.path(), "aa-3881fda0", "aborted");
+        let contents_before =
+            fs::read_to_string(dir.path().join("agents/aa-3881fda0/agent.md")).unwrap();
+        let mut backend = FakeBackend::default();
+
+        let report = stop_agent_with_backend(dir.path(), "aa-3881fda0", &mut backend).unwrap();
+
+        assert!(report.is_none());
+        assert!(backend.abort_calls.is_empty());
+        assert_eq!(
+            fs::read_to_string(dir.path().join("agents/aa-3881fda0/agent.md")).unwrap(),
+            contents_before
+        );
+    }
+
+    #[test]
     fn agent_stop_json_has_expected_shape() {
         let reports = vec![AgentReport {
             agent_id: "aa-3881fda0".to_string(),
@@ -542,7 +589,24 @@ mod tests {
         write_file(
             &waap_root.join(format!("agents/{agent_id}/agent.md")),
             &format!(
-                "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"{status}\"\n{session_id}+++\n\n# Purpose\n"
+                "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"{status}\"\n{session_id}system = \"opencode\"\n+++\n\n# Purpose\n"
+            ),
+        );
+    }
+
+    fn write_agent_without_system(
+        waap_root: &Path,
+        agent_id: &str,
+        status: &str,
+        session_id: Option<&str>,
+    ) {
+        let session_id = session_id
+            .map(|session_id| format!("session_id = \"{session_id}\"\n"))
+            .unwrap_or_default();
+        write_file(
+            &waap_root.join(format!("agents/{agent_id}/agent.md")),
+            &format!(
+                "+++\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"{status}\"\n{session_id}+++\n\n# Purpose\n"
             ),
         );
     }

@@ -63,11 +63,7 @@ impl RunHandle for CodexRun {
         let status =
             self.client
                 .pump_until_turn_completed(&self.thread_id, &turn_id, &self.interrupt)?;
-        if status.is_success() {
-            Ok(RunOutcome::Completed)
-        } else {
-            Ok(RunOutcome::Failed(std::process::ExitCode::FAILURE))
-        }
+        Ok(status.outcome())
     }
 }
 
@@ -153,8 +149,12 @@ enum TurnStatus {
 }
 
 impl TurnStatus {
-    fn is_success(self) -> bool {
-        matches!(self, TurnStatus::Completed)
+    fn outcome(self) -> RunOutcome {
+        match self {
+            Self::Completed => RunOutcome::Completed,
+            Self::Interrupted => RunOutcome::Aborted,
+            Self::Failed | Self::InProgress => RunOutcome::Failed(std::process::ExitCode::FAILURE),
+        }
     }
 
     fn from_wire(value: &str) -> Option<TurnStatus> {
@@ -791,11 +791,17 @@ mod tests {
     }
 
     #[test]
-    fn is_success_only_for_completed() {
-        assert!(TurnStatus::Completed.is_success());
-        assert!(!TurnStatus::Failed.is_success());
-        assert!(!TurnStatus::Interrupted.is_success());
-        assert!(!TurnStatus::InProgress.is_success());
+    fn turn_status_maps_interruption_to_aborted_outcome() {
+        assert_eq!(TurnStatus::Completed.outcome(), RunOutcome::Completed);
+        assert_eq!(TurnStatus::Interrupted.outcome(), RunOutcome::Aborted);
+        assert_eq!(
+            TurnStatus::Failed.outcome(),
+            RunOutcome::Failed(std::process::ExitCode::FAILURE)
+        );
+        assert_eq!(
+            TurnStatus::InProgress.outcome(),
+            RunOutcome::Failed(std::process::ExitCode::FAILURE)
+        );
     }
 
     #[test]
