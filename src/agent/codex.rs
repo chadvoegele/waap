@@ -88,6 +88,28 @@ struct CodexRunConfig {
     reasoning_effort: Option<ReasoningEffort>,
 }
 
+fn get_codex_reasoning_effort_from_env() -> io::Result<Option<ReasoningEffort>> {
+    match env::var("CODEX_REASONING_EFFORT") {
+        Ok(value) => ReasoningEffort::parse(&value).map(Some).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "invalid CODEX_REASONING_EFFORT {value:?}; accepted values: {}",
+                    ReasoningEffort::labels().join(", ")
+                ),
+            )
+        }),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "invalid CODEX_REASONING_EFFORT; accepted values: {}",
+                ReasoningEffort::labels().join(", ")
+            ),
+        )),
+    }
+}
+
 fn get_codex_run_config(options: &AgentRunOptions) -> io::Result<CodexRunConfig> {
     let model = options.model.clone().or_else(|| {
         env::var("CODEX_MODEL")
@@ -96,27 +118,7 @@ fn get_codex_run_config(options: &AgentRunOptions) -> io::Result<CodexRunConfig>
     });
     let reasoning_effort = match options.reasoning_effort {
         Some(effort) => Some(effort),
-        None => match env::var("CODEX_REASONING_EFFORT") {
-            Ok(value) => Some(ReasoningEffort::parse(&value).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "invalid CODEX_REASONING_EFFORT {value:?}; accepted values: {}",
-                        ReasoningEffort::labels().join(", ")
-                    ),
-                )
-            })?),
-            Err(env::VarError::NotPresent) => None,
-            Err(env::VarError::NotUnicode(_)) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "invalid CODEX_REASONING_EFFORT; accepted values: {}",
-                        ReasoningEffort::labels().join(", ")
-                    ),
-                ));
-            }
-        },
+        None => get_codex_reasoning_effort_from_env()?,
     };
     Ok(CodexRunConfig {
         model,
