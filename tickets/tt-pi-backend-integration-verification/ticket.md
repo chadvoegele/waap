@@ -1,7 +1,7 @@
 +++
 name = "Pi backend integration verification"
 creation_date = 2026-08-07T17:19:55Z
-status = "pending"
+status = "in-progress"
 depends_on = ["tt-pi-rpc-agent-backend"]
 +++
 
