@@ -84,9 +84,9 @@ waap agent run --agent-id aa-12345678
 
 This is a deliberate behavior change and requires an installed, authenticated
 Pi CLI unless the operator explicitly selects another system. Existing records
-with `system` remain unchanged. Legacy running records with no `system` must
-still use OpenCode during `agent stop`; do not couple that compatibility
-fallback to the new run default.
+with `system` remain unchanged. `agent stop` must reject a `running` record with
+no persisted `system`, leave it `running`, and report invalid metadata; do not
+guess a backend.
 
 ### Run options
 
@@ -389,8 +389,9 @@ Cover:
 Extend backend/lifecycle tests to include `AgentSystem::Pi` for:
 
 - enum parsing, labels, and frontmatter validation;
-- omitted `--system` selecting Pi while legacy missing-system stop records still
-  select OpenCode;
+- omitted `--system` selecting Pi;
+- stopping a `running` record with no `system` failing without resolving a
+  backend or changing state;
 - backend construction and type selection;
 - common prompt and worktree context;
 - session commit ordering;
@@ -424,7 +425,8 @@ default test suite.
   to `RunOutcome::Aborted`.
 - `src/agent/run.rs`: handle aborted outcomes idempotently and return exit 1
   without a transition error.
-- `src/agent/stop.rs`: reuse the idempotent aborted transition.
+- `src/agent/stop.rs`: reuse the idempotent aborted transition and reject
+  running records with no persisted system.
 - `src/cli.rs`: make Pi the `agent run` default and update `--model` and
   `--reasoning-effort` help and ownership.
 - `README.md` and `.agents/skills/waap/SKILL.md`: document the new system and
@@ -470,7 +472,8 @@ commit a precondition for task execution.
 ## Implementation checklist
 
 - [ ] Add `pi` to CLI and frontmatter system values and make it the run
-      default without changing legacy missing-system stop behavior.
+      default.
+- [ ] Reject stop requests for running records with no persisted system.
 - [ ] Accept shared model/reasoning options, map Pi values, and validate
       option ownership.
 - [ ] Spawn direct `pi --mode rpc` in the agent worktree.
