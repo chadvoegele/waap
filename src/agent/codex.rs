@@ -12,6 +12,7 @@ use super::backend::{
 };
 use super::{AgentRunOptions, ReasoningEffort};
 
+#[derive(Default)]
 pub(super) struct CodexBackend {
     config: CodexRunConfig,
 }
@@ -21,12 +22,6 @@ impl CodexBackend {
         Ok(Self {
             config: codex_run_config_from_env(options)?,
         })
-    }
-
-    pub(super) fn for_abort() -> Self {
-        Self {
-            config: CodexRunConfig::default(),
-        }
     }
 }
 

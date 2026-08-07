@@ -343,7 +343,7 @@ impl AgentSystem {
             AgentSystem::Claude => Ok(Box::new(claude::ClaudeBackend::from_env())),
             AgentSystem::Codex => match options {
                 Some(options) => Ok(Box::new(codex::CodexBackend::from_env(options)?)),
-                None => Ok(Box::new(codex::CodexBackend::for_abort())),
+                None => Ok(Box::new(codex::CodexBackend::default())),
             },
         }
     }
