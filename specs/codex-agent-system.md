@@ -63,7 +63,7 @@ Config:
 ```rust
 pub(crate) struct CodexRunConfig {
     pub(crate) model: Option<String>,
-    pub(crate) reasoning_effort: Option<CodexReasoningEffort>,
+    pub(crate) reasoning_effort: Option<ReasoningEffort>,
 }
 ```
 

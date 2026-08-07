@@ -117,7 +117,7 @@ fn stop_agent_if_running(waap_root: &Path, agent_id: &str) -> io::Result<Option<
 
     if report.metadata.session_id.is_some() {
         let system = report.metadata.system.clone().unwrap_or_default();
-        let mut backend = system.backend()?;
+        let mut backend = system.backend(None)?;
         return stop_agent_with_backend(waap_root, agent_id, backend.as_mut());
     }
 

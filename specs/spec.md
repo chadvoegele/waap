@@ -241,15 +241,6 @@ Frontmatter is validated strictly: unknown fields outside the documented agent a
 
 Agents can be run with different agent systems, selected with `waap agent run --system`. The chosen system and the resulting session id are recorded in the agent metadata.
 
-Codex runs accept optional per-run `--model` and `--reasoning-effort` values:
-
-```sh
-waap agent run --agent-id aa-1234abcd --system codex \
-  --model gpt-5.4 --reasoning-effort high
-```
-
-The flags override `CODEX_MODEL` and `CODEX_REASONING_EFFORT`, respectively. When a flag and its environment fallback are both absent, Codex uses its configured default. Accepted efforts are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`. The flags are rejected for OpenCode and Claude.
-
 ### Worktree Lifecycle
 
 `waap agent run` owns the agent worktree lifecycle. It first commits the agent's `running` status and chosen system to `main`, then creates an isolated git worktree at `worktrees/$agent_id` (a fresh branch named after the agent). Worktree and integration policy belong to the editable detailed agent instructions. Finally, the worktree is removed.

@@ -39,7 +39,7 @@ pub(crate) fn run_agent(
     options: &AgentRunOptions,
 ) -> io::Result<ExitCode> {
     require_ready_agent(waap_root, agent_id)?;
-    let mut backend = system.run_backend(options)?;
+    let mut backend = system.backend(Some(options))?;
     run_agent_with_backend(
         repository_root,
         waap_root,
@@ -374,8 +374,8 @@ mod tests {
     use crate::agent::backend::{fake::FakeBackend, RunOutcome};
     use crate::agent::{
         agent_report_json, read_agent_record, transition_agent_status, write_agent_record,
-        AgentMetadata, AgentReport, AgentRunOptions, AgentStatus, AgentSystem,
-        CodexReasoningEffort, CODEX_ENV_LOCK,
+        AgentMetadata, AgentReport, AgentRunOptions, AgentStatus, AgentSystem, ReasoningEffort,
+        CODEX_ENV_LOCK,
     };
     use crate::cli::OutputFormat;
     use crate::git::{create_worktree, remove_worktree};
@@ -668,7 +668,7 @@ mod tests {
             },
             AgentRunOptions {
                 model: None,
-                reasoning_effort: Some(CodexReasoningEffort::High),
+                reasoning_effort: Some(ReasoningEffort::High),
             },
         ];
 

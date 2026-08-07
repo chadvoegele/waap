@@ -10,7 +10,7 @@ use serde_json::{json, Value as JsonValue};
 use super::backend::{
     AbortContext, AgentSystemBackend, RunHandle, RunOutcome, StartContext, StartedRun,
 };
-use super::{AgentRunOptions, CodexReasoningEffort};
+use super::{AgentRunOptions, ReasoningEffort};
 
 pub(super) struct CodexBackend {
     config: CodexRunConfig,
@@ -90,7 +90,7 @@ const SANDBOX_DANGER_FULL_ACCESS: &str = "danger-full-access";
 #[derive(Debug, Default, PartialEq, Eq)]
 struct CodexRunConfig {
     model: Option<String>,
-    reasoning_effort: Option<CodexReasoningEffort>,
+    reasoning_effort: Option<ReasoningEffort>,
 }
 
 fn codex_run_config_from_env(options: &AgentRunOptions) -> io::Result<CodexRunConfig> {
@@ -102,12 +102,12 @@ fn codex_run_config_from_env(options: &AgentRunOptions) -> io::Result<CodexRunCo
     let reasoning_effort = match options.reasoning_effort {
         Some(effort) => Some(effort),
         None => match env::var("CODEX_REASONING_EFFORT") {
-            Ok(value) => Some(CodexReasoningEffort::parse(&value).ok_or_else(|| {
+            Ok(value) => Some(ReasoningEffort::parse(&value).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
                         "invalid CODEX_REASONING_EFFORT {value:?}; accepted values: {}",
-                        CodexReasoningEffort::labels().join(", ")
+                        ReasoningEffort::labels().join(", ")
                     ),
                 )
             })?),
@@ -117,7 +117,7 @@ fn codex_run_config_from_env(options: &AgentRunOptions) -> io::Result<CodexRunCo
                     io::ErrorKind::InvalidInput,
                     format!(
                         "invalid CODEX_REASONING_EFFORT; accepted values: {}",
-                        CodexReasoningEffort::labels().join(", ")
+                        ReasoningEffort::labels().join(", ")
                     ),
                 ));
             }
@@ -196,7 +196,7 @@ fn turn_start_params(
     thread_id: &str,
     prompt: &str,
     model: Option<&str>,
-    reasoning_effort: Option<CodexReasoningEffort>,
+    reasoning_effort: Option<ReasoningEffort>,
 ) -> JsonValue {
     let mut params = json!({
         "threadId": thread_id,
@@ -271,7 +271,7 @@ struct CodexClient<R, W, O> {
     out: O,
     next_id: i64,
     model: Option<String>,
-    reasoning_effort: Option<CodexReasoningEffort>,
+    reasoning_effort: Option<ReasoningEffort>,
 }
 
 fn spawn_codex_app_server(
@@ -574,7 +574,7 @@ mod tests {
             "th_1",
             "do the thing",
             Some("gpt-5.4"),
-            Some(CodexReasoningEffort::High),
+            Some(ReasoningEffort::High),
         );
 
         assert_eq!(params["threadId"], json!("th_1"));
@@ -597,8 +597,7 @@ mod tests {
     #[test]
     fn turn_start_params_support_model_and_effort_independently() {
         let model_only = turn_start_params("th", "prompt", Some("gpt-5.4"), None);
-        let effort_only =
-            turn_start_params("th", "prompt", None, Some(CodexReasoningEffort::Ultra));
+        let effort_only = turn_start_params("th", "prompt", None, Some(ReasoningEffort::Ultra));
 
         assert_eq!(model_only["model"], json!("gpt-5.4"));
         assert!(model_only.get("effort").is_none());
@@ -617,23 +616,23 @@ mod tests {
         let fallback = codex_run_config_from_env(&AgentRunOptions::default()).unwrap();
         let overrides = codex_run_config_from_env(&AgentRunOptions {
             model: Some("cli-model".to_string()),
-            reasoning_effort: Some(CodexReasoningEffort::High),
+            reasoning_effort: Some(ReasoningEffort::High),
         })
         .unwrap();
         env::set_var("CODEX_REASONING_EFFORT", "invalid-but-overridden");
         let invalid_override = codex_run_config_from_env(&AgentRunOptions {
             model: None,
-            reasoning_effort: Some(CodexReasoningEffort::Max),
+            reasoning_effort: Some(ReasoningEffort::Max),
         })
         .unwrap();
 
         assert_eq!(fallback.model.as_deref(), Some("env-model"));
-        assert_eq!(fallback.reasoning_effort, Some(CodexReasoningEffort::Low));
+        assert_eq!(fallback.reasoning_effort, Some(ReasoningEffort::Low));
         assert_eq!(overrides.model.as_deref(), Some("cli-model"));
-        assert_eq!(overrides.reasoning_effort, Some(CodexReasoningEffort::High));
+        assert_eq!(overrides.reasoning_effort, Some(ReasoningEffort::High));
         assert_eq!(
             invalid_override.reasoning_effort,
-            Some(CodexReasoningEffort::Max)
+            Some(ReasoningEffort::Max)
         );
 
         match previous_model {
@@ -653,7 +652,7 @@ mod tests {
         let previous_effort = env::var_os("CODEX_REASONING_EFFORT");
         env::remove_var("CODEX_MODEL");
 
-        for expected in CodexReasoningEffort::value_variants() {
+        for expected in ReasoningEffort::value_variants() {
             env::set_var("CODEX_REASONING_EFFORT", expected.as_str());
             let config = codex_run_config_from_env(&AgentRunOptions::default()).unwrap();
             assert_eq!(config.reasoning_effort, Some(*expected));
@@ -664,7 +663,7 @@ mod tests {
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
             let message = error.to_string();
             assert!(message.contains("CODEX_REASONING_EFFORT"));
-            for accepted in CodexReasoningEffort::labels() {
+            for accepted in ReasoningEffort::labels() {
                 assert!(message.contains(accepted));
             }
         }

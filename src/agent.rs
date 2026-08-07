@@ -259,7 +259,7 @@ pub(crate) enum AgentSystem {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub(crate) enum CodexReasoningEffort {
+pub(crate) enum ReasoningEffort {
     None,
     Minimal,
     Low,
@@ -270,7 +270,7 @@ pub(crate) enum CodexReasoningEffort {
     Ultra,
 }
 
-impl CodexReasoningEffort {
+impl ReasoningEffort {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::None => "none",
@@ -302,52 +302,49 @@ impl CodexReasoningEffort {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct AgentRunOptions {
     pub(crate) model: Option<String>,
-    pub(crate) reasoning_effort: Option<CodexReasoningEffort>,
+    pub(crate) reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl AgentSystem {
-    fn backend(&self) -> io::Result<Box<dyn backend::AgentSystemBackend>> {
-        match self {
-            AgentSystem::Opencode => Ok(Box::new(opencode::OpencodeBackend::from_env()?)),
-            AgentSystem::Claude => Ok(Box::new(claude::ClaudeBackend::from_env())),
-            AgentSystem::Codex => Ok(Box::new(codex::CodexBackend::for_abort())),
-        }
-    }
-
-    fn run_backend(
+    fn backend(
         &self,
-        options: &AgentRunOptions,
+        options: Option<&AgentRunOptions>,
     ) -> io::Result<Box<dyn backend::AgentSystemBackend>> {
-        if options
-            .model
-            .as_deref()
-            .is_some_and(|model| model.trim().is_empty())
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "model must not be empty",
-            ));
-        }
-        if self != &AgentSystem::Codex {
-            let option = if options.model.is_some() {
-                Some("--model")
-            } else if options.reasoning_effort.is_some() {
-                Some("--reasoning-effort")
-            } else {
-                None
-            };
-            if let Some(option) = option {
+        if let Some(options) = options {
+            if options
+                .model
+                .as_deref()
+                .is_some_and(|model| model.trim().is_empty())
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("{option} is only supported with --system codex"),
+                    "model must not be empty",
                 ));
+            }
+            if self != &AgentSystem::Codex {
+                let option = if options.model.is_some() {
+                    Some("--model")
+                } else if options.reasoning_effort.is_some() {
+                    Some("--reasoning-effort")
+                } else {
+                    None
+                };
+                if let Some(option) = option {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("{option} is only supported with --system codex"),
+                    ));
+                }
             }
         }
 
         match self {
             AgentSystem::Opencode => Ok(Box::new(opencode::OpencodeBackend::from_env()?)),
             AgentSystem::Claude => Ok(Box::new(claude::ClaudeBackend::from_env())),
-            AgentSystem::Codex => Ok(Box::new(codex::CodexBackend::from_env(options)?)),
+            AgentSystem::Codex => match options {
+                Some(options) => Ok(Box::new(codex::CodexBackend::from_env(options)?)),
+                None => Ok(Box::new(codex::CodexBackend::for_abort())),
+            },
         }
     }
 
@@ -578,7 +575,7 @@ mod tests {
             (AgentSystem::Claude, "agent::claude::ClaudeBackend"),
             (AgentSystem::Codex, "agent::codex::CodexBackend"),
         ] {
-            let backend = system.backend().unwrap();
+            let backend = system.backend(None).unwrap();
             assert!(backend.type_name().ends_with(expected_type));
         }
 
@@ -604,8 +601,8 @@ mod tests {
             env::remove_var(name);
         }
 
-        AgentSystem::Claude.backend().unwrap();
-        AgentSystem::Codex.backend().unwrap();
+        AgentSystem::Claude.backend(None).unwrap();
+        AgentSystem::Codex.backend(None).unwrap();
 
         for (name, value) in names.into_iter().zip(previous) {
             if let Some(value) = value {
@@ -615,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_run_backend_does_not_require_opencode_environment() {
+    fn codex_backend_for_run_does_not_require_opencode_environment() {
         let _opencode_lock = OPENCODE_ENV_LOCK.lock().unwrap();
         let _codex_lock = CODEX_ENV_LOCK.lock().unwrap();
         let opencode_names = [
@@ -632,7 +629,7 @@ mod tests {
         env::remove_var("CODEX_REASONING_EFFORT");
 
         AgentSystem::Codex
-            .run_backend(&AgentRunOptions::default())
+            .backend(Some(&AgentRunOptions::default()))
             .unwrap();
 
         for (name, value) in opencode_names.into_iter().zip(previous_opencode) {

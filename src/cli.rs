@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::agent::{AgentStatus, AgentSystem, CodexReasoningEffort};
+use crate::agent::{AgentStatus, AgentSystem, ReasoningEffort};
 use crate::ticket::TicketStatus;
 
 #[derive(Debug, Parser)]
@@ -72,7 +72,7 @@ pub(crate) enum AgentCommand {
 
         /// Codex reasoning effort for this run (overrides CODEX_REASONING_EFFORT).
         #[arg(long, value_enum)]
-        reasoning_effort: Option<CodexReasoningEffort>,
+        reasoning_effort: Option<ReasoningEffort>,
     },
     /// Get an existing agent's metadata and markdown content.
     Get {
@@ -154,7 +154,7 @@ mod tests {
     use clap::Parser;
 
     use super::{AgentCommand, Cli, Command, TicketCommand};
-    use crate::agent::{AgentStatus, AgentSystem, CodexReasoningEffort};
+    use crate::agent::{AgentStatus, AgentSystem, ReasoningEffort};
     use crate::cli::OutputFormat;
     use crate::ticket::TicketStatus;
 
@@ -565,7 +565,7 @@ mod tests {
             Command::Agent {
                 command: AgentCommand::Run {
                     model: Some(model),
-                    reasoning_effort: Some(CodexReasoningEffort::High),
+                    reasoning_effort: Some(ReasoningEffort::High),
                     ..
                 }
             } if model == "gpt-5.4"
@@ -610,7 +610,7 @@ mod tests {
             Command::Agent {
                 command: AgentCommand::Run {
                     model: None,
-                    reasoning_effort: Some(CodexReasoningEffort::Ultra),
+                    reasoning_effort: Some(ReasoningEffort::Ultra),
                     ..
                 }
             }
