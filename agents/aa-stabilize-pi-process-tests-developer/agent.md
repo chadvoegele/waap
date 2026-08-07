@@ -1,7 +1,8 @@
 +++
 name = "stabilize-pi-process-tests-developer"
 creation_date = 2026-08-07T17:58:28Z
-status = "ready"
+status = "running"
+system = "codex"
 +++
 
 # Purpose
