@@ -86,46 +86,39 @@ Add `AgentSystem::Pi` with the stable label `"pi"`. This enables:
 waap agent run --agent-id aa-12345678 --system pi
 ```
 
-and persisted frontmatter:
+and persisted frontmatter in the canonical
+`${waap_data}/agents/<agent-id>/agent.md` record on WAAP's state branch:
 
 ```toml
 system = "pi"
 session_id = "019fdcce-5d74-7a54-8139-ce66c24dd93f"
 ```
 
-The default system remains `opencode`.
+The session ID is metadata, not part of the instruction body or agent worktree
+copy. The default system remains `opencode`.
 
 ### Run options
 
-Pi and Codex both accept `--model`; the option help must no longer call it
-Codex-only. The selected backend interprets the value:
+Pi and Codex both accept the existing `--model` and `--reasoning-effort`
+options; their help must no longer call them Codex-only. The selected backend
+interprets each value:
 
 ```bash
 waap agent run --agent-id aa-12345678 --system pi \
-  --model openai-codex/gpt-5.6-sol --thinking high
+  --model openai-codex/gpt-5.6-sol --reasoning-effort high
 ```
 
-Add a Pi-only `--thinking` option with these values:
-
-- `off`
-- `minimal`
-- `low`
-- `medium`
-- `high`
-- `xhigh`
-- `max`
-
-Keep `--reasoning-effort` Codex-only. Reject unsupported option/system
-combinations before changing agent state:
+Reject unsupported option/system combinations before changing agent state:
 
 | Option | OpenCode | Claude | Codex | Pi |
 | --- | --- | --- | --- | --- |
 | `--model` | reject | reject | accept | accept |
-| `--reasoning-effort` | reject | reject | accept | reject |
-| `--thinking` | reject | reject | reject | accept |
+| `--reasoning-effort` | reject | reject | accept | accept except `ultra` |
 
-Add `PiThinkingLevel` rather than reusing `ReasoningEffort`; Pi says `off`,
-while Codex says `none`, and Codex currently accepts `ultra` while Pi does not.
+Reuse `ReasoningEffort`. Pi's child CLI calls the setting `--thinking`, so map
+WAAP's `none` to Pi's `off`; map `minimal` through `max` directly; reject
+`ultra` for Pi before changing agent state. Codex retains its existing values
+and behavior.
 
 ### Environment
 
@@ -135,7 +128,7 @@ Use WAAP-prefixed variables to avoid confusing Pi's session metadata variables:
 | --- | --- |
 | `WAAP_PI_BIN` | Pi executable; default `pi` |
 | `WAAP_PI_MODEL` | Optional Pi model; overridden by `--model` |
-| `WAAP_PI_THINKING` | Optional Pi thinking level; overridden by `--thinking` |
+| `WAAP_PI_REASONING_EFFORT` | Optional reasoning effort; CLI overrides it; translated to Pi `--thinking` |
 
 Do not use `PI_MODEL` or `PI_REASONING_LEVEL` as configuration. Pi injects
 those variables into commands to describe the current session, and WAAP may
@@ -150,13 +143,16 @@ Before spawning the child, remove inherited parent-session metadata:
 - `PI_REASONING_LEVEL`
 
 Preserve `HOME`, `PI_CODING_AGENT_DIR`, provider credentials, proxy variables,
-CA settings, and the rest of the environment. Never place API keys on the
-command line.
+CA settings, and the rest of the environment. Pi normally reads auth, settings,
+models, extensions, skills, and sessions from `~/.pi/agent`; the
+`PI_CODING_AGENT_DIR` override replaces that directory. In dockerops, the host
+`~/.pi` is mounted at `/home/piweb/.pi`. Never place API keys on the command
+line.
 
-Invalid `WAAP_PI_MODEL`, `WAAP_PI_THINKING`, or CLI values must fail before the
-agent enters `running`. Stop operations construct a configuration-free Pi
-backend, as Codex stop does, so an invalid run-only environment cannot prevent
-stopping an existing agent.
+Invalid `WAAP_PI_MODEL`, `WAAP_PI_REASONING_EFFORT`, or CLI values must fail
+before the agent enters `running`. Stop operations construct a
+configuration-free Pi backend, as Codex stop does, so invalid run-only
+configuration cannot prevent stopping an existing agent.
 
 ## Pi process invocation
 
@@ -371,7 +367,7 @@ do not call a model provider.
 Cover:
 
 - command construction, cwd, inherited environment, and parent `PI_*` removal;
-- CLI-over-environment model and thinking precedence;
+- CLI-over-environment model and reasoning-effort precedence, including Pi value mapping;
 - invalid Pi options failing before `running`;
 - `get_state` session extraction before prompt submission;
 - shared session persistence occurring before `prompt` is written;
@@ -421,7 +417,7 @@ default test suite.
 - `src/agent/backend.rs`: host a shared owner-signal helper if factored from
   Codex.
 - `src/agent/codex.rs`: reuse the shared signal helper.
-- `src/cli.rs`: update `--model` help and add Pi-only `--thinking`.
+- `src/cli.rs`: update `--model` and `--reasoning-effort` help and ownership.
 - `src/agent/run.rs`: no production lifecycle redesign; extend focused tests as
   needed.
 - `src/agent/stop.rs`: no production redesign; extend system coverage.
@@ -475,7 +471,8 @@ commit a precondition for task execution.
 
 - [ ] Add `pi` to CLI and frontmatter system values without changing the
       default.
-- [ ] Add Pi-specific thinking configuration and validate option ownership.
+- [ ] Accept shared model/reasoning options, map Pi values, and validate
+      option ownership.
 - [ ] Spawn direct `pi --mode rpc` in the agent worktree.
 - [ ] Implement strict LF JSONL parsing and correlated responses.
 - [ ] Obtain and persist `get_state.data.sessionId` before prompting.
