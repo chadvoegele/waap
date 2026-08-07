@@ -262,6 +262,10 @@ claude -p \
   "Complete when instructions in ${repository_root}/.waap/agents/${agent_id}/agent.md are satisfied"
 ```
 
+### codex
+
+Codex runs through `codex app-server --stdio`. The resolved model is sent in both `thread/start.model` and `turn/start.model`. The resolved effort is sent only in `turn/start.effort`; unset fields are omitted.
+
 ## waap Skill
 
 In addition to the CLI, waap also includes an agent skill that tells a (non-waap spawned) agent how to interact with waap. The skill includes a CLI reference as well as instructions to be passed to the waap agents.

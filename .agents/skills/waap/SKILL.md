@@ -169,6 +169,19 @@ waap agent run --agent-id aa-1234abcd --system codex
 waap agent run --agent-id aa-1234abcd --system opencode
 ```
 
+Set a Codex model and reasoning effort for one run:
+
+```sh
+waap agent run --agent-id aa-1234abcd --system codex \
+  --model gpt-5.4 --reasoning-effort high
+```
+
+`--model` and `--reasoning-effort` override `CODEX_MODEL` and
+`CODEX_REASONING_EFFORT`. Accepted efforts are `none`, `minimal`, `low`,
+`medium`, `high`, `xhigh`, `max`, and `ultra`. Both options are Codex-only;
+when neither an option nor its environment fallback is set, Codex uses its
+configured default.
+
 For OpenCode, set `OPENCODE_SERVER_URL`, `OPENCODE_SERVER_USERNAME`, `OPENCODE_SERVER_PASSWORD`, and `OPENCODE_SERVER_MODEL`. The model accepts `provider/model` or `provider/model/variant`; recognized variants are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 
 Update agent status:

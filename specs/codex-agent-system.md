@@ -62,7 +62,8 @@ Config:
 
 ```rust
 pub(crate) struct CodexRunConfig {
-    pub(crate) model: Option<String>,   // from CODEX_MODEL (optional)
+    pub(crate) model: Option<String>,
+    pub(crate) reasoning_effort: Option<ReasoningEffort>,
 }
 ```
 
@@ -173,14 +174,17 @@ and pass that `cwd` to `thread/start` so the model's tools operate there.
 `CODEX_HOME` (auth/config/sessions, default `~/.codex`) is inherited from the
 environment, is not the worktree, and is neither set nor relocated by waap.
 
-## 7. Config / env
+## 7. Run options and environment
 
-- **Model:** `CODEX_MODEL`, mirroring `CLAUDE_MODEL`.
-`codex_run_config_from_env` reads it with
-`env::var("CODEX_MODEL").ok().filter(|m| !m.is_empty())`; when set, pass it as
-the `model` field on `thread/start`/`turn/start`, else use codex's default.
+- `--model` overrides optional `CODEX_MODEL`. The resolved model is sent as
+  `thread/start.model` and `turn/start.model`.
+- `--reasoning-effort` overrides optional `CODEX_REASONING_EFFORT`. Accepted
+  values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and
+  `ultra`. The resolved value is sent only as `turn/start.effort`.
+- Unset fields are omitted so Codex uses its configured defaults. These flags
+  are Codex-only and are rejected for OpenCode and Claude before agent state is
+  changed.
 - **Auth:** codex auth (API key or prior `codex login`) is an operator
-precondition for `--system codex`, as claude assumes its own auth.
-`codex_run_config_from_env` has no required vars, so it never fails for missing
-config; a misconfigured environment surfaces as an `initialize`/`thread/start`
-error and the agent is left `running`.
+  precondition for `--system codex`, as claude assumes its own auth.
+Missing environment configuration is valid. An invalid
+`CODEX_REASONING_EFFORT` is rejected before the agent is marked running.
