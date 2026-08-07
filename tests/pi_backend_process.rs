@@ -100,6 +100,23 @@ fn write_executable(path: &Path, body: &str) {
     fs::set_permissions(path, permissions).unwrap();
 }
 
+fn write_pi_script(path: &Path, body: &str) {
+    fs::write(
+        path,
+        format!("set -eu\nprintf '%s' \"$$\" > \"$WAAP_FAKE_PID\"\n{body}\n"),
+    )
+    .unwrap();
+}
+
+fn fake_pi_runner() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-pi-runner")
+}
+
+fn assert_reaped(pid_file: &Path) {
+    let pid = fs::read_to_string(pid_file).unwrap();
+    assert!(!Path::new("/proc").join(pid).exists());
+}
+
 fn wait_for(description: &str, condition: impl Fn() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !condition() {
@@ -136,12 +153,11 @@ fn omitted_system_runs_fake_pi_after_authentic_session_is_persisted() {
     let project = Project::new();
     let agent_id = project.create_agent("pi-process-success");
     let fake = project.root.join("fake-pi-success");
+    let pid = project.root.join("fake-pi-success.pid");
     let snapshot = project.root.join("prompt-state");
-    write_executable(
+    write_pi_script(
         &fake,
-        r#"#!/bin/sh
-set -eu
-IFS= read -r state
+        r#"IFS= read -r state
 printf '%s\n' '{"type":"response","id":"waap-1","command":"get_state","success":true,"data":{"sessionId":"pi-process-session"}}'
 IFS= read -r prompt
 cp "$WAAP_FAKE_RECORD" "$WAAP_FAKE_SNAPSHOT"
@@ -157,7 +173,9 @@ while IFS= read -r ignored; do :; done
     let output = project
         .command()
         .args(["agent", "run", "--agent-id", &agent_id])
-        .env("WAAP_PI_BIN", &fake)
+        .env("WAAP_PI_BIN", fake_pi_runner())
+        .env("WAAP_FAKE_PI_SCRIPT", &fake)
+        .env("WAAP_FAKE_PID", &pid)
         .env("WAAP_FAKE_RECORD", project.agent_record(&agent_id))
         .env("WAAP_FAKE_SNAPSHOT", &snapshot)
         .output()
@@ -176,6 +194,7 @@ while IFS= read -r ignored; do :; done
     assert!(subjects.contains(&format!("waap agent run {agent_id}")));
     assert!(subjects.contains(&format!("waap agent pi session {agent_id}")));
     assert!(subjects.contains(&format!("waap agent completed {agent_id}")));
+    assert_reaped(&pid);
 }
 
 #[test]
@@ -183,11 +202,10 @@ fn fake_pi_failure_exits_nonzero_persists_failed_and_cleans_worktree() {
     let project = Project::new();
     let agent_id = project.create_agent("pi-process-failure");
     let fake = project.root.join("fake-pi-failure");
-    write_executable(
+    let pid = project.root.join("fake-pi-failure.pid");
+    write_pi_script(
         &fake,
-        r#"#!/bin/sh
-set -eu
-IFS= read -r state
+        r#"IFS= read -r state
 printf '%s\n' '{"type":"response","id":"waap-1","command":"get_state","success":true,"data":{"sessionId":"pi-failed-session"}}'
 IFS= read -r prompt
 printf '%s\n' '{"type":"response","id":"waap-2","command":"prompt","success":true}'
@@ -200,13 +218,16 @@ while IFS= read -r ignored; do :; done
     let output = project
         .command()
         .args(["agent", "run", "--agent-id", &agent_id, "--system", "pi"])
-        .env("WAAP_PI_BIN", fake)
+        .env("WAAP_PI_BIN", fake_pi_runner())
+        .env("WAAP_FAKE_PI_SCRIPT", fake)
+        .env("WAAP_FAKE_PID", &pid)
         .output()
         .unwrap();
 
     assert!(!output.status.success());
     assert_record(&project, &agent_id, "failed", "pi", "pi-failed-session");
     assert!(!project.worktree(&agent_id).exists());
+    assert_reaped(&pid);
 }
 
 #[test]
@@ -214,13 +235,12 @@ fn stop_signals_pi_owner_sends_rpc_abort_and_both_converge() {
     let project = Project::new();
     let agent_id = project.create_agent("pi-process-abort");
     let fake = project.root.join("fake-pi-abort");
+    let pid = project.root.join("fake-pi-abort.pid");
     let log = project.root.join("pi-commands");
     let ready = project.root.join("pi-ready");
-    write_executable(
+    write_pi_script(
         &fake,
-        r#"#!/bin/sh
-set -eu
-while IFS= read -r line; do
+        r#"while IFS= read -r line; do
   printf '%s\n' "$line" >> "$WAAP_FAKE_LOG"
   case "$line" in
     *'"type":"get_state"'*)
@@ -242,7 +262,9 @@ done
     let runner = project
         .command()
         .args(["agent", "run", "--agent-id", &agent_id, "--system", "pi"])
-        .env("WAAP_PI_BIN", fake)
+        .env("WAAP_PI_BIN", fake_pi_runner())
+        .env("WAAP_FAKE_PI_SCRIPT", fake)
+        .env("WAAP_FAKE_PID", &pid)
         .env("WAAP_FAKE_LOG", &log)
         .env("WAAP_FAKE_READY", &ready)
         .stdout(Stdio::piped())
@@ -266,6 +288,7 @@ done
         1
     );
     assert!(!project.worktree(&agent_id).exists());
+    assert_reaped(&pid);
 }
 
 #[test]

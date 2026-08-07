@@ -631,7 +631,6 @@ fn read_jsonl_record(reader: &mut impl BufRead) -> io::Result<Option<JsonValue>>
 mod tests {
     use std::fs;
     use std::io::{Cursor, Read};
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
@@ -665,19 +664,31 @@ mod tests {
 
     fn fake_script(dir: &Path, body: &str) -> PathBuf {
         let path = dir.join("fake-pi");
-        fs::write(&path, format!("#!/bin/sh\nset -eu\n{body}\n")).unwrap();
-        let mut permissions = fs::metadata(&path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&path, permissions).unwrap();
+        fs::write(
+            &path,
+            format!("set -eu\nprintf '%s' \"$$\" > \"$0.pid\"\n{body}\n"),
+        )
+        .unwrap();
         path
     }
 
-    fn fake_config(executable: PathBuf) -> PiRunConfig {
+    fn fake_config(script: &Path) -> PiRunConfig {
+        assert_eq!(
+            script.file_name().and_then(|name| name.to_str()),
+            Some("fake-pi")
+        );
         PiRunConfig {
-            executable: executable.into_os_string(),
+            executable: Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/fake-pi-runner")
+                .into_os_string(),
             command_timeout: Duration::from_secs(2),
             ..PiRunConfig::default()
         }
+    }
+
+    fn assert_fake_child_reaped(script: &Path) {
+        let pid = fs::read_to_string(format!("{}.pid", script.display())).unwrap();
+        assert!(!Path::new("/proc").join(pid).exists());
     }
 
     fn context<'a>(dir: &'a Path, prompt: &'a str) -> StartContext<'a> {
@@ -891,7 +902,7 @@ done
         env::set_var("WAAP_TEST_ENV_FILE", &env_file);
         let output = Arc::new(Mutex::new(Vec::new()));
         let started = start_pi_run(
-            &fake_config(script),
+            &fake_config(&script),
             context(dir.path(), "do it"),
             Arc::new(AtomicBool::new(false)),
             Box::new(SharedOutput(Arc::clone(&output))),
@@ -964,7 +975,7 @@ done
         env::set_var("WAAP_TEST_LOG", &log);
         let interrupt = Arc::new(AtomicBool::new(false));
         let started = start_pi_run(
-            &fake_config(script),
+            &fake_config(&script),
             context(dir.path(), "stop"),
             Arc::clone(&interrupt),
             Box::new(io::sink()),
@@ -975,6 +986,7 @@ done
         assert_eq!(started.handle.wait().unwrap(), RunOutcome::Aborted);
         let commands = fs::read_to_string(log).unwrap();
         assert_eq!(commands.matches("\"type\":\"abort\"").count(), 1);
+        assert_fake_child_reaped(&script);
         env::remove_var("WAAP_TEST_LOG");
     }
 
@@ -990,26 +1002,33 @@ id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
 printf '{"type":"response","id":"%s","command":"prompt","success":false,"error":"rejected"}\n' "$id""#,
                 io::ErrorKind::Other,
             ),
-            ("printf '%s\\n' 'not-json'", io::ErrorKind::InvalidData),
-            ("exit 0", io::ErrorKind::UnexpectedEof),
+            (
+                "IFS= read -r line\nprintf '%s\\n' 'not-json'",
+                io::ErrorKind::InvalidData,
+            ),
+            ("IFS= read -r line\nexit 0", io::ErrorKind::UnexpectedEof),
         ] {
             let dir = tempdir().unwrap();
             let script = fake_script(dir.path(), body);
             let result = start_pi_run(
-                &fake_config(script),
+                &fake_config(&script),
                 context(dir.path(), "prompt"),
                 Arc::new(AtomicBool::new(false)),
                 Box::new(io::sink()),
             );
             match result {
-                Ok(started) => assert_eq!(started.handle.wait().unwrap_err().kind(), expected_kind),
-                Err(error) => assert_eq!(error.kind(), expected_kind),
+                Ok(started) => {
+                    let error = started.handle.wait().unwrap_err();
+                    assert_eq!(error.kind(), expected_kind, "{error}");
+                }
+                Err(error) => assert_eq!(error.kind(), expected_kind, "{error}"),
             }
+            assert_fake_child_reaped(&script);
         }
 
         let dir = tempdir().unwrap();
-        let script = fake_script(dir.path(), "sleep 1");
-        let mut config = fake_config(script);
+        let script = fake_script(dir.path(), "IFS= read -r line\nIFS= read -r ignored");
+        let mut config = fake_config(&script);
         config.command_timeout = Duration::from_millis(50);
         let error = match start_pi_run(
             &config,
@@ -1021,6 +1040,7 @@ printf '{"type":"response","id":"%s","command":"prompt","success":false,"error":
             Err(error) => error,
         };
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_fake_child_reaped(&script);
     }
 
     #[test]
@@ -1033,7 +1053,7 @@ id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
 printf '{"type":"response","id":"%s","command":"get_state","success":true,"data":{}}\n' "$id""#,
         );
         let error = match start_pi_run(
-            &fake_config(missing_session),
+            &fake_config(&missing_session),
             context(dir.path(), "prompt"),
             Arc::new(AtomicBool::new(false)),
             Box::new(io::sink()),
@@ -1042,6 +1062,7 @@ printf '{"type":"response","id":"%s","command":"get_state","success":true,"data"
             Err(error) => error,
         };
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_fake_child_reaped(&missing_session);
 
         let dir = tempdir().unwrap();
         let silent_prompt = fake_script(
@@ -1050,9 +1071,9 @@ printf '{"type":"response","id":"%s","command":"get_state","success":true,"data"
 id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
 printf '{"type":"response","id":"%s","command":"get_state","success":true,"data":{"sessionId":"s"}}\n' "$id"
 read line
-sleep 1"#,
+IFS= read -r ignored"#,
         );
-        let mut config = fake_config(silent_prompt);
+        let mut config = fake_config(&silent_prompt);
         config.command_timeout = Duration::from_millis(50);
         let started = start_pi_run(
             &config,
@@ -1065,6 +1086,7 @@ sleep 1"#,
             started.handle.wait().unwrap_err().kind(),
             io::ErrorKind::TimedOut
         );
+        assert_fake_child_reaped(&silent_prompt);
     }
 
     #[test]
@@ -1123,7 +1145,7 @@ while IFS= read -r line; do :; done
         );
         env::set_var("WAAP_TEST_PID_FILE", &pid_file);
         let started = start_pi_run(
-            &fake_config(script),
+            &fake_config(&script),
             context(dir.path(), "never sent"),
             Arc::new(AtomicBool::new(false)),
             Box::new(io::sink()),
