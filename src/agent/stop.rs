@@ -401,14 +401,17 @@ mod tests {
         write_agent_with_session(dir.path(), "aa-00000001", "running", Some("ses_open"));
         write_claude_agent_with_session(dir.path(), "aa-00000002", "running", "ses_claude");
         write_codex_agent_with_session(dir.path(), "aa-00000003", "running", "th_codex");
+        write_pi_agent_with_session(dir.path(), "aa-00000004", "running", "pi_session");
         let mut opencode = FakeBackend::default();
         let mut claude = FakeBackend::default();
         let mut codex = FakeBackend::default();
+        let mut pi = FakeBackend::default();
 
         let reports = [
             stop_agent_with_backend(dir.path(), "aa-00000001", &mut opencode).unwrap(),
             stop_agent_with_backend(dir.path(), "aa-00000002", &mut claude).unwrap(),
             stop_agent_with_backend(dir.path(), "aa-00000003", &mut codex).unwrap(),
+            stop_agent_with_backend(dir.path(), "aa-00000004", &mut pi).unwrap(),
         ]
         .into_iter()
         .flatten()
@@ -416,11 +419,12 @@ mod tests {
 
         assert_eq!(
             agent_ids(&reports),
-            vec!["aa-00000001", "aa-00000002", "aa-00000003"]
+            vec!["aa-00000001", "aa-00000002", "aa-00000003", "aa-00000004"]
         );
         assert_eq!(opencode.abort_calls[0].session_id, "ses_open");
         assert_eq!(claude.abort_calls[0].session_id, "ses_claude");
         assert_eq!(codex.abort_calls[0].session_id, "th_codex");
+        assert_eq!(pi.abort_calls[0].session_id, "pi_session");
     }
 
     #[test]
@@ -635,6 +639,20 @@ mod tests {
             &waap_root.join(format!("agents/{agent_id}/agent.md")),
             &format!(
                 "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"{status}\"\nsession_id = \"{session_id}\"\nsystem = \"codex\"\n+++\n\n# Purpose\n"
+            ),
+        );
+    }
+
+    fn write_pi_agent_with_session(
+        waap_root: &Path,
+        agent_id: &str,
+        status: &str,
+        session_id: &str,
+    ) {
+        write_file(
+            &waap_root.join(format!("agents/{agent_id}/agent.md")),
+            &format!(
+                "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"{status}\"\nsession_id = \"{session_id}\"\nsystem = \"pi\"\n+++\n\n# Purpose\n"
             ),
         );
     }

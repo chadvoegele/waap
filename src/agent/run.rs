@@ -408,7 +408,7 @@ mod tests {
     use crate::agent::{
         agent_report_json, read_agent_record, transition_agent_status, write_agent_record,
         AgentMetadata, AgentReport, AgentRunOptions, AgentStatus, AgentSystem, ReasoningEffort,
-        CODEX_ENV_LOCK,
+        CODEX_ENV_LOCK, PI_ENV_LOCK,
     };
     use crate::cli::OutputFormat;
     use crate::git::{create_worktree, remove_worktree};
@@ -693,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_only_options_are_rejected_before_non_codex_state_changes() {
+    fn pi_and_codex_options_are_rejected_before_other_system_state_changes() {
         let cases = [
             AgentRunOptions {
                 model: Some("gpt-5.4".to_string()),
@@ -725,7 +725,7 @@ mod tests {
                 assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
                 assert!(error
                     .to_string()
-                    .contains("only supported with --system codex"));
+                    .contains("only supported with --system codex or pi"));
                 assert_eq!(
                     read_agent_record(dir.path(), agent_id).unwrap().0.status,
                     "ready"
@@ -770,11 +770,45 @@ mod tests {
     }
 
     #[test]
+    fn invalid_pi_configuration_is_rejected_before_state_changes() {
+        let _lock = PI_ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("WAAP_PI_REASONING_EFFORT");
+        std::env::set_var("WAAP_PI_REASONING_EFFORT", "ultra");
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let agent_id = "aa-00000001";
+        seed_agent_record(dir.path(), agent_id, "ready");
+
+        let error = run_agent(
+            dir.path(),
+            dir.path(),
+            &OutputFormat::Json,
+            agent_id,
+            &AgentSystem::Pi,
+            &AgentRunOptions::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("WAAP_PI_REASONING_EFFORT"));
+        assert_eq!(
+            read_agent_record(dir.path(), agent_id).unwrap().0.status,
+            "ready"
+        );
+        assert!(!dir.path().join(agent_worktree_dir(agent_id)).exists());
+        match previous {
+            Some(value) => std::env::set_var("WAAP_PI_REASONING_EFFORT", value),
+            None => std::env::remove_var("WAAP_PI_REASONING_EFFORT"),
+        }
+    }
+
+    #[test]
     fn run_agent_passes_start_context_after_worktree_creation() {
         for system in [
             AgentSystem::Opencode,
             AgentSystem::Claude,
             AgentSystem::Codex,
+            AgentSystem::Pi,
         ] {
             let dir = tempdir().unwrap();
             init_repo_with_commit(dir.path());
@@ -1386,6 +1420,7 @@ mod tests {
         for (system, session_id) in [
             (AgentSystem::Opencode, "ses_live"),
             (AgentSystem::Codex, "th_live"),
+            (AgentSystem::Pi, "pi_live"),
         ] {
             let dir = tempdir().unwrap();
             init_repo_with_commit(dir.path());

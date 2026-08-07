@@ -8,7 +8,8 @@ use std::sync::Arc;
 use serde_json::{json, Value as JsonValue};
 
 use super::backend::{
-    AbortContext, AgentSystemBackend, RunHandle, RunOutcome, StartContext, StartedRun,
+    signal_agent_run, AbortContext, AgentSystemBackend, RunHandle, RunOutcome, StartContext,
+    StartedRun,
 };
 use super::{AgentRunOptions, ReasoningEffort};
 
@@ -46,7 +47,7 @@ impl AgentSystemBackend for CodexBackend {
     }
 
     fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
-        signal_codex_run(context.agent_id)
+        signal_agent_run(context.agent_id)
     }
 }
 
@@ -120,24 +121,6 @@ fn get_codex_run_config(options: &AgentRunOptions) -> io::Result<CodexRunConfig>
         model,
         reasoning_effort,
     })
-}
-
-fn signal_codex_run(agent_id: &str) -> io::Result<()> {
-    let mut command = ProcessCommand::new("pkill");
-    command
-        .arg("-TERM")
-        .arg("-f")
-        .arg(format!("agent run --agent-id {agent_id}"));
-    map_pkill_status(command)
-}
-
-fn map_pkill_status(mut command: ProcessCommand) -> io::Result<()> {
-    let status = command.status()?;
-    match status.code() {
-        Some(0) | Some(1) => Ok(()),
-        Some(code) => Err(io::Error::other(format!("pkill exited with status {code}"))),
-        None => Err(io::Error::other("pkill terminated by signal")),
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -835,22 +818,5 @@ mod tests {
 
         assert_eq!(status, TurnStatus::Completed);
         assert!(client.writer.is_empty(), "no request should be written");
-    }
-
-    #[test]
-    fn signal_status_maps_zero_and_one_to_ok_and_other_to_err() {
-        for code in [0, 1] {
-            let mut command = ProcessCommand::new("sh");
-            command.arg("-c").arg(format!("exit {code}"));
-            assert!(
-                map_pkill_status(command).is_ok(),
-                "exit {code} should be Ok"
-            );
-        }
-
-        let mut command = ProcessCommand::new("sh");
-        command.arg("-c").arg("exit 2");
-        let error = map_pkill_status(command).expect_err("exit 2 should be Err");
-        assert!(error.to_string().contains("status 2"));
     }
 }
