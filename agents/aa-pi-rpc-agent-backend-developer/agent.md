@@ -1,7 +1,8 @@
 +++
 name = "pi-rpc-agent-backend-developer"
 creation_date = 2026-08-07T17:28:46Z
-status = "ready"
+status = "running"
+system = "codex"
 +++
 
 # Purpose
