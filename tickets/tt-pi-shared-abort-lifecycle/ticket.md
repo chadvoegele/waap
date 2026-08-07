@@ -1,7 +1,7 @@
 +++
 name = "Pi shared abort lifecycle"
 creation_date = 2026-08-07T17:19:54Z
-status = "in-progress"
+status = "completed"
 +++
 
 # Implement shared aborted lifecycle semantics
