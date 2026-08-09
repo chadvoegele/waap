@@ -1,7 +1,7 @@
 +++
 name = "Add serialized central waap state transactions"
 creation_date = 2026-08-02T23:45:59Z
-status = "in-progress"
+status = "completed"
 depends_on = ["tt-add-central-waap-git-state-worktree-primitives"]
 +++
 
