@@ -1,7 +1,7 @@
 +++
 name = "Document central waap state and agent safety guidance"
 creation_date = 2026-08-02T23:45:59Z
-status = "in-progress"
+status = "completed"
 depends_on = ["tt-route-waap-commands-and-agent-runs-through-central-state"]
 +++
 
