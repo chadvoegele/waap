@@ -1,7 +1,7 @@
 +++
 name = "Add central waap Git state worktree primitives"
 creation_date = 2026-08-02T23:45:59Z
-status = "in-progress"
+status = "completed"
 depends_on = ["tt-introduce-central-waap-project-context-resolution"]
 +++
 
