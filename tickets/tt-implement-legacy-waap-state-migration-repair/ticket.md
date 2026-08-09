@@ -1,7 +1,7 @@
 +++
 name = "Implement legacy waap state migration repair"
 creation_date = 2026-08-02T23:45:59Z
-status = "in-progress"
+status = "completed"
 depends_on = ["tt-implement-central-waap-init-and-remote-adoption"]
 +++
 
