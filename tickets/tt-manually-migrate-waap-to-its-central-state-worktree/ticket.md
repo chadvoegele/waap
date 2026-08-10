@@ -1,7 +1,7 @@
 +++
 name = "Manually migrate waap to its central state worktree"
 creation_date = 2026-08-02T23:45:59Z
-status = "pending"
+status = "abandoned"
 depends_on = ["tt-verify-central-waap-state-end-to-end"]
 +++
 
