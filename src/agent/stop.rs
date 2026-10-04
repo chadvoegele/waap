@@ -44,6 +44,7 @@ pub(crate) fn stop_agents_with_systems(
     waap_root: &Path,
     agent_id: Option<&str>,
 ) -> io::Result<AgentStopReport> {
+    let _lock = crate::state::StateLock::acquire(waap_root)?;
     let stopped_agents = stop_agents(waap_root, agent_id)?;
 
     let commit = if stopped_agents.is_empty() {

@@ -1,4 +1,3 @@
-use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -10,6 +9,10 @@ use crate::frontmatter::parse_frontmatter;
 use crate::ticket::{is_ticket_id, TicketMetadata};
 
 pub(crate) fn check_waap(waap_root: &Path) -> Vec<String> {
+    let _lock = match crate::state::StateLock::acquire_for_read(waap_root) {
+        Ok(lock) => lock,
+        Err(error) => return vec![format!("failed to validate waap state: {error}")],
+    };
     let mut errors = Vec::new();
     let agents_dir = waap_root.join("agents");
     let tickets_dir = waap_root.join("tickets");
@@ -153,103 +156,24 @@ fn check_tickets(tickets_dir: &Path, errors: &mut Vec<String>) {
         }
     }
 
-    check_ticket_dependencies(&tickets, errors);
-}
-
-fn check_ticket_dependencies(tickets: &[TicketMetadata], errors: &mut Vec<String>) {
-    check_dependencies_exist(tickets, errors);
-    check_cycles(tickets, errors);
-}
-
-fn check_dependencies_exist(tickets: &[TicketMetadata], errors: &mut Vec<String>) {
-    let known_ids: HashSet<&str> = tickets
-        .iter()
-        .map(|ticket| ticket.ticket_id.as_str())
-        .collect();
-
-    for ticket in tickets {
-        for dep in ticket.depends_on.iter().flatten() {
-            if !known_ids.contains(dep.as_str()) {
-                errors.push(format!(
-                    "tickets/{}/ticket.md depends_on {dep:?} which does not exist",
-                    ticket.ticket_id
-                ));
-            }
-        }
-    }
-}
-
-fn check_cycles(tickets: &[TicketMetadata], errors: &mut Vec<String>) {
-    let deps_map: HashMap<&str, &[String]> = tickets
-        .iter()
-        .filter_map(|ticket| {
-            ticket
-                .depends_on
-                .as_deref()
-                .map(|deps| (ticket.ticket_id.as_str(), deps))
-        })
-        .collect();
-
-    let mut visited: HashSet<String> = HashSet::new();
-    let mut in_stack: HashSet<String> = HashSet::new();
-
-    for ticket in tickets {
-        let ticket_id = &ticket.ticket_id;
-        if !visited.contains(ticket_id) {
-            let mut path = Vec::new();
-            detect_cycle(
-                ticket_id,
-                &deps_map,
-                &mut visited,
-                &mut in_stack,
-                &mut path,
-                errors,
-            );
-        }
-    }
-}
-
-fn detect_cycle(
-    id: &str,
-    deps_map: &HashMap<&str, &[String]>,
-    visited: &mut HashSet<String>,
-    in_stack: &mut HashSet<String>,
-    path: &mut Vec<String>,
-    errors: &mut Vec<String>,
-) {
-    visited.insert(id.to_string());
-    in_stack.insert(id.to_string());
-    path.push(id.to_string());
-
-    if let Some(deps) = deps_map.get(id) {
-        for dep in *deps {
-            if !visited.contains(dep.as_str()) {
-                detect_cycle(dep, deps_map, visited, in_stack, path, errors);
-            } else if in_stack.contains(dep.as_str()) {
-                let cycle_start = path.iter().position(|p| p == dep).unwrap_or(0);
-                let cycle_nodes: Vec<&str> =
-                    path[cycle_start..].iter().map(|s| s.as_str()).collect();
-                let cycle_str = format!("{} -> {}", cycle_nodes.join(" -> "), dep);
-                errors.push(format!("dependency cycle detected: {cycle_str}"));
-            }
-        }
-    }
-
-    in_stack.remove(id);
-    path.pop();
+    errors.extend(crate::ticket::validate_dependencies(&tickets));
 }
 
 fn read_dir(path: &Path, label: &str, errors: &mut Vec<String>) -> Vec<fs::DirEntry> {
     match fs::read_dir(path) {
-        Ok(entries) => entries
-            .filter_map(|entry| match entry {
-                Ok(entry) => Some(entry),
-                Err(error) => {
-                    errors.push(format!("failed to read entry in {label}: {error}"));
-                    None
-                }
-            })
-            .collect(),
+        Ok(entries) => {
+            let mut entries: Vec<_> = entries
+                .filter_map(|entry| match entry {
+                    Ok(entry) => Some(entry),
+                    Err(error) => {
+                        errors.push(format!("failed to read entry in {label}: {error}"));
+                        None
+                    }
+                })
+                .collect();
+            entries.sort_by_key(|entry| entry.file_name());
+            entries
+        }
         Err(error) => {
             errors.push(format!("failed to read {label}: {error}"));
             Vec::new()
@@ -263,6 +187,22 @@ mod tests {
     use std::path::Path;
 
     use tempfile::tempdir;
+
+    #[test]
+    fn malformed_directories_are_reported_in_name_order() {
+        let dir = tempdir().unwrap();
+        for name in ["tt-z", "tt-a"] {
+            fs::create_dir_all(dir.path().join("tickets").join(name)).unwrap();
+        }
+        let errors = super::check_waap(dir.path());
+        assert_eq!(
+            errors,
+            [
+                "tickets/tt-a/ticket.md is required",
+                "tickets/tt-z/ticket.md is required"
+            ]
+        );
+    }
 
     use super::check_waap;
 

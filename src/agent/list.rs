@@ -8,9 +8,6 @@ use crate::agent::{AgentReport, AgentStatus};
 use crate::cli::OutputFormat;
 use crate::record::{list_record_ids, WaapRecordKind};
 
-const AGENT_ID_HEADER: &str = "Agent ID";
-const STATUS_HEADER: &str = "Status";
-
 pub(crate) fn print_agent_list(output_format: &OutputFormat, reports: &[AgentReport]) {
     match output_format {
         OutputFormat::Json => println!("{}", agent_list_json(reports)),
@@ -23,6 +20,8 @@ pub(crate) fn print_agent_list(output_format: &OutputFormat, reports: &[AgentRep
 }
 
 fn agent_list_human_lines(reports: &[AgentReport]) -> Vec<String> {
+    const AGENT_ID_HEADER: &str = "Agent ID";
+    const STATUS_HEADER: &str = "Status";
     if reports.is_empty() {
         return Vec::new();
     }
@@ -63,6 +62,7 @@ pub(crate) fn list_agents(
     waap_root: &Path,
     status: Option<&AgentStatus>,
 ) -> io::Result<Vec<AgentReport>> {
+    let _lock = crate::state::StateLock::acquire_for_read(waap_root)?;
     let mut reports = Vec::new();
     for agent_id in list_record_ids(waap_root, WaapRecordKind::Agent)? {
         let report = load_agent_report(waap_root, &agent_id)?;

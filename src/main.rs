@@ -9,6 +9,7 @@ mod init;
 mod record;
 mod repair;
 mod root;
+mod state;
 #[cfg(test)]
 mod test_git;
 mod ticket;

@@ -35,6 +35,7 @@ pub(crate) fn update_ticket(
     add_depends_on: &[String],
     remove_depends_on: &[String],
 ) -> io::Result<Committed<TicketReport>> {
+    let _lock = crate::state::StateLock::acquire(waap_root)?;
     let report = update_ticket_record(
         waap_root,
         ticket_id,
@@ -76,12 +77,13 @@ fn update_ticket_record(
         }
     }
 
-    let ticket_ids: HashSet<String> = load_tickets_metadata(waap_root)?
-        .into_iter()
-        .map(|metadata| metadata.ticket_id)
+    let tickets = load_tickets_metadata(waap_root)?;
+    let ticket_ids: HashSet<&str> = tickets
+        .iter()
+        .map(|metadata| metadata.ticket_id.as_str())
         .collect();
     for dep_id in add_depends_on {
-        if !ticket_ids.contains(dep_id) {
+        if !ticket_ids.contains(dep_id.as_str()) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("dependency ticket {dep_id:?} does not exist"),
@@ -105,6 +107,24 @@ fn update_ticket_record(
         deps.retain(|d| d != dep_id);
     }
     metadata.depends_on = if deps.is_empty() { None } else { Some(deps) };
+
+    let candidate: Vec<_> = tickets
+        .into_iter()
+        .map(|ticket| {
+            if ticket.ticket_id == ticket_id {
+                metadata.clone()
+            } else {
+                ticket
+            }
+        })
+        .collect();
+    let errors = super::validate_dependencies(&candidate);
+    if !errors.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            errors.join("; "),
+        ));
+    }
 
     write_ticket_record(waap_root, ticket_id, &metadata, &body)?;
 

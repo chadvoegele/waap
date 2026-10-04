@@ -40,6 +40,7 @@ pub(crate) fn create_ticket(
         .read_to_string(&mut markdown)
         .map_err(|error| io::Error::new(error.kind(), format!("failed to read stdin: {error}")))?;
 
+    let _lock = crate::state::StateLock::acquire(waap_root)?;
     let report = create_ticket_with_markdown(waap_root, name, depends_on, &markdown)?;
     let commit = commit_paths(
         waap_root,

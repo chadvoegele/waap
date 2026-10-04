@@ -14,6 +14,11 @@ For each repository, waap stores state in a dedicated `waap` branch worktree und
 
 ## Design
 
+The [architecture and compatibility inventory](docs/architecture.md) describes
+the implemented component boundaries, state locking, resource ownership, and
+intentional behavior corrections. [Validation results](docs/validation.md)
+record the checks used for the quality refactor.
+
 `waap` uses two types:
 
 1. `waap` tickets describe implementation work and live at `${waap_data}/tickets/<ticket-id>/ticket.md`.
