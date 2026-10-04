@@ -62,8 +62,20 @@ fn run_agent_with_backend(
     {
         let _lock = crate::state::StateLock::acquire(waap_root)?;
         let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
+        let current = AgentStatus::parse(&metadata.status).expect("validated agent status");
+        current.validate_transition(AgentStatus::Running)?;
+        let previous_metadata = metadata.clone();
         metadata.system = Some(system.clone());
-        mark_running(waap_root, output_format, agent_id, &mut metadata, &body)?;
+        if let Err(primary) = mark_running(waap_root, output_format, agent_id, &mut metadata, &body)
+        {
+            return match write_agent_record(waap_root, agent_id, &previous_metadata, &body) {
+                Ok(()) => Err(primary),
+                Err(rollback_error) => Err(io::Error::new(
+                    primary.kind(),
+                    format!("{primary}; failed to restore ready agent record: {rollback_error}"),
+                )),
+            };
+        }
     }
     let result = run_started_agent(
         repository_root,

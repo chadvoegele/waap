@@ -77,7 +77,7 @@ file. Modules remain grouped by current functionality:
 | Validation | `check.rs` | Accumulate actionable path/schema diagnostics in stable directory order; lock Git-backed state during traversal. |
 | Ticket workflows/graph | `ticket/`, metadata/formatting in `ticket.rs` | Graph validation operates on immutable candidate metadata; stable roots; iterative DFS supports deep chains. Filesystem and Git effects stay outside the graph algorithm. |
 | Agent lifecycle | `agent/run.rs`, `stop.rs`, `update.rs`, transition policy in `agent.rs` | Reread under lock before transition; preserve terminal conflicts and original error context. State lock never spans a backend run. |
-| Record codec | `frontmatter.rs`, `record.rs`, `toml.rs`, kind-specific schema parsers | File and in-memory frontmatter share a parser; a full record's metadata and body come from the same read. Header-only loaders stop at the closing delimiter even for a non-UTF-8 body. TOML owns string escaping. |
+| Record codec | `frontmatter.rs`, `record.rs`, `toml.rs`, kind-specific schema parsers | File and in-memory frontmatter share a parser; a full record's metadata and body come from the same read. Header-only loaders stop at the closing delimiter even for a non-UTF-8 body. Single-line TOML string escaping prevents embedded delimiter collisions. |
 | Persistence/Git | `state.rs`, `git.rs` | OS lock lives outside tracked state, in the selected checkout's Git directory. Atomic same-directory replacement publishes complete records. Explicit paths preserve unrelated changes. |
 | Execution backends | `agent/backend.rs`, system modules | Existing object-safe backend/run-handle contracts remain replaceable by fakes; protocol and configuration details stay system-local. |
 | Resource owners | `agent/process.rs`, `worktree.rs` | Local children remain owned until reaped; abandoned startup/handles kill and reap them. Worktree guard has explicit cleanup and Drop fallback; cleanup errors retain the primary failure. |
@@ -149,7 +149,7 @@ feature, record field, or automatic integration policy is introduced.
    process and unregisters its run-scoped SIGTERM handler.
 6. Validation diagnostics have stable directory/root order; graph traversal no
    longer consumes the Rust call stack. Strings containing TOML control characters
-   serialize validly using the maintained TOML implementation.
+   serialize validly with single-line escaping, including embedded `+++` lines.
 
 Normal CLI syntax, metadata schema, markdown, ID rules, output shapes, commit
 subjects, backend selection/configuration, source branch retention, and unrelated
@@ -175,7 +175,7 @@ new Unix records keep the usual `0666 & !umask` mode.
 | Preconditions early; focused functions | Reject invalid transition/configuration/IDs/dependencies before launch or write. Candidate cycle rejection is before persistence. |
 | Side-effect-only functions | Pure graph/escaping/output-value transformations remain separate from I/O. **Practical exception:** small synchronous workflow functions sequence reads, decisions, writes, and commits; scattering each into a generic orchestration framework would obscure ownership and error order. |
 | Readable code; rationale-only comments; no code work logs | Comments explain retained lock inode and resource ownership, not chronological changes. Progress is in waap agent records; architecture is documentation; revisions are in Git. |
-| Own dependency stack; maintenance cost; open source | Reuse TOML escaping and existing tempfile package; standard library locking adds no dependency. Existing Clap/HTTP/signal dependencies remain unchanged. No proprietary library is added. |
+| Own dependency stack; maintenance cost; open source | Reuse the TOML parser and existing tempfile package; standard library locking adds no dependency. Existing Clap/HTTP/signal dependencies remain unchanged. No proprietary library is added. |
 | Actionable user errors; root-cause context without secrets | Missing dependencies/cycles/paths name the offending record; invalid lifecycle/configuration errors retain accepted values or remediation. Cleanup diagnostics preserve original I/O kind. Spawn failures name the executable without logging argv/configuration credentials. |
 | Eliminate vague names/duplication/long functions/interfaces/records/parameter lists/globals/mutation/ripple/speculation/inconsistent objects/missing cleanup | Remove duplicate parsing and validation; extract resource ownership; keep mutable traversal/transition state local; no new global state; retain narrow existing backend contracts. **Practical exception:** existing six-argument runner entrypoints and CLI dispatch remain explicit, avoiding a new context bag or command framework solely to meet a size metric. Metadata string statuses remain for schema/output compatibility, with enum transition validation. |
 | All changed behavior tested; pyramid | Pure graph/codec/lock/process unit tests; real local Git/component contract tests; focused CLI tests for concurrency and protocol cleanup; separate real-agent heat workflow. No external network/agent is required by `cargo test`. |
@@ -189,8 +189,11 @@ and repair are not covered by that transaction lock. Stop-all can leave earlier
 agents aborted but uncommitted if a later abort fails, matching prior behavior.
 An ordinary commit failure leaves valid changed files (and possibly staged paths)
 for inspection and an explicit Git commit; check validates content, not cleanliness.
-An unsuccessful initial running commit can therefore require explicit stop or
-manual recovery. This refactor does not implement whole-index rollback.
+A failed initial running claim restores the previous ready record under the
+state lock, allowing retry without starting a backend or altering a competing
+owner. Rollback failures retain the original error and require manual recovery.
+This refactor does not implement whole-index rollback; the index may retain the
+attempted claim after its working-tree record is restored.
 
 Atomic publication prevents partial record contents being observed; it is not a
 multi-record/database transaction or a guarantee against power loss between

@@ -14,6 +14,7 @@ fn waap(root: &Path, args: &[&str], mode: &str) -> Output {
     isolate_git_config(&mut command);
     command
         .current_dir(root)
+        .env("GIT_CONFIG_VALUE_2", root.join(".git/hooks"))
         .env(
             "PATH",
             format!(
@@ -70,6 +71,38 @@ for line in sys.stdin:
     )
     .unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn failed_initial_claim_restores_ready_record_and_allows_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    init_repo(root);
+    seed_backend(root);
+    assert!(waap(root, &["init"], "completed").status.success());
+    assert!(waap(root, &["agent", "new", "--name", "Test"], "completed")
+        .status
+        .success());
+    let path = root.join(".state/agents/aa-test/agent.md");
+    let original = fs::read_to_string(&path).unwrap();
+    let head = git(&root.join(".state"), &["rev-parse", "HEAD"]);
+    let hook = root.join(".git/hooks/pre-commit");
+    fs::write(&hook, "#!/bin/sh\nrm -- \"$0\"\nexit 1\n").unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let args = ["agent", "run", "--agent-id", "aa-test", "--system", "codex"];
+    let failed = waap(root, &args, "completed");
+    assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("git commit"));
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    assert_eq!(git(&root.join(".state"), &["rev-parse", "HEAD"]), head);
+    assert!(!root.join("backend.pid").exists());
+    assert!(!root.join("worktrees/aa-test").exists());
+    assert!(waap(root, &["check"], "completed").status.success());
+    let retry = waap(root, &args, "completed");
+    assert!(retry.status.success(), "{retry:?}");
+    assert!(fs::read_to_string(path)
+        .unwrap()
+        .contains("status = \"completed\""));
 }
 
 #[test]

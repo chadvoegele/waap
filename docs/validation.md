@@ -10,7 +10,7 @@ Toolchain: `rustc 1.99.0 (b940084d7 2026-09-28)`.
 | `cargo fmt --check` | Exit 0. |
 | `cargo build` | Exit 0. |
 | `cargo build --release` | Exit 0. |
-| `cargo test` | Exit 0; 285 unit tests and 31 integration tests passed; none failed/ignored. |
+| `cargo test` | Exit 0; 286 unit tests and 33 integration tests passed; none failed/ignored. |
 | `python3 scripts/test_migrate_legacy_waap.py` | Exit 0; 2 tests passed. |
 | `git diff --check` | Exit 0. |
 
@@ -36,6 +36,20 @@ dropping the handle would fail the assertions. These PID/zombie assertions are
 Linux-specific. Tests require no real external agent or external service; existing
 OpenCode component tests use a loopback HTTP server. The protocol double requires
 `/usr/bin/python3` on Linux, consistent with the separate Python migration tests.
+
+## PR review regression fixes
+
+The validation commands above were rerun after fixing both PR #7 findings.
+The new CLI regressions failed before the fixes and passed afterward:
+
+- Ticket and agent names containing `a\n+++\nb` survive creation, status update,
+  get, and check with their name/body intact. String tests round-trip all ASCII
+  characters and reject physical newlines in the serialized value.
+- A one-shot pre-commit failure during the initial agent claim preserves HEAD,
+  restores the exact ready record, starts no backend/worktree, and allows a
+  successful retry. The existing competing-owner regression still passes.
+
+The real-agent workflow below predates these follow-up fixes and was not rerun.
 
 ## Real-agent heat-equation workflow
 

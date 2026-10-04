@@ -68,6 +68,36 @@ fn last_commit_files(waap_root: &Path) -> String {
 }
 
 #[test]
+fn multiline_names_cannot_close_record_frontmatter() {
+    let dir = tempdir().unwrap();
+    init_repo_with_waap_project(dir.path());
+    let name = "a\n+++\nb";
+    for (kind, id_option, id, status) in [
+        ("ticket", "--ticket-id", "tt-a-b", "completed"),
+        ("agent", "--agent-id", "aa-a-b", "aborted"),
+    ] {
+        let created = waap(dir.path(), "# Body\n", &[kind, "new", "--name", name]);
+        assert!(created.status.success(), "{created:?}");
+        let updated = waap(
+            dir.path(),
+            "",
+            &[kind, "update", id_option, id, "--set-status", status],
+        );
+        assert!(updated.status.success(), "{updated:?}");
+        let output = waap(
+            dir.path(),
+            "",
+            &["--output-format", "json", kind, "get", id_option, id],
+        );
+        assert!(output.status.success(), "{output:?}");
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["metadata"]["name"], name);
+        assert!(report["content"].as_str().unwrap().ends_with("# Body\n"));
+        assert!(waap(dir.path(), "", &["check"]).status.success());
+    }
+}
+
+#[test]
 fn ticket_new_then_update_each_create_one_commit() {
     let dir = tempdir().unwrap();
     init_repo_with_waap_project(dir.path());
