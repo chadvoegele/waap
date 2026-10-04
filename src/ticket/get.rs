@@ -43,6 +43,7 @@ pub(crate) fn load_ticket_report(waap_root: &Path, ticket_id: &str) -> io::Resul
 }
 
 pub(crate) fn get_ticket(waap_root: &Path, ticket_id: &str) -> io::Result<TicketGetReport> {
+    let _lock = crate::state::StateLock::acquire_for_read(waap_root)?;
     let ticket = load_ticket_report(waap_root, ticket_id)?;
     let (_, body) = read_ticket_record(waap_root, ticket_id)?;
     let content = body.strip_prefix('\n').unwrap_or(&body).to_string();

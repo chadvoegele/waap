@@ -14,17 +14,18 @@ pub(crate) fn datetime_string(value: &Value, key: &str) -> String {
 }
 
 pub(crate) fn toml_string(value: &str) -> String {
-    let mut escaped = String::from("\"");
-    for character in value.chars() {
-        match character {
-            '\\' => escaped.push_str("\\\\"),
-            '"' => escaped.push_str("\\\""),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            character => escaped.push(character),
+    Value::String(value.to_string()).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serialize_strings_round_trips_quotes_unicode_and_control_characters() {
+        for value in ["plain", "café", "\"\\\n\r\t", "\0\x08\x0c\x1f\x7f"] {
+            let table: Value = format!("name = {}", toml_string(value)).parse().unwrap();
+            assert_eq!(table["name"].as_str(), Some(value));
         }
     }
-    escaped.push('"');
-    escaped
 }

@@ -9,9 +9,9 @@ use clap::ValueEnum;
 use serde_json::json;
 
 use crate::frontmatter::{
-    invalid_frontmatter_error, parse_frontmatter, reject_unknown_fields, require_datetime,
-    require_optional_string, require_optional_string_choice, require_string_choice,
-    serialize_record,
+    invalid_frontmatter_error, parse_frontmatter, parse_frontmatter_from_contents,
+    reject_unknown_fields, require_datetime, require_optional_string,
+    require_optional_string_choice, require_string_choice, serialize_record,
 };
 use crate::ids::{available_record_id, is_record_id};
 use crate::record::{markdown_body_after_frontmatter, WaapRecordKind};
@@ -24,9 +24,11 @@ mod get;
 mod list;
 mod new;
 mod opencode;
+mod process;
 mod run;
 mod stop;
 mod update;
+mod worktree;
 
 #[cfg(test)]
 static OPENCODE_ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -136,7 +138,11 @@ pub(crate) fn read_agent_record(
 ) -> io::Result<(AgentMetadata, String)> {
     let path = validate_agent_path(waap_root, agent_id)?;
     let contents = fs::read_to_string(&path)?;
-    let metadata = load_agent_metadata(waap_root, agent_id)?;
+    let mut errors = Vec::new();
+    let value = parse_frontmatter_from_contents(&contents, &path, &mut errors)
+        .ok_or_else(|| invalid_frontmatter_error(errors))?;
+    let metadata =
+        AgentMetadata::from_frontmatter(&value, &path).map_err(invalid_frontmatter_error)?;
     let body = markdown_body_after_frontmatter(&contents)?;
     Ok((metadata, body))
 }
@@ -165,11 +171,8 @@ pub(crate) fn write_agent_record(
     body: &str,
 ) -> io::Result<()> {
     let path = agent_path(waap_root, agent_id);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let contents = serialize_record(&metadata.to_frontmatter_lines(), body);
-    fs::write(path, contents)
+    crate::state::write_record_atomically(&path, &contents)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -419,6 +422,29 @@ mod tests {
         AgentRunOptions, AgentStatus, AgentSystem, CODEX_ENV_LOCK, OPENCODE_ENV_LOCK,
     };
     use crate::ids::random_hex_chars;
+
+    #[test]
+    fn read_agent_record_keeps_metadata_and_body_from_one_published_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = super::agent_path(dir.path(), "aa-test");
+        let record = |version| {
+            format!("+++\nname = \"{version}\"\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"ready\"\n+++\n{version}")
+        };
+        crate::state::write_record_atomically(&path, &record("a")).unwrap();
+        std::thread::scope(|scope| {
+            let path = &path;
+            scope.spawn(|| {
+                for index in 0..100 {
+                    let version = if index % 2 == 0 { "a" } else { "b" };
+                    crate::state::write_record_atomically(path, &record(version)).unwrap();
+                }
+            });
+            for _ in 0..100 {
+                let (metadata, body) = super::read_agent_record(dir.path(), "aa-test").unwrap();
+                assert_eq!(metadata.name.as_deref(), Some(body.as_str()));
+            }
+        });
+    }
 
     #[test]
     fn generated_agent_ids_are_prefixed_lowercase_hex() {

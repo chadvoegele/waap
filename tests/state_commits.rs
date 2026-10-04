@@ -581,3 +581,140 @@ fn dependency_workflow_preserves_body_and_releases_completed_dependencies() {
     assert_eq!(value["content"], "# Body\r\n+++\r\nEnd");
     assert!(waap(dir.path(), "", &["check"]).status.success());
 }
+
+#[test]
+fn cyclic_update_is_rejected_without_changing_record_or_commit() {
+    let dir = tempdir().unwrap();
+    init_repo_with_waap_project(dir.path());
+    assert!(
+        waap(dir.path(), "base", &["ticket", "new", "--name", "Base"])
+            .status
+            .success()
+    );
+    assert!(waap(
+        dir.path(),
+        "feature",
+        &[
+            "ticket",
+            "new",
+            "--name",
+            "Feature",
+            "--depends-on",
+            "tt-base",
+        ]
+    )
+    .status
+    .success());
+    let path = state_root(dir.path()).join("tickets/tt-base/ticket.md");
+    let record = std::fs::read(&path).unwrap();
+    let before = commit_count(dir.path());
+    for dependency in ["tt-base", "tt-feature"] {
+        let output = waap(
+            dir.path(),
+            "",
+            &[
+                "ticket",
+                "update",
+                "--ticket-id",
+                "tt-base",
+                "--add-depends-on",
+                dependency,
+            ],
+        );
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("dependency cycle detected"));
+        assert_eq!(std::fs::read(&path).unwrap(), record);
+        assert_eq!(commit_count(dir.path()), before);
+        assert!(waap(dir.path(), "", &["check"]).status.success());
+    }
+}
+
+#[test]
+fn concurrent_named_creations_preserve_every_record_and_commit() {
+    let dir = tempdir().unwrap();
+    init_repo_with_waap_project(dir.path());
+    let barrier = std::sync::Barrier::new(8);
+    let before = commit_count(dir.path());
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8)
+            .map(|index| {
+                let barrier = &barrier;
+                let root = dir.path();
+                scope.spawn(move || {
+                    barrier.wait();
+                    let output = waap(
+                        root,
+                        &format!("body {index}"),
+                        &[
+                            "--output-format",
+                            "json",
+                            "ticket",
+                            "new",
+                            "--name",
+                            "Shared",
+                        ],
+                    );
+                    assert!(
+                        output.status.success(),
+                        "{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                    value["ticket_id"].as_str().unwrap().to_string()
+                })
+            })
+            .collect();
+        let ids: std::collections::HashSet<_> =
+            handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(ids.len(), 8);
+    });
+    assert_eq!(commit_count(dir.path()), before + 8);
+    assert!(waap(dir.path(), "", &["check"]).status.success());
+    assert_eq!(git(&state_root(dir.path()), &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn concurrent_opposite_dependencies_cannot_publish_a_cycle() {
+    let dir = tempdir().unwrap();
+    init_repo_with_waap_project(dir.path());
+    for name in ["A", "B"] {
+        assert!(waap(dir.path(), "", &["ticket", "new", "--name", name])
+            .status
+            .success());
+    }
+    let before = commit_count(dir.path());
+    let barrier = std::sync::Barrier::new(2);
+    let successes = std::thread::scope(|scope| {
+        let handles: Vec<_> = [("tt-a", "tt-b"), ("tt-b", "tt-a")]
+            .into_iter()
+            .map(|(id, dep)| {
+                let root = dir.path();
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    waap(
+                        root,
+                        "",
+                        &[
+                            "ticket",
+                            "update",
+                            "--ticket-id",
+                            id,
+                            "--add-depends-on",
+                            dep,
+                        ],
+                    )
+                    .status
+                    .success()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| usize::from(handle.join().unwrap()))
+            .sum::<usize>()
+    });
+    assert_eq!(successes, 1);
+    assert_eq!(commit_count(dir.path()), before + 1);
+    assert!(waap(dir.path(), "", &["check"]).status.success());
+}

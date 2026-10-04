@@ -20,7 +20,15 @@ pub(crate) fn parse_frontmatter(path: &Path, errors: &mut Vec<String>) -> Option
             return None;
         }
     };
-    let mut lines = BufReader::new(file).lines();
+    parse_frontmatter_reader(BufReader::new(file), path, errors)
+}
+
+fn parse_frontmatter_reader(
+    reader: impl BufRead,
+    path: &Path,
+    errors: &mut Vec<String>,
+) -> Option<Value> {
+    let mut lines = reader.lines();
     match lines.next() {
         Some(Ok(line)) if line == "+++" => {}
         Some(Ok(_)) | None => {
@@ -60,35 +68,12 @@ pub(crate) fn parse_frontmatter(path: &Path, errors: &mut Vec<String>) -> Option
     None
 }
 
-#[allow(dead_code)]
 pub(crate) fn parse_frontmatter_from_contents(
     contents: &str,
     path: &Path,
     errors: &mut Vec<String>,
 ) -> Option<Value> {
-    let mut lines = contents.lines();
-    if lines.next() != Some("+++") {
-        errors.push(format!(
-            "{} must start with TOML frontmatter delimited by +++",
-            path.display()
-        ));
-        return None;
-    }
-
-    let mut frontmatter = String::new();
-    for line in lines {
-        if line == "+++" {
-            return parse_frontmatter_toml(&frontmatter, path, errors);
-        }
-        frontmatter.push_str(line);
-        frontmatter.push('\n');
-    }
-
-    errors.push(format!(
-        "{} frontmatter is missing closing +++ delimiter",
-        path.display()
-    ));
-    None
+    parse_frontmatter_reader(contents.as_bytes(), path, errors)
 }
 
 fn parse_frontmatter_toml(
@@ -243,7 +228,28 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::parse_frontmatter;
+    use super::{parse_frontmatter, parse_frontmatter_from_contents};
+
+    #[test]
+    fn file_and_contents_parsers_share_the_same_diagnostics() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("record.md");
+        for contents in [
+            "",
+            "+++\nstatus = [\n+++",
+            "+++\n",
+            "+++\r\nstatus = \"ready\"\r\n+++\r\nbody",
+        ] {
+            fs::write(&path, contents).unwrap();
+            let mut file_errors = Vec::new();
+            let mut contents_errors = Vec::new();
+            assert_eq!(
+                parse_frontmatter(&path, &mut file_errors),
+                parse_frontmatter_from_contents(contents, &path, &mut contents_errors)
+            );
+            assert_eq!(file_errors, contents_errors);
+        }
+    }
 
     #[test]
     fn file_parser_accepts_crlf_and_closing_delimiter_without_newline() {
