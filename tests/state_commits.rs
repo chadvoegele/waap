@@ -517,3 +517,67 @@ fn agent_new_errors_when_project_not_initialized() {
     assert!(stderr.contains("waap init"), "{stderr}");
     assert!(!state_root(dir.path()).exists());
 }
+
+#[test]
+fn dependency_workflow_preserves_body_and_releases_completed_dependencies() {
+    let dir = tempdir().unwrap();
+    init_repo_with_waap_project(dir.path());
+    assert!(waap(dir.path(), "", &["ticket", "new", "--name", "Base"])
+        .status
+        .success());
+    assert!(waap(
+        dir.path(),
+        "# Body\r\n+++\r\nEnd",
+        &[
+            "ticket",
+            "new",
+            "--name",
+            "Feature",
+            "--depends-on",
+            "tt-base",
+        ]
+    )
+    .status
+    .success());
+    let list = |filter| {
+        let output = waap(
+            dir.path(),
+            "",
+            &["--output-format", "json", "ticket", "list", filter],
+        );
+        assert!(output.status.success());
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    assert_eq!(list("--blocked")[0]["ticket_id"], "tt-feature");
+    assert!(waap(
+        dir.path(),
+        "",
+        &[
+            "ticket",
+            "update",
+            "--ticket-id",
+            "tt-base",
+            "--set-status",
+            "completed",
+        ]
+    )
+    .status
+    .success());
+    assert_eq!(list("--unblocked").as_array().unwrap().len(), 2);
+    let output = waap(
+        dir.path(),
+        "",
+        &[
+            "--output-format",
+            "json",
+            "ticket",
+            "get",
+            "--ticket-id",
+            "tt-feature",
+        ],
+    );
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["content"], "# Body\r\n+++\r\nEnd");
+    assert!(waap(dir.path(), "", &["check"]).status.success());
+}

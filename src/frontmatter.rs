@@ -246,6 +246,17 @@ mod tests {
     use super::parse_frontmatter;
 
     #[test]
+    fn file_parser_accepts_crlf_and_closing_delimiter_without_newline() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("record.md");
+        fs::write(&path, "+++\r\nstatus = \"ready\"\r\n+++").unwrap();
+        let mut errors = Vec::new();
+        let value = parse_frontmatter(&path, &mut errors).unwrap();
+        assert_eq!(value["status"].as_str(), Some("ready"));
+        assert!(errors.is_empty());
+    }
+
+    #[test]
     fn file_parser_stops_after_closing_delimiter() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("record.md");
