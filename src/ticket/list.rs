@@ -35,11 +35,10 @@ pub(crate) fn print_ticket_list(output_format: &OutputFormat, entries: &[TicketL
     }
 }
 
-const TICKET_ID_HEADER: &str = "Ticket ID";
-const STATUS_HEADER: &str = "Status";
-const STATE_HEADER: &str = "State";
-
 fn ticket_list_human_lines(entries: &[TicketListEntry]) -> Vec<String> {
+    const TICKET_ID_HEADER: &str = "Ticket ID";
+    const STATUS_HEADER: &str = "Status";
+    const STATE_HEADER: &str = "State";
     if entries.is_empty() {
         return Vec::new();
     }
@@ -104,6 +103,7 @@ pub(crate) fn list_tickets(
     status: Option<&TicketStatus>,
     blocked_filter: Option<bool>,
 ) -> io::Result<Vec<TicketListEntry>> {
+    let _lock = crate::state::StateLock::acquire_for_read(waap_root)?;
     let all_ids = list_record_ids(waap_root, WaapRecordKind::Ticket)?;
 
     let mut all_reports: Vec<TicketReport> = Vec::new();

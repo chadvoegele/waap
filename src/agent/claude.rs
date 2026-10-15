@@ -1,8 +1,9 @@
 use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command as ProcessCommand, ExitStatus, Stdio};
+use std::process::{Command as ProcessCommand, ExitStatus, Stdio};
 
+use super::process::AgentProcess;
 use uuid::Uuid;
 
 use super::backend::{
@@ -45,7 +46,7 @@ impl AgentSystemBackend for ClaudeBackend {
 }
 
 struct ClaudeRun {
-    child: Child,
+    child: AgentProcess,
 }
 
 impl RunHandle for ClaudeRun {
@@ -93,15 +94,15 @@ fn map_pkill_status(status: ExitStatus) -> io::Result<()> {
 }
 
 /// Spawn Claude with output attached to this process and stdin disconnected.
-fn spawn_claude_attached(command: &ClaudeRunCommand) -> io::Result<Child> {
+fn spawn_claude_attached(command: &ClaudeRunCommand) -> io::Result<AgentProcess> {
     let mut process = ProcessCommand::new(&command.program);
     process
         .args(&command.args)
         .current_dir(&command.working_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
+        .stderr(Stdio::inherit());
+    AgentProcess::spawn(&mut process)
 }
 
 fn build_claude_run_command(

@@ -56,6 +56,7 @@ pub(crate) fn load_agent_content(
     waap_root: &Path,
     agent_id: &str,
 ) -> io::Result<(AgentReport, String)> {
+    let _lock = crate::state::StateLock::acquire_for_read(waap_root)?;
     let (metadata, body) = read_agent_record(waap_root, agent_id)?;
     let report = agent_report_from_metadata(waap_root, agent_id, metadata)?;
 

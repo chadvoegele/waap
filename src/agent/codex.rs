@@ -10,6 +10,7 @@ use serde_json::{json, Value as JsonValue};
 use super::backend::{
     AbortContext, AgentSystemBackend, RunHandle, RunOutcome, StartContext, StartedRun,
 };
+use super::process::AgentProcess;
 use super::{AgentRunOptions, ReasoningEffort};
 
 #[derive(Default)]
@@ -27,17 +28,14 @@ impl CodexBackend {
 
 impl AgentSystemBackend for CodexBackend {
     fn start(&mut self, context: StartContext<'_>) -> io::Result<StartedRun> {
-        let interrupt = Arc::new(AtomicBool::new(false));
-        signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&interrupt)).map_err(
-            |error| io::Error::other(format!("failed to install SIGTERM handler: {error}")),
-        )?;
-        let mut client = spawn_codex_app_server(&self.config, context.worktree_dir)?;
-        client.initialize()?;
-        let thread_id = client.thread_start(context.worktree_dir)?;
+        let interrupt = InterruptHandler::register()?;
+        let mut server = spawn_codex_app_server(&self.config, context.worktree_dir)?;
+        server.client.initialize()?;
+        let thread_id = server.client.thread_start(context.worktree_dir)?;
         Ok(StartedRun {
             session_id: thread_id.clone(),
             handle: Box::new(CodexRun {
-                client,
+                server,
                 interrupt,
                 thread_id,
                 prompt: context.prompt.to_string(),
@@ -50,19 +48,51 @@ impl AgentSystemBackend for CodexBackend {
     }
 }
 
-struct CodexRun {
+struct CodexAppServer {
     client: CodexClient<BufReader<ChildStdout>, ChildStdin, io::Stdout>,
-    interrupt: Arc<AtomicBool>,
+    _process: AgentProcess,
+}
+
+struct InterruptHandler {
+    flag: Arc<AtomicBool>,
+    registration: signal_hook::SigId,
+}
+
+impl InterruptHandler {
+    fn register() -> io::Result<Self> {
+        let flag = Arc::new(AtomicBool::new(false));
+        let registration =
+            signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&flag)).map_err(
+                |error| io::Error::other(format!("failed to install SIGTERM handler: {error}")),
+            )?;
+        Ok(Self { flag, registration })
+    }
+}
+
+impl Drop for InterruptHandler {
+    fn drop(&mut self) {
+        signal_hook::low_level::unregister(self.registration);
+    }
+}
+
+struct CodexRun {
+    server: CodexAppServer,
+    interrupt: InterruptHandler,
     thread_id: String,
     prompt: String,
 }
 
 impl RunHandle for CodexRun {
     fn wait(mut self: Box<Self>) -> io::Result<RunOutcome> {
-        let turn_id = self.client.turn_start(&self.thread_id, &self.prompt)?;
-        let status =
-            self.client
-                .pump_until_turn_completed(&self.thread_id, &turn_id, &self.interrupt)?;
+        let turn_id = self
+            .server
+            .client
+            .turn_start(&self.thread_id, &self.prompt)?;
+        let status = self.server.client.pump_until_turn_completed(
+            &self.thread_id,
+            &turn_id,
+            &self.interrupt.flag,
+        )?;
         if status.is_success() {
             Ok(RunOutcome::Completed)
         } else {
@@ -274,30 +304,25 @@ struct CodexClient<R, W, O> {
 fn spawn_codex_app_server(
     config: &CodexRunConfig,
     worktree_dir: &Path,
-) -> io::Result<CodexClient<BufReader<ChildStdout>, ChildStdin, io::Stdout>> {
+) -> io::Result<CodexAppServer> {
     let mut command = codex_app_server_command(worktree_dir);
-    let mut child = command
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()?;
-
-    let writer = child
-        .stdin
-        .take()
-        .ok_or_else(|| io::Error::other("codex app-server stdin is unavailable"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("codex app-server stdout is unavailable"))?;
-
-    Ok(CodexClient {
-        reader: BufReader::new(stdout),
-        writer,
-        out: io::stdout(),
-        next_id: 0,
-        model: config.model.clone(),
-        reasoning_effort: config.reasoning_effort,
+        .stderr(Stdio::inherit());
+    let mut process = AgentProcess::spawn(&mut command)?;
+    let writer = process.take_stdin()?;
+    let stdout = process.take_stdout()?;
+    Ok(CodexAppServer {
+        client: CodexClient {
+            reader: BufReader::new(stdout),
+            writer,
+            out: io::stdout(),
+            next_id: 0,
+            model: config.model.clone(),
+            reasoning_effort: config.reasoning_effort,
+        },
+        _process: process,
     })
 }
 

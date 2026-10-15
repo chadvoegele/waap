@@ -33,6 +33,7 @@ pub(crate) fn update_agent(
     set_status: Option<&AgentStatus>,
     set_session_id: Option<&str>,
 ) -> io::Result<Committed<AgentReport>> {
+    let _lock = crate::state::StateLock::acquire(waap_root)?;
     let report = update_agent_record(waap_root, agent_id, set_status, set_session_id)?;
     let commit = commit_paths(
         waap_root,

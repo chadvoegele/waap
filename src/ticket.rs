@@ -7,24 +7,27 @@ use clap::ValueEnum;
 use serde_json::json;
 
 use crate::frontmatter::{
-    invalid_frontmatter_error, parse_frontmatter, reject_unknown_fields, require_datetime,
-    require_optional_string, require_optional_string_array, require_string_choice,
-    serialize_record,
+    invalid_frontmatter_error, parse_frontmatter, parse_frontmatter_from_contents,
+    reject_unknown_fields, require_datetime, require_optional_string,
+    require_optional_string_array, require_string_choice, serialize_record,
 };
 use crate::ids::{available_record_id, is_record_id};
 use crate::record::{list_record_ids, markdown_body_after_frontmatter, WaapRecordKind};
 use crate::toml::{datetime_string, toml_string};
 
+mod dependencies;
 mod get;
 mod list;
 mod new;
 mod update;
 
+pub(crate) use dependencies::validate_dependencies;
 pub(crate) use get::{get_ticket, print_ticket_get_report};
 pub(crate) use list::{list_tickets, print_ticket_list};
 pub(crate) use new::{create_ticket, print_ticket_report};
 pub(crate) use update::{print_updated_ticket_report, update_ticket};
 
+#[derive(Clone)]
 pub(crate) struct TicketMetadata {
     pub(crate) ticket_id: String,
     pub(crate) name: Option<String>,
@@ -147,7 +150,11 @@ pub(crate) fn read_ticket_record(
 ) -> io::Result<(TicketMetadata, String)> {
     let path = validate_ticket_path(waap_root, ticket_id)?;
     let contents = fs::read_to_string(&path)?;
-    let metadata = load_ticket_metadata(waap_root, ticket_id)?;
+    let mut errors = Vec::new();
+    let value = parse_frontmatter_from_contents(&contents, &path, &mut errors)
+        .ok_or_else(|| invalid_frontmatter_error(errors))?;
+    let metadata = TicketMetadata::from_frontmatter(&value, &path, ticket_id)
+        .map_err(invalid_frontmatter_error)?;
     let body = markdown_body_after_frontmatter(&contents)?;
     Ok((metadata, body))
 }
@@ -176,11 +183,8 @@ pub(crate) fn write_ticket_record(
     body: &str,
 ) -> io::Result<()> {
     let path = ticket_path(waap_root, ticket_id);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let contents = serialize_record(&metadata.to_frontmatter_lines(), body);
-    fs::write(path, contents)
+    crate::state::write_record_atomically(&path, &contents)
 }
 
 #[derive(Debug, PartialEq, Eq)]

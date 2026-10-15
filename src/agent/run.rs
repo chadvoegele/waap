@@ -1,15 +1,16 @@
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 
 use super::backend::{AgentSystemBackend, RunOutcome, StartContext};
+use super::worktree::{collapse_errors, AgentWorktree};
 use crate::agent::{
     agent_report_json, load_agent_report, print_agent_report_human, read_agent_record,
     transition_agent_status, write_agent_record, AgentMetadata, AgentReport, AgentRunOptions,
     AgentStatus, AgentSystem,
 };
 use crate::cli::OutputFormat;
-use crate::git::{commit_paths, create_worktree, remove_worktree};
+use crate::git::commit_paths;
 
 fn print_run_agent_report(
     output_format: &OutputFormat,
@@ -58,18 +59,23 @@ fn run_agent_with_backend(
     system: &AgentSystem,
     backend: &mut dyn AgentSystemBackend,
 ) -> io::Result<ExitCode> {
-    let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
-    metadata.system = Some(system.clone());
-
-    if let Err(error) = mark_running(waap_root, output_format, agent_id, &mut metadata, &body) {
-        let is_running = read_agent_record(waap_root, agent_id)
-            .map(|(metadata, _)| metadata.status == AgentStatus::Running.as_str())
-            .unwrap_or(false);
-        return Err(if is_running {
-            persist_failed_after_error(waap_root, output_format, agent_id, error)
-        } else {
-            error
-        });
+    {
+        let _lock = crate::state::StateLock::acquire(waap_root)?;
+        let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
+        let current = AgentStatus::parse(&metadata.status).expect("validated agent status");
+        current.validate_transition(AgentStatus::Running)?;
+        let previous_metadata = metadata.clone();
+        metadata.system = Some(system.clone());
+        if let Err(primary) = mark_running(waap_root, output_format, agent_id, &mut metadata, &body)
+        {
+            return match write_agent_record(waap_root, agent_id, &previous_metadata, &body) {
+                Ok(()) => Err(primary),
+                Err(rollback_error) => Err(io::Error::new(
+                    primary.kind(),
+                    format!("{primary}; failed to restore ready agent record: {rollback_error}"),
+                )),
+            };
+        }
     }
     let result = run_started_agent(
         repository_root,
@@ -151,67 +157,6 @@ fn require_ready_agent(waap_root: &Path, agent_id: &str) -> io::Result<()> {
     current.validate_transition(AgentStatus::Running)
 }
 
-fn agent_worktree_dir(agent_id: &str) -> PathBuf {
-    Path::new("worktrees").join(agent_id)
-}
-
-struct AgentWorktree {
-    waap_root: PathBuf,
-    relative_path: PathBuf,
-    worktree_dir: PathBuf,
-    cleanup_pending: bool,
-}
-
-impl AgentWorktree {
-    // Call only after committing the running state so the branch includes it.
-    fn create(waap_root: &Path, agent_id: &str) -> io::Result<Self> {
-        let relative_path = agent_worktree_dir(agent_id);
-        let worktree_dir = create_worktree(waap_root, agent_id, &relative_path)?;
-        Ok(Self {
-            waap_root: waap_root.to_path_buf(),
-            relative_path,
-            worktree_dir,
-            cleanup_pending: true,
-        })
-    }
-
-    fn dir(&self) -> &Path {
-        &self.worktree_dir
-    }
-
-    fn cleanup(&mut self) -> io::Result<()> {
-        if !self.cleanup_pending {
-            return Ok(());
-        }
-        remove_worktree(&self.waap_root, &self.relative_path)?;
-        self.cleanup_pending = false;
-        Ok(())
-    }
-}
-
-fn collapse_errors<T>(run_result: io::Result<T>, cleanup_result: io::Result<()>) -> io::Result<T> {
-    match (run_result, cleanup_result) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
-        (Err(run_error), Ok(())) => Err(run_error),
-        (Err(run_error), Err(cleanup_error)) => Err(io::Error::new(
-            run_error.kind(),
-            format!("{run_error}; worktree cleanup also failed: {cleanup_error}"),
-        )),
-    }
-}
-
-impl Drop for AgentWorktree {
-    fn drop(&mut self) {
-        if let Err(error) = self.cleanup() {
-            log::error!(
-                "failed to clean up agent worktree {}: {error}",
-                self.worktree_dir.display()
-            );
-        }
-    }
-}
-
 fn mark_running(
     waap_root: &Path,
     output_format: &OutputFormat,
@@ -239,6 +184,7 @@ fn update_agent_session(
     session_id: &str,
     system: AgentSystem,
 ) -> io::Result<()> {
+    let _lock = crate::state::StateLock::acquire(waap_root)?;
     let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
     if metadata.status != AgentStatus::Running.as_str() {
         return Err(io::Error::new(
@@ -314,6 +260,7 @@ fn transition_and_commit_status(
     header: &str,
     commit_message: &str,
 ) -> io::Result<()> {
+    let _lock = crate::state::StateLock::acquire(waap_root)?;
     let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
     if metadata.status == status.as_str() {
         return Ok(());
@@ -367,11 +314,12 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        agent_worktree_dir, build_agent_goal, collapse_errors, mark_completed, mark_failed,
-        mark_running, persist_failed_after_error, require_ready_agent, run_agent,
-        run_agent_with_backend, transition_and_commit_status, update_agent_session, AgentWorktree,
+        build_agent_goal, collapse_errors, mark_completed, mark_failed, mark_running,
+        persist_failed_after_error, require_ready_agent, run_agent, run_agent_with_backend,
+        transition_and_commit_status, update_agent_session, AgentWorktree,
     };
     use crate::agent::backend::{fake::FakeBackend, RunOutcome};
+    use crate::agent::worktree::agent_worktree_dir;
     use crate::agent::{
         agent_report_json, read_agent_record, transition_agent_status, write_agent_record,
         AgentMetadata, AgentReport, AgentRunOptions, AgentStatus, AgentSystem, ReasoningEffort,
@@ -579,6 +527,61 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "invalid agent status transition: running -> running"
+        );
+    }
+
+    #[test]
+    fn competing_run_does_not_mark_the_active_owner_failed() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let agent_id = "aa-00000001";
+        seed_agent_record(dir.path(), agent_id, "ready");
+        let root = dir.path().to_path_buf();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let owner = std::thread::spawn(move || {
+            let mut backend = FakeBackend {
+                wait_action: Some(Box::new(move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(())
+                })),
+                ..FakeBackend::default()
+            };
+            run_agent_with_backend(
+                &root,
+                &root,
+                &OutputFormat::Json,
+                agent_id,
+                &AgentSystem::Opencode,
+                &mut backend,
+            )
+            .unwrap()
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let mut contender = FakeBackend::default();
+        let error = run_agent_with_backend(
+            dir.path(),
+            dir.path(),
+            &OutputFormat::Json,
+            agent_id,
+            &AgentSystem::Opencode,
+            &mut contender,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("running -> running"));
+        assert!(contender.start_calls.is_empty());
+        assert_eq!(
+            read_agent_record(dir.path(), agent_id).unwrap().0.status,
+            "running"
+        );
+        release_tx.send(()).unwrap();
+        assert_eq!(owner.join().unwrap(), ExitCode::SUCCESS);
+        assert_eq!(
+            read_agent_record(dir.path(), agent_id).unwrap().0.status,
+            "completed"
         );
     }
 
