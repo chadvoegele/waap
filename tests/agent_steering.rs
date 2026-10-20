@@ -61,18 +61,25 @@ impl Fixture {
     }
 
     fn socket(&self) -> PathBuf {
+        use std::os::unix::ffi::OsStrExt;
+        let digest = ring::digest::digest(
+            &ring::digest::SHA256,
+            self.repo
+                .path()
+                .canonicalize()
+                .unwrap()
+                .as_os_str()
+                .as_bytes(),
+        );
+        let hash: String = digest.as_ref()[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
         self.runtime
             .path()
-            .join("waap/control")
-            .join(
-                self.repo
-                    .path()
-                    .canonicalize()
-                    .unwrap()
-                    .strip_prefix("/")
-                    .unwrap(),
-            )
-            .join("agents/aa-test.sock")
+            .join("waap")
+            .join(hash)
+            .join("aa-test.sock")
     }
 
     fn listener(&self) -> UnixListener {

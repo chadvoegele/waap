@@ -95,5 +95,5 @@
   <rect x="30" y="715" width="1120" height="100" rx="8" fill="#f8fafc" stroke="#64748b"/>
   <text x="45" y="745" class="label">Control boundary and lifecycle</text>
   <text x="45" y="772">Current user only • repository isolation • one-shot agents • no run ID or handshake • busy if queue full • clean up on exit</text>
-  <text x="45" y="797">Socket: $XDG_RUNTIME_DIR/waap/control/&lt;repo-path&gt;/agents/&lt;agent-id&gt;.sock — never tracked in waap state.</text>
+  <text x="45" y="797">Socket: $XDG_RUNTIME_DIR/waap/&lt;repo-hash&gt;/&lt;agent-id&gt;.sock • repo-hash: first 16 hex of SHA-256(primary path bytes)</text>
 </svg>

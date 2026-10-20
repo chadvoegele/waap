@@ -100,24 +100,35 @@ which return the not-implemented error; higher layers must not special-case them
 Define `waap_runtime_dir = $XDG_RUNTIME_DIR/waap`. The socket path is:
 
 ```text
-$waap_runtime_dir/control/<repository-relative-path>/agents/<agent-id>.sock
+$waap_runtime_dir/<repo-hash>/<agent-id>.sock
 ```
 
-`<repository-relative-path>` must reuse the repository naming scheme under
-`~/.local/state/waap/data/`, so state and runtime layouts are symmetric and all
-worktrees of one repository resolve the same socket. `XDG_RUNTIME_DIR` is a
-runtime directory, typically `/run/user/$UID`, not `~/.local/state` (the default
-persistent `XDG_STATE_HOME`). The socket must not be placed in the waap state
-worktree or tracked by Git. No persisted endpoint registry is required.
+`<repo-hash>` is the first 16 lowercase hexadecimal characters of SHA-256 of
+the canonical primary repository path's OS bytes. All linked worktrees resolve
+the same primary path. The truncated hash can collide; existing endpoint files
+must never be silently reused or removed. No persisted endpoint registry is used.
+
+New agent slugs contain at most 55 ASCII characters (58 including `aa-`),
+including any collision suffix. Ticket slugs retain their 63-character limit.
+Existing agent IDs remain readable under the existing validation rules; socket
+availability depends on the full path length, not the generation limit.
+
+`XDG_RUNTIME_DIR` is a runtime directory, typically `/run/user/$UID`, not
+`~/.local/state`. The socket must not be placed in the waap state worktree or
+tracked by Git.
 
 Runtime directories must be private to the current OS user, and socket access
 must be restricted to that user. Missing or empty `XDG_RUNTIME_DIR`, a runtime
 directory not owned by the current user, or one accessible by other users must
-fail clearly. No fallback directory is permitted. Socket paths exceeding platform
-limits must also fail clearly; there must be no alternate naming scheme. The endpoint must be ready to handle requests before accepting
-them and must be closed and removed on normal run exit. A crash may leave a
-socket file; connecting to that stale endpoint must fail clearly, without state
-repair or automatic reconnection.
+fail clearly. No fallback directory is permitted. Validate the full socket path's
+byte length, including the runtime directory, separators, hash, agent ID, and
+`.sock`, against the platform limit before creating a socket, worktree, or backend
+process. A long runtime directory can still exceed that limit; fail with a remedy
+to shorten `XDG_RUNTIME_DIR` or create an agent with a shorter name. No alternate
+naming or legacy-ID migration is provided. The endpoint must be ready to handle
+requests before accepting them and must be closed and removed on normal run exit.
+A crash may leave a socket file; connecting to that stale endpoint must fail
+clearly, without state repair or automatic reconnection.
 
 Agents are one-shot. The socket identifies the repository and agent; no run ID,
 backend session ID, handshake, or capability negotiation is required on the wire.
@@ -249,7 +260,12 @@ including on delivery failure. No persistent state migration is required.
   reach the backend and late acknowledgements cannot corrupt later responses.
 - Codex compatibility tests: native `turn/steer` against the supported app-server
   version and missing-method rejection without restart or new-turn fallback.
-- Isolation/lifecycle tests: symmetric socket lookup across repository worktrees,
+- Socket naming tests: deterministic SHA-256 over canonical OS path bytes,
+  including non-UTF-8 paths; identical primary/worktree hashes and distinct test
+  repositories; generated agent boundaries and collision suffixes at 55 characters;
+  unchanged 63-character ticket slugs and readable historical agent IDs; full-path
+  byte boundary and rejection before socket, backend, or worktree creation.
+- Isolation/lifecycle tests: shared socket lookup across repository worktrees,
   same agent ID in two repositories, stale endpoint, restricted endpoint access,
   path-length errors without alternate naming, missing/empty or insecure
   `XDG_RUNTIME_DIR` rejection without fallback, and normal cleanup; no run ID or

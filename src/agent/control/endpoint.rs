@@ -18,16 +18,13 @@ pub(in crate::agent) fn socket_path(
         ));
     }
     require_private_directory(control_root.runtime_dir())?;
-    let path = control_root
-        .path()
-        .join("agents")
-        .join(format!("{agent_id}.sock"));
+    let path = control_root.path().join(format!("{agent_id}.sock"));
     let address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     if path.as_os_str().as_bytes().len() >= address.sun_path.len() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "control socket path exceeds the {}-byte platform limit: {}; shorten XDG_RUNTIME_DIR or the repository path",
+                "control socket path exceeds the {}-byte platform limit: {}; shorten XDG_RUNTIME_DIR or create an agent with a shorter name",
                 address.sun_path.len() - 1,
                 path.display()
             ),
@@ -120,7 +117,7 @@ mod tests {
         fs::remove_dir_all(repo.path().join(".git")).unwrap();
         assert_eq!(
             socket_path(&control_root, "aa-1").unwrap(),
-            control_root.path().join("agents/aa-1.sock")
+            control_root.path().join("aa-1.sock")
         );
         fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o755)).unwrap();
         assert!(socket_path(&control_root, "aa-1")
@@ -147,14 +144,52 @@ mod tests {
         );
         let resolve =
             |repo: &Path| resolve_socket(repo, "aa-1", Some(runtime.path().as_os_str())).unwrap();
-        let expected = runtime
+        let expected = find_control_root_in(&repo, Some(runtime.path().as_os_str()))
+            .unwrap()
             .path()
-            .join("waap/control")
-            .join(repo.canonicalize().unwrap().strip_prefix("/").unwrap())
-            .join("agents/aa-1.sock");
+            .join("aa-1.sock");
         assert_eq!(resolve(&repo), expected);
         assert_eq!(resolve(&linked), expected);
         assert_ne!(resolve(&other), expected);
+    }
+
+    #[test]
+    fn full_socket_path_byte_boundary_allows_fitting_historical_ids() {
+        let repo = tempfile::tempdir().unwrap();
+        init_repo_with_commit(repo.path());
+        let address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        let limit = address.sun_path.len() - 1;
+        for slug_len in [55, 56] {
+            let base = tempfile::Builder::new()
+                .prefix("")
+                .tempdir_in("/tmp")
+                .unwrap();
+            let agent_id = format!("aa-{}", "a".repeat(slug_len));
+            let runtime_len = limit - format!("/waap/{}/{}.sock", "0".repeat(16), agent_id).len();
+            let component_len = runtime_len - base.path().as_os_str().as_bytes().len() - 1;
+            let component = format!("é{}", "x".repeat(component_len - 2));
+            for extra in ["", "x"] {
+                let runtime = base.path().join(format!("{component}{extra}"));
+                fs::create_dir(&runtime).unwrap();
+                fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+                let root = find_control_root_in(repo.path(), Some(runtime.as_os_str())).unwrap();
+                if extra.is_empty() {
+                    let path = socket_path(&root, &agent_id).unwrap();
+                    assert_eq!(path.as_os_str().as_bytes().len(), limit);
+                    let server = super::super::ControlServer::bind(&root, &agent_id).unwrap();
+                    assert!(path.exists());
+                    drop(server);
+                    assert!(!path.exists());
+                } else {
+                    let error = super::super::ControlServer::bind(&root, &agent_id)
+                        .err()
+                        .unwrap();
+                    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+                    assert!(error.to_string().contains("platform limit"));
+                    assert!(!runtime.join("waap").exists());
+                }
+            }
+        }
     }
 
     #[test]
@@ -175,12 +210,11 @@ mod tests {
         fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o750)).unwrap();
         assert!(resolve_socket(repo.path(), "aa-1", Some(runtime.path().as_os_str())).is_err());
         fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let error = resolve_socket(
-            repo.path(),
-            &format!("aa-{}", "a".repeat(63)),
-            Some(runtime.path().as_os_str()),
-        )
-        .unwrap_err();
+        let long_runtime = runtime.path().join("x".repeat(80));
+        fs::create_dir(&long_runtime).unwrap();
+        fs::set_permissions(&long_runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        let error =
+            resolve_socket(repo.path(), "aa-1", Some(long_runtime.as_os_str())).unwrap_err();
         assert!(error.to_string().contains("platform limit"));
         assert!(error.to_string().contains("shorten XDG_RUNTIME_DIR"));
         assert!(!runtime.path().join("waap").exists());

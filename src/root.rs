@@ -1,6 +1,7 @@
 use std::env;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -43,9 +44,16 @@ pub(crate) fn find_control_root_in(
             "XDG_RUNTIME_DIR must be an absolute path",
         ));
     }
-    let path = runtime_dir
-        .join("waap/control")
-        .join(repository_relative_path(repository_root)?);
+    let primary_repository_root = find_primary_repository_root(repository_root)?;
+    let digest = ring::digest::digest(
+        &ring::digest::SHA256,
+        primary_repository_root.as_os_str().as_bytes(),
+    );
+    let repo_hash: String = digest.as_ref()[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let path = runtime_dir.join("waap").join(repo_hash);
     Ok(ControlRoot { runtime_dir, path })
 }
 
@@ -96,6 +104,16 @@ pub(crate) fn find_waap_root(
 }
 
 pub(crate) fn repository_relative_path(start: &Path) -> io::Result<PathBuf> {
+    Ok(find_primary_repository_root(start)?
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(component) => Some(component),
+            _ => None,
+        })
+        .collect())
+}
+
+fn find_primary_repository_root(start: &Path) -> io::Result<PathBuf> {
     let repository_root = find_git_root(start)?;
     let mut command = Command::new("git");
     command.current_dir(&repository_root).args([
@@ -109,8 +127,11 @@ pub(crate) fn repository_relative_path(start: &Path) -> io::Result<PathBuf> {
     if !output.status.success() {
         return Err(not_in_repository());
     }
-    let common_git_dir =
-        PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string()).canonicalize()?;
+    let mut path_bytes = output.stdout;
+    if path_bytes.last() == Some(&b'\n') {
+        path_bytes.pop();
+    }
+    let common_git_dir = PathBuf::from(OsString::from_vec(path_bytes)).canonicalize()?;
     if common_git_dir.file_name().and_then(|name| name.to_str()) != Some(".git") {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -121,13 +142,7 @@ pub(crate) fn repository_relative_path(start: &Path) -> io::Result<PathBuf> {
         ));
     }
     let primary_repository_root = common_git_dir.parent().ok_or_else(not_in_repository)?;
-    Ok(primary_repository_root
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(component) => Some(component),
-            _ => None,
-        })
-        .collect())
+    Ok(primary_repository_root.to_path_buf())
 }
 
 #[cfg(test)]
@@ -162,13 +177,57 @@ mod tests {
         assert_eq!(control_root.runtime_dir(), runtime);
         assert_eq!(
             control_root.path(),
-            runtime
-                .join("waap/control")
-                .join(repo.canonicalize().unwrap().strip_prefix("/").unwrap())
+            runtime.join("waap").join({
+                use std::os::unix::ffi::OsStrExt;
+                let digest = ring::digest::digest(
+                    &ring::digest::SHA256,
+                    repo.canonicalize().unwrap().as_os_str().as_bytes(),
+                );
+                digest.as_ref()[..8]
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            })
         );
+        let hash = control_root.path().file_name().unwrap().to_str().unwrap();
+        assert_eq!(hash.len(), 16);
+        assert!(hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+        assert_eq!(resolve(&repo).path(), control_root.path());
         assert_eq!(resolve(&linked).path(), control_root.path());
         assert_ne!(resolve(&other).path(), control_root.path());
         assert!(!runtime.exists(), "resolution must not create directories");
+    }
+
+    #[test]
+    fn repository_identity_preserves_os_path_bytes() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let dir = tempdir().unwrap();
+        let runtime = dir.path().join("runtime");
+        let mut endpoints = Vec::new();
+        for name in [b"repo-\xff\n".to_vec(), b"repo-\xfe\n".to_vec()] {
+            let repo = dir.path().join(OsString::from_vec(name));
+            fs::create_dir(&repo).unwrap();
+            init_repo_with_commit(&repo);
+            let canonical = repo.canonicalize().unwrap();
+            let digest =
+                ring::digest::digest(&ring::digest::SHA256, canonical.as_os_str().as_bytes());
+            let expected: String = digest.as_ref()[..8]
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            let endpoint = find_control_root_in(&repo, Some(runtime.as_os_str())).unwrap();
+            assert_eq!(endpoint.path(), runtime.join("waap").join(expected));
+            assert_eq!(
+                super::repository_relative_path(&repo).unwrap(),
+                canonical.strip_prefix("/").unwrap()
+            );
+            endpoints.push(endpoint.path().to_path_buf());
+        }
+        assert_ne!(endpoints[0], endpoints[1]);
     }
 
     #[test]

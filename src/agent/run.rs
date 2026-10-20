@@ -411,11 +411,11 @@ mod tests {
         let record = seed_agent_record(repository.path(), agent_id, "ready");
         let runtime = tempdir().unwrap();
         fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let path = runtime
-            .path()
-            .join("waap/control")
-            .join(crate::root::repository_relative_path(repository.path()).unwrap())
-            .join("agents/aa-1.sock");
+        let path =
+            crate::root::find_control_root_in(repository.path(), Some(runtime.path().as_os_str()))
+                .unwrap()
+                .path()
+                .join("aa-1.sock");
         let endpoint = path.clone();
         let root = repository.path().to_path_buf();
         let prompt = "  λ\n'\" $() `prompt`  ";
@@ -1190,6 +1190,53 @@ mod tests {
             git(dir.path(), &["log", "-1", "--format=%s"]),
             "agent persisted failed"
         );
+    }
+
+    #[test]
+    fn long_socket_path_fails_before_worktree_socket_or_backend_creation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repository = tempdir().unwrap();
+        init_repo_with_commit(repository.path());
+        let agent_id = "aa-long-path";
+        seed_agent_record(repository.path(), agent_id, "ready");
+        let runtime_base = tempdir().unwrap();
+        let runtime = runtime_base.path().join("x".repeat(100));
+        fs::create_dir(&runtime).unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        let worktrees = git(repository.path(), &["worktree", "list", "--porcelain"])
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let branches = git(repository.path(), &["branch", "--list"]);
+        let mut backend = FakeBackend::default();
+        let error = super::run_agent_with_backend(
+            repository.path(),
+            repository.path(),
+            crate::root::find_control_root_in(repository.path(), Some(runtime.as_os_str())),
+            &OutputFormat::Json,
+            agent_id,
+            &AgentSystem::Codex,
+            &mut backend,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("platform limit"));
+        assert!(error.to_string().contains("shorten XDG_RUNTIME_DIR"));
+        assert!(backend.start_calls.is_empty());
+        assert_eq!(backend.wait_calls.load(Ordering::SeqCst), 0);
+        assert!(!runtime.join("waap").exists());
+        assert!(!repository.path().join("worktrees").exists());
+        assert_eq!(
+            git(repository.path(), &["worktree", "list", "--porcelain"])
+                .lines()
+                .filter(|line| line.starts_with("worktree "))
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+            worktrees
+        );
+        assert_eq!(git(repository.path(), &["branch", "--list"]), branches);
     }
 
     #[test]

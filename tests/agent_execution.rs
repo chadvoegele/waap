@@ -322,11 +322,20 @@ impl SteeringRun {
                 .spawn()
                 .unwrap(),
         ));
+        use std::os::unix::ffi::OsStrExt;
+        let digest = ring::digest::digest(
+            &ring::digest::SHA256,
+            root.canonicalize().unwrap().as_os_str().as_bytes(),
+        );
+        let hash: String = digest.as_ref()[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
         let socket = runtime
             .path()
-            .join("waap/control")
-            .join(root.canonicalize().unwrap().strip_prefix("/").unwrap())
-            .join(format!("agents/{agent_id}.sock"));
+            .join("waap")
+            .join(hash)
+            .join(format!("{agent_id}.sock"));
         wait_until(|| {
             socket.exists()
                 && if mode == "steering-startup" {

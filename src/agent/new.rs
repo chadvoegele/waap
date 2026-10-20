@@ -145,6 +145,26 @@ mod tests {
     }
 
     #[test]
+    fn create_agent_caps_new_ids_without_invalidating_historical_records() {
+        let dir = tempdir().unwrap();
+        let name = "a".repeat(55);
+        let first = create_agent_with_markdown(dir.path(), Some(&name), "Instructions.").unwrap();
+        let second = create_agent_with_markdown(dir.path(), Some(&name), "Instructions.").unwrap();
+        let longer =
+            create_agent_with_markdown(dir.path(), Some(&"b".repeat(63)), "Instructions.").unwrap();
+        assert_eq!(first.agent_id, format!("aa-{name}"));
+        for report in [&first, &second, &longer] {
+            assert_eq!(report.agent_id.len(), 58);
+        }
+        let historical = format!("aa-{}", "c".repeat(63));
+        let historical_path = dir.path().join("agents").join(&historical).join("agent.md");
+        fs::create_dir_all(historical_path.parent().unwrap()).unwrap();
+        fs::copy(&first.path, &historical_path).unwrap();
+        assert!(crate::agent::load_agent_report(dir.path(), &historical).is_ok());
+        assert!(check_waap(dir.path()).is_empty());
+    }
+
+    #[test]
     fn create_agent_without_name_uses_random_hex_id() {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join(".waap")).unwrap();

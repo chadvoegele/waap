@@ -12,8 +12,9 @@ pub(crate) fn available_record_id(
     prefix: &str,
     name: Option<&str>,
 ) -> io::Result<String> {
+    let max_slug_len = if prefix == "aa-" { 55 } else { 63 };
     if let Some(name) = name {
-        let slug = slugify_name(name)?;
+        let slug = slugify_name(name, max_slug_len)?;
         let record_id = format!("{prefix}{slug}");
         if !records_dir.join(&record_id).exists() {
             return Ok(record_id);
@@ -22,7 +23,7 @@ pub(crate) fn available_record_id(
         loop {
             let record_id = format!(
                 "{prefix}{}",
-                slug_with_hash_from_slug(&slug, &random_hex_chars(4)?)
+                slug_with_hash_from_slug(&slug, &random_hex_chars(4)?, max_slug_len)
             );
             if !records_dir.join(&record_id).exists() {
                 return Ok(record_id);
@@ -38,7 +39,7 @@ pub(crate) fn available_record_id(
     }
 }
 
-fn slugify_name(name: &str) -> io::Result<String> {
+fn slugify_name(name: &str, max_slug_len: usize) -> io::Result<String> {
     let mut slug = String::new();
     let mut previous_dash = false;
 
@@ -68,15 +69,15 @@ fn slugify_name(name: &str) -> io::Result<String> {
         slug.push_str("ticket");
     }
 
-    if slug.len() > 63 {
-        slug = slug_with_hash_from_slug(&slug, &random_hex_chars(4)?);
+    if slug.len() > max_slug_len {
+        slug = slug_with_hash_from_slug(&slug, &random_hex_chars(4)?, max_slug_len);
     }
 
     Ok(slug)
 }
 
-fn slug_with_hash_from_slug(slug: &str, hash: &str) -> String {
-    let prefix_len = slug.len().min(58);
+fn slug_with_hash_from_slug(slug: &str, hash: &str, max_slug_len: usize) -> String {
+    let prefix_len = slug.len().min(max_slug_len - hash.len() - 1);
     let mut prefix = slug[..prefix_len].trim_end_matches('-').to_string();
     if prefix.is_empty() {
         prefix.push_str("ticket");
@@ -110,20 +111,21 @@ mod tests {
     #[test]
     fn slug_generation_matches_shared_rules() {
         assert_eq!(
-            slugify_name("  List All Tickets!  ").unwrap(),
+            slugify_name("  List All Tickets!  ", 63).unwrap(),
             "list-all-tickets"
         );
         assert_eq!(
-            slugify_name("Bad---Spaces   Here").unwrap(),
+            slugify_name("Bad---Spaces   Here", 63).unwrap(),
             "bad-spaces-here"
         );
-        assert_eq!(slugify_name("Café: déjà_vu").unwrap(), "caf-djvu");
+        assert_eq!(slugify_name("Café: déjà_vu", 63).unwrap(), "caf-djvu");
     }
 
     #[test]
     fn long_slug_is_truncated_with_hex_hash() {
         let slug = slugify_name(
             "This is a very long record name that should be truncated because it exceeds limits",
+            63,
         )
         .unwrap();
 
@@ -143,6 +145,34 @@ mod tests {
 
         assert!(record_id.starts_with("tt-list-tickets-"));
         assert!(is_record_id(&record_id, "tt-"));
+    }
+
+    #[test]
+    fn generated_agent_and_ticket_boundaries_include_collision_suffixes() {
+        for (prefix, max_slug_len) in [("aa-", 55), ("tt-", 63)] {
+            let dir = tempdir().unwrap();
+            for length in [max_slug_len - 1, max_slug_len, max_slug_len + 1, 100] {
+                let name = "a".repeat(length);
+                let id = available_record_id(dir.path(), prefix, Some(&name)).unwrap();
+                assert_eq!(id.len(), prefix.len() + length.min(max_slug_len));
+                assert!(is_record_id(&id, prefix));
+                if length <= max_slug_len {
+                    assert_eq!(id, format!("{prefix}{name}"));
+                }
+                fs::create_dir(dir.path().join(&id)).unwrap();
+                let collision = available_record_id(dir.path(), prefix, Some(&name)).unwrap();
+                assert_ne!(collision, id);
+                assert_eq!(collision.len(), prefix.len() + max_slug_len);
+                assert!(is_record_id(&collision, prefix));
+                let suffix = &collision[collision.len() - 4..];
+                assert!(suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
+            }
+        }
+        assert!(is_record_id(&format!("aa-{}", "a".repeat(63)), "aa-"));
+        assert!(is_record_id(&format!("tt-{}", "a".repeat(63)), "tt-"));
+        assert!(!is_record_id(&format!("tt-{}", "a".repeat(64)), "tt-"));
     }
 
     #[test]
