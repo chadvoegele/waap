@@ -111,9 +111,10 @@ persistent `XDG_STATE_HOME`). The socket must not be placed in the waap state
 worktree or tracked by Git. No persisted endpoint registry is required.
 
 Runtime directories must be private to the current OS user, and socket access
-must be restricted to that user. Invalid runtime configuration and socket paths
-exceeding platform limits must fail clearly, never silently fall back into
-persistent state. The endpoint must be ready to handle requests before accepting
+must be restricted to that user. Missing or empty `XDG_RUNTIME_DIR`, a runtime
+directory not owned by the current user, or one accessible by other users must
+fail clearly. No fallback directory is permitted. Socket paths exceeding platform
+limits must also fail clearly; there must be no alternate naming scheme. The endpoint must be ready to handle requests before accepting
 them and must be closed and removed on normal run exit. A crash may leave a
 socket file; connecting to that stale endpoint must fail clearly, without state
 repair or automatic reconnection.
@@ -151,7 +152,8 @@ delivery may have occurred without acknowledgement, the error response must use
 that uncertainty. If no trustworthy request ID can be parsed, a protocol-error
 response may use `request_id: null` before closing the connection. Other errors
 include `invalid_request`, `unsupported_version`, `unknown_method`,
-`not_implemented`, `no_active_turn`, `agent_exited`, and `backend_rejected`.
+`not_implemented`, `no_active_turn`, `agent_exited`, `backend_rejected`,
+`request_too_large`, `timeout`, and `unsupported_backend_version`.
 
 Shared orchestration must use a bounded, in-memory FIFO queue for concurrent
 requests, dispatching them sequentially to the backend. Ordering is determined by
@@ -159,6 +161,33 @@ server enqueue order, not client invocation time. Queueing is not acceptance;
 responses follow backend acknowledgement or rejection. A full queue must reject
 excess requests with `busy`. Pending requests must be rejected with `agent_exited`
 if the agent finishes before dispatch. No requests survive the run.
+
+### Resource limits and deadlines
+
+The following limits are required for the initial implementation:
+
+| Resource | Limit | Required behavior |
+| --- | --- | --- |
+| Socket connection | 2 seconds | Fail clearly if connection cannot be established |
+| Steering acknowledgement | 30 seconds, including queue time | Expire undispatched requests; report uncertainty after unconfirmed dispatch |
+| Pending steering queue | 16 requests, plus one being dispatched | Reject overflow immediately with `busy` |
+| Request frame | 64 KiB, including JSON overhead and terminating newline | Reject larger frames with `request_too_large` |
+| Concurrent control connections | 32 per agent | Immediately close excess accepted connections without allocating request buffers |
+| Incomplete request | 5 seconds from connection acceptance | Close if a complete frame has not arrived |
+
+The client acknowledgement deadline starts after it sends the complete request;
+the server's 30-second deadline starts when it receives the complete frame. These
+are monotonic deadlines and must not reset when a request moves out of the queue.
+The client must not report a transport timeout as definite rejection when it lacks
+a response establishing that fact.
+
+Before dispatching, the server must check the request deadline. A request that
+expires while queued must be removed without calling the backend and receive
+`accepted: false` with `timeout`. After dispatch, missing acknowledgement by the
+deadline must produce `accepted: null` with `acceptance_unknown`, not a definite
+rejection. No automatic retries are permitted. A timed-out dispatched operation
+must not cause concurrent backend dispatch or corrupt response correlation when
+a late acknowledgement arrives.
 
 Shared orchestration must service control connections while waiting for backend
 completion, and the backend must continue processing events during steering.
@@ -189,6 +218,11 @@ handshake state. Prompts must not be added to routine diagnostics.
 
 ### Compatibility
 
+Codex steering must use native `turn/steer` and be tested against the supported
+Codex app-server version. If the server lacks that method, the Codex backend must
+return `unsupported_backend_version` with a diagnostic identifying the missing
+method. It must not emulate steering by restarting, resuming, or starting a turn.
+
 Existing run, stop, state, and worktree behavior must remain unchanged. Steering
 must not mark a run completed, aborted, or otherwise alter its lifecycle status,
 including on delivery failure. No persistent state migration is required.
@@ -208,17 +242,18 @@ including on delivery failure. No persistent state migration is required.
   pending-request rejection on exit; bounded timeouts; exit during submission;
   startup and completed-turn rejection; ambiguous acknowledgement loss without
   retry; NDJSON framing, version/schema validation, and request correlation.
+- Limit/deadline tests: 2-second connection timeout, 30-second acknowledgement
+  deadline including queue time, 16 pending requests plus one dispatch, 64-KiB
+  frame boundary, 32-connection cap, and 5-second incomplete-frame timeout.
+  Use controlled clocks where possible. Verify expired queued requests never
+  reach the backend and late acknowledgements cannot corrupt later responses.
+- Codex compatibility tests: native `turn/steer` against the supported app-server
+  version and missing-method rejection without restart or new-turn fallback.
 - Isolation/lifecycle tests: symmetric socket lookup across repository worktrees,
   same agent ID in two repositories, stale endpoint, restricted endpoint access,
-  path-length errors, and normal cleanup; no run ID or handshake is required.
+  path-length errors without alternate naming, missing/empty or insecure
+  `XDG_RUNTIME_DIR` rejection without fallback, and normal cleanup; no run ID or
+  handshake is required.
 - Regression tests: run output, stop interruption, completion, and worktree cleanup
   continue to work while steering requests are processed.
 
-## Open questions
-
-- Select and document concrete connection/acknowledgement timeouts, queue capacity,
-  and request-size/connection limits to bound resource use.
-- Decide whether an unavailable `XDG_RUNTIME_DIR` is always an error or warrants
-  a secure runtime-only fallback; no fallback to persisted waap state is allowed.
-- Verify `turn/steer` against the supported Codex app-server version; servers
-  without that method must fail clearly rather than emulate steering by restarting.
