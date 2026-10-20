@@ -329,6 +329,42 @@ fn fifo_allows_one_dispatch_and_sixteen_pending_then_rejects_overflow() {
 }
 
 #[test]
+fn fragmented_utf8_enqueues_only_complete_frames_in_server_receipt_order() {
+    let mut fixture = Fixture::new();
+    let prompt = "雪\nλ 'quoted' $(data)";
+    let bytes = frame(1, prompt);
+    let split = bytes.iter().position(|byte| *byte == 0xe9).unwrap() + 1;
+    let mut slow = fixture.connect(&bytes[..split]);
+    fixture.tick();
+    assert!(fixture.server.pending.is_empty());
+    assert!(fixture.command_rx.try_recv().is_err());
+    let fast = fixture.request(2, "complete first");
+    fixture.tick();
+    assert_eq!(fixture.command_rx.try_recv().unwrap().0, "complete first");
+    slow.write_all(&bytes[split..bytes.len() - 1]).unwrap();
+    fixture.tick();
+    assert!(
+        fixture.server.pending.is_empty(),
+        "newline terminates a frame"
+    );
+    slow.write_all(b"\n").unwrap();
+    fixture.tick();
+    assert_eq!(fixture.server.pending.len(), 1);
+    fixture.acknowledge(Ok(()));
+    assert_eq!(
+        read_response(fast)["request_id"],
+        Uuid::from_u128(2).to_string()
+    );
+    assert_eq!(fixture.command_rx.try_recv().unwrap().0, prompt);
+    fixture.acknowledge(Ok(()));
+    assert_eq!(
+        read_response(slow)["request_id"],
+        Uuid::from_u128(1).to_string()
+    );
+    assert!(fixture.command_rx.try_recv().is_err());
+}
+
+#[test]
 fn frame_limit_includes_the_newline_and_connection_serves_only_one_request() {
     let mut fixture = Fixture::new();
     let overhead = frame(1, "").len();

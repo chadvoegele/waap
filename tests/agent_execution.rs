@@ -75,9 +75,27 @@ for line in sys.stdin:
     if method == 'thread/start':
         result = {'thread': {'id': 'th_test'}}
     if method == 'turn/start':
+        if mode == 'steering-startup':
+            while not os.path.exists(os.path.join(root, 'release-start')):
+                time.sleep(0.005)
         result = {'turn': {'id': 'tu_test'}}
     if method == 'turn/steer':
         steers += 1
+        if mode == 'steering-held':
+            while not os.path.exists(os.path.join(root, 'release-steer')):
+                if os.path.exists(os.path.join(root, 'complete')):
+                    emit({'method': 'turn/completed', 'params': {
+                        'threadId': 'th_test', 'turn': {'id': 'tu_test', 'status': 'completed'}}})
+                    time.sleep(60)
+                emit({'method': 'item/agentMessage/delta', 'params': {
+                    'threadId': 'th_test', 'turnId': 'tu_test', 'delta': 'waiting for acknowledgement\n'}})
+                time.sleep(0.01)
+        if mode == 'steering-eof':
+            sys.exit(0)
+        if mode in ('steering-rejected', 'steering-missing'):
+            code = -32601 if mode == 'steering-missing' else -32000
+            emit({'id': request['id'], 'error': {'code': code, 'message': request['params']['input'][0]['text']}})
+            continue
         result = {'turnId': 'tu_test'}
         emit({'method': 'item/agentMessage/delta', 'params': {
             'threadId': 'th_test', 'turnId': 'tu_test', 'delta': 'steered output\n'}})
@@ -221,43 +239,81 @@ fn wait_until(mut predicate: impl FnMut() -> bool) {
     }
 }
 
-fn submit_native_steering(root: &Path, runtime: &Path, prompt: &str) {
-    let output = waap_command(root, "steering", runtime)
-        .args([
-            "--output-format",
-            "json",
-            "agent",
-            "steer",
-            "--agent-id",
-            "aa-test",
-            "--prompt",
-            prompt,
-        ])
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    assert_eq!(
-        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-        json!({"agent_id": "aa-test", "accepted": true})
-    );
-}
-
 #[test]
 fn native_codex_steering_through_run_owner_preserves_state_output_and_cleanup() {
     for interrupt in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        init_repo(root);
-        seed_backend(root);
-        assert!(waap(root, &["init"], "steering").status.success());
-        assert!(waap(root, &["agent", "new", "--name", "Test"], "steering")
+        let mut run = SteeringRun::start("steering-lifecycle");
+        let before = run.snapshot();
+        let prompt = "  exact\nλ 'quotes' \"double\" $(touch /never) & ; ";
+        let output = run.steer(prompt).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+            json!({"agent_id":run.agent_id, "accepted":true})
+        );
+        assert_eq!(run.snapshot(), before);
+        assert!(run
+            .repo
+            .path()
+            .join("worktrees")
+            .join(&run.agent_id)
+            .is_dir());
+        if interrupt {
+            run.stop();
+        } else {
+            let output = run.steer("second").output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            fs::write(run.repo.path().join("release"), "complete").unwrap();
+        }
+        run.finish(if interrupt { "aborted" } else { "completed" }, !interrupt);
+        assert!(fs::read_to_string(run.repo.path().join("run.stdout"))
+            .unwrap()
+            .contains("steered output"));
+        let requests = run.steering_requests();
+        assert_eq!(requests.len(), if interrupt { 1 } else { 2 });
+        assert_eq!(
+            requests[0]["params"],
+            json!({"threadId":"th_test","expectedTurnId":"tu_test",
+                "input":[{"type":"text","text":prompt}]})
+        );
+        assert_eq!(
+            run.requests()
+                .iter()
+                .filter(|request| request["method"] == "turn/interrupt")
+                .count(),
+            usize::from(interrupt)
+        );
+        assert!(waap(run.repo.path(), &["check"], "steering")
             .status
             .success());
+    }
+}
+
+struct SteeringRun {
+    repo: tempfile::TempDir,
+    runtime: tempfile::TempDir,
+    child: RunningChild,
+    mode: &'static str,
+    agent_id: String,
+    socket: std::path::PathBuf,
+}
+
+impl SteeringRun {
+    fn start(mode: &'static str) -> Self {
+        let repo = tempfile::tempdir().unwrap();
         let runtime = tempfile::tempdir().unwrap();
+        let root = repo.path();
+        init_repo(root);
+        seed_backend(root);
         fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let mut child = RunningChild(Some(
-            waap_command(root, "steering", runtime.path())
-                .args(["agent", "run", "--agent-id", "aa-test", "--system", "codex"])
+        assert!(waap(root, &["init"], mode).status.success());
+        assert!(waap(root, &["agent", "new", "--name", mode], mode)
+            .status
+            .success());
+        let agent_id = format!("aa-{mode}");
+        let child = RunningChild(Some(
+            waap_command(root, mode, runtime.path())
+                .args(["agent", "run", "--agent-id", &agent_id, "--system", "codex"])
                 .stdout(fs::File::create(root.join("run.stdout")).unwrap())
                 .stderr(Stdio::piped())
                 .spawn()
@@ -267,53 +323,115 @@ fn native_codex_steering_through_run_owner_preserves_state_output_and_cleanup() 
             .path()
             .join("waap/control")
             .join(root.canonicalize().unwrap().strip_prefix("/").unwrap())
-            .join("agents/aa-test.sock");
+            .join(format!("agents/{agent_id}.sock"));
         wait_until(|| {
             socket.exists()
-                && fs::read_to_string(root.join("run.stdout"))
-                    .unwrap()
-                    .contains("native turn active")
+                && if mode == "steering-startup" {
+                    fs::read_to_string(root.join("requests.ndjson"))
+                        .unwrap_or_default()
+                        .contains("turn/start")
+                } else {
+                    fs::read_to_string(root.join("run.stdout"))
+                        .unwrap()
+                        .contains("native turn active")
+                }
         });
-        let record_path = root.join(".state/agents/aa-test/agent.md");
-        let record = fs::read(&record_path).unwrap();
-        let head = git(&root.join(".state"), &["rev-parse", "HEAD"]);
-        let prompt = "  exact\nλ 'quotes' \"double\" $(touch /never) & ; ";
-        submit_native_steering(root, runtime.path(), prompt);
-        assert_eq!(fs::read(&record_path).unwrap(), record);
-        assert_eq!(git(&root.join(".state"), &["rev-parse", "HEAD"]), head);
-        assert!(root.join("worktrees/aa-test").is_dir());
-        if interrupt {
-            assert_eq!(
-                unsafe { libc::kill(child.0.as_ref().unwrap().id() as i32, libc::SIGTERM) },
-                0
-            );
-        } else {
-            submit_native_steering(root, runtime.path(), "second");
-            fs::write(root.join("release"), "complete").unwrap();
+        Self {
+            repo,
+            runtime,
+            child,
+            mode,
+            agent_id,
+            socket,
         }
-        wait_until(|| child.0.as_mut().unwrap().try_wait().unwrap().is_some());
-        let output = child.0.take().unwrap().wait_with_output().unwrap();
-        assert_eq!(output.status.success(), !interrupt, "{output:?}");
-        assert!(fs::read_to_string(root.join("run.stdout"))
-            .unwrap()
-            .contains("steered output"));
-        let record = fs::read_to_string(record_path).unwrap();
-        assert!(record.contains(if interrupt {
-            "status = \"failed\""
-        } else {
-            "status = \"completed\""
-        }));
-        assert!(record.contains("session_id = \"th_test\""));
-        assert!(!socket.exists());
-        assert!(!root.join("worktrees/aa-test").exists());
-        let pid = fs::read_to_string(root.join("backend.pid")).unwrap();
-        assert!(!Path::new(&format!("/proc/{pid}")).exists());
-        let requests: Vec<Value> = fs::read_to_string(root.join("requests.ndjson"))
+    }
+
+    fn steer(&self, prompt: &str) -> Command {
+        let mut command = waap_command(self.repo.path(), self.mode, self.runtime.path());
+        command.args([
+            "--output-format",
+            "json",
+            "agent",
+            "steer",
+            "--agent-id",
+            &self.agent_id,
+            "--prompt",
+            prompt,
+        ]);
+        command
+    }
+
+    fn snapshot(&self) -> (Vec<u8>, String, String) {
+        let state = self.repo.path().join(".state");
+        (
+            fs::read(state.join(format!("agents/{}/agent.md", self.agent_id))).unwrap(),
+            git(&state, &["rev-parse", "HEAD"]),
+            git(&state, &["status", "--porcelain"]),
+        )
+    }
+
+    fn requests(&self) -> Vec<Value> {
+        fs::read_to_string(self.repo.path().join("requests.ndjson"))
             .unwrap()
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        assert!(requests.iter().all(|request| matches!(
+            .collect()
+    }
+
+    fn steering_requests(&self) -> Vec<Value> {
+        self.requests()
+            .into_iter()
+            .filter(|request| request["method"] == "turn/steer")
+            .collect()
+    }
+
+    fn stop(&self) {
+        let stopped = waap_command(self.repo.path(), self.mode, self.runtime.path())
+            .args(["agent", "stop", "--agent-id", &self.agent_id])
+            .output()
+            .unwrap();
+        assert!(stopped.status.success(), "{stopped:?}");
+    }
+
+    fn finish(&mut self, status: &str, success: bool) {
+        wait_until(|| self.child.0.as_mut().unwrap().try_wait().unwrap().is_some());
+        let output = self.child.0.take().unwrap().wait_with_output().unwrap();
+        assert_eq!(output.status.success(), success, "{output:?}");
+        let snapshot = self.snapshot();
+        let record = String::from_utf8(snapshot.0.clone()).unwrap();
+        assert!(
+            record.contains(&format!("status = \"{status}\"")),
+            "{record}"
+        );
+        assert!(record.contains("session_id = \"th_test\""));
+        assert!(
+            snapshot.2.is_empty(),
+            "unexpected persisted files: {snapshot:?}"
+        );
+        assert!(!self.socket.exists());
+        assert!(!self
+            .repo
+            .path()
+            .join("worktrees")
+            .join(&self.agent_id)
+            .exists());
+        assert!(!git(self.repo.path(), &["worktree", "list"]).contains(&self.agent_id));
+        let pid = fs::read_to_string(self.repo.path().join("backend.pid")).unwrap();
+        assert!(!Path::new(&format!("/proc/{pid}")).exists());
+        let later = self.steer("after exit").output().unwrap();
+        assert!(!later.status.success(), "{later:?}");
+        assert!(String::from_utf8_lossy(&later.stderr).contains("expected running"));
+        assert_eq!(self.snapshot(), snapshot);
+        for method in ["initialize", "thread/start", "turn/start"] {
+            assert_eq!(
+                self.requests()
+                    .iter()
+                    .filter(|request| request["method"] == method)
+                    .count(),
+                1,
+            );
+        }
+        assert!(self.requests().iter().all(|request| matches!(
             request["method"].as_str(),
             Some(
                 "initialize"
@@ -324,32 +442,164 @@ fn native_codex_steering_through_run_owner_preserves_state_output_and_cleanup() 
                     | "turn/interrupt"
             )
         )));
-        for method in ["initialize", "thread/start", "turn/start"] {
-            assert_eq!(
-                requests
-                    .iter()
-                    .filter(|request| request["method"] == method)
-                    .count(),
-                1
-            );
-        }
-        let steering: Vec<_> = requests
-            .iter()
-            .filter(|request| request["method"] == "turn/steer")
-            .collect();
-        assert_eq!(steering.len(), if interrupt { 1 } else { 2 });
-        assert_eq!(
-            steering[0]["params"],
-            json!({"threadId":"th_test","expectedTurnId":"tu_test",
-            "input":[{"type":"text","text":prompt}]})
-        );
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|request| request["method"] == "turn/interrupt")
-                .count(),
-            usize::from(interrupt)
-        );
-        assert!(waap(root, &["check"], "steering").status.success());
     }
+}
+
+#[test]
+fn startup_steering_is_rejected_without_deferring_delivery_to_the_active_turn() {
+    let mut run = SteeringRun::start("steering-startup");
+    let before = run.snapshot();
+    let output = run.steer("too early").output().unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no_active_turn"));
+    assert_eq!(run.snapshot(), before);
+    fs::write(run.repo.path().join("release-start"), "activate").unwrap();
+    wait_until(|| {
+        fs::read_to_string(run.repo.path().join("run.stdout"))
+            .unwrap()
+            .contains("native turn active")
+    });
+    run.stop();
+    run.finish("aborted", false);
+    assert!(run.steering_requests().is_empty());
+}
+
+#[test]
+fn native_failures_reach_cli_without_prompt_disclosure_retries_or_lifecycle_changes() {
+    for (mode, diagnostic) in [
+        ("steering-rejected", "backend_rejected"),
+        ("steering-missing", "unsupported_backend_version"),
+        ("steering-eof", "acceptance is unknown"),
+    ] {
+        let mut run = SteeringRun::start(mode);
+        let before = run.snapshot();
+        let prompt = "secret-should-not-appear-in-diagnostics";
+        let output = run.steer(prompt).output().unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains(diagnostic), "{stderr}");
+        assert!(!stderr.contains(prompt), "{stderr}");
+        assert_eq!(run.steering_requests().len(), 1);
+        assert_eq!(
+            run.steering_requests()[0]["params"],
+            json!({
+                "threadId":"th_test", "expectedTurnId":"tu_test",
+                "input":[{"type":"text", "text":prompt}]
+            })
+        );
+        if mode == "steering-eof" {
+            run.finish("failed", false);
+        } else {
+            assert_eq!(run.snapshot(), before);
+            assert!(run.socket.exists());
+            assert!(run
+                .repo
+                .path()
+                .join("worktrees")
+                .join(&run.agent_id)
+                .is_dir());
+            run.stop();
+            run.finish("aborted", false);
+        }
+    }
+}
+
+#[test]
+fn concurrent_cli_calls_wait_for_native_ack_while_run_output_continues() {
+    let mut run = SteeringRun::start("steering-held");
+    let before = run.snapshot();
+    let mut first = RunningChild(Some(
+        run.steer("first").stdout(Stdio::piped()).spawn().unwrap(),
+    ));
+    wait_until(|| run.steering_requests().len() == 1);
+    let mut second = RunningChild(Some(
+        run.steer("second").stdout(Stdio::piped()).spawn().unwrap(),
+    ));
+    wait_until(|| {
+        fs::read_to_string(run.repo.path().join("run.stdout"))
+            .unwrap()
+            .contains("waiting for acknowledgement")
+    });
+    assert!(first.0.as_mut().unwrap().try_wait().unwrap().is_none());
+    assert!(second.0.as_mut().unwrap().try_wait().unwrap().is_none());
+    assert_eq!(
+        run.steering_requests().len(),
+        1,
+        "only one native dispatch may be active"
+    );
+    assert_eq!(run.snapshot(), before);
+    fs::write(run.repo.path().join("release-steer"), "acknowledge").unwrap();
+    for child in [&mut first, &mut second] {
+        wait_until(|| child.0.as_mut().unwrap().try_wait().unwrap().is_some());
+        let output = child.0.take().unwrap().wait_with_output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+            json!({"agent_id":run.agent_id, "accepted":true})
+        );
+    }
+    let requests = run.steering_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["params"]["input"][0]["text"], "first");
+    assert_eq!(requests[1]["params"]["input"][0]["text"], "second");
+    assert_ne!(requests[0]["id"], requests[1]["id"]);
+    assert_eq!(run.snapshot(), before);
+    fs::write(run.repo.path().join("release"), "complete").unwrap();
+    run.finish("completed", true);
+}
+
+#[test]
+fn completion_during_native_submission_reports_uncertainty_and_rejects_pending_requests() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let mut run = SteeringRun::start("steering-held");
+    let mut active = RunningChild(Some(
+        run.steer("active").stderr(Stdio::piped()).spawn().unwrap(),
+    ));
+    wait_until(|| run.steering_requests().len() == 1);
+    let mut pending = Vec::new();
+    for index in 0..16 {
+        let mut stream = UnixStream::connect(&run.socket).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let id = uuid::Uuid::from_u128(index).to_string();
+        writeln!(
+            stream,
+            "{}",
+            json!({"version":1,"request_id":id,
+            "method":"steer","prompt":"pending"})
+        )
+        .unwrap();
+        pending.push((id, stream));
+    }
+    // The overflow reply proves all sixteen earlier frames reached the queue.
+    let overflow = run.steer("overflow").output().unwrap();
+    assert!(!overflow.status.success(), "{overflow:?}");
+    assert!(String::from_utf8_lossy(&overflow.stderr).contains("busy"));
+    fs::write(
+        run.repo.path().join("complete"),
+        "exit before acknowledgement",
+    )
+    .unwrap();
+    wait_until(|| active.0.as_mut().unwrap().try_wait().unwrap().is_some());
+    let output = active.0.take().unwrap().wait_with_output().unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("acceptance is unknown"));
+    for (id, stream) in pending {
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        let response: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["request_id"], id);
+        assert_eq!(response["accepted"], false);
+        assert_eq!(response["error"]["code"], "agent_exited");
+    }
+    assert_eq!(
+        run.steering_requests().len(),
+        1,
+        "pending calls must never dispatch"
+    );
+    run.finish("completed", true);
 }
