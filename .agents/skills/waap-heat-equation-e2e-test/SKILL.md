@@ -12,7 +12,7 @@ This skill describes an end-to-end waap test by making a simple 2D heat equation
 1. Create a new repository in a temporary directory.
 2. Write a spec for a 2D heat equation simulator using a finite difference method.
 3. Use the waap skill to create a ticket to write the implementation tickets based on the spec.
-4. Run a waap planner agent for that ticket.
+4. Run a waap planner agent for that ticket using Codex, and steer it while active as described below.
 5. Repeatedly run waap developer agents for unblocked pending tickets.
 6. Run the final program.
 7. Verify the output is numerically plausible and satisfies the spec.
@@ -24,6 +24,14 @@ Use a `waap` binary on `PATH`. When testing an uninstalled local checkout, prepe
 ```sh
 export PATH="/path/to/waap/target/debug:$PATH"
 ```
+
+Use an authenticated Codex app server with native `turn/steer` support. Set a private runtime directory with a short path for the control socket:
+
+```sh
+export XDG_RUNTIME_DIR=$(mktemp -d /tmp/waap-runtime.XXXXXX)
+```
+
+Remove this test-created directory only after all runs have exited.
 
 ## Test Repository Setup
 
@@ -63,6 +71,28 @@ Build a small command-line program that simulates the 2D heat equation on a squa
 5. The verification command exits successfully.
 ```
 
+## Steer the Planner
+
+Start the planner with `waap agent run --agent-id "$agentid" --system codex` in a managed background process or another terminal. From the same temporary repository, wait for its first response or tool event so its turn is active. Keep the initial instructions free of the marker below.
+
+Generate a marker after the run starts, then steer the planner once:
+
+```sh
+marker="STEERING_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+waap --output-format json agent steer --agent-id "$agentid" \
+  --prompt "Before finishing, write exactly $marker to steering-check.txt in your worktree and commit it with your work. Continue planning the heat equation implementation."
+```
+
+Require exit code 0 and `accepted: true`. Acceptance alone is not proof of compliance: after the planner completes and integrates its changes, verify:
+
+```sh
+test "$(cat steering-check.txt)" = "$marker"
+```
+
+Check that steering did not change the agent's session ID, status, or instructions; normal completion may change its status afterward. Verify the planner completes its original ticket and the run removes its worktree and control socket. A later steering call must reject the completed agent.
+
+Record the command results and marker evidence. If the turn ends before submission or acceptance is unknown, report the failure; do not automatically retry or claim steering passed.
+
 ## Success Criteria
 
 The end-to-end run succeeds only when:
@@ -71,6 +101,7 @@ The end-to-end run succeeds only when:
 2. All waap tickets and agents are marked as completed.
 3. The generated heat equation program runs.
 4. The verification command passes.
-5. The result is documented with the temporary repository path and commands used.
+5. Steering is accepted, its marker is verified, session continuity and cleanup are checked, and steering after completion is rejected.
+6. The result is documented with the temporary repository path and commands used.
 
 If any step fails, fix the workflow or generated project and rerun from the failed step until the program is verified.
