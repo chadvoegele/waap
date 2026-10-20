@@ -34,11 +34,13 @@
   <text x="374" y="142" class="small">read</text>
 
   <rect x="825" y="105" width="325" height="125" rx="8" class="error"/>
-  <text x="840" y="135" class="label">Validation / backend errors</text>
-  <text x="840" y="163">Unknown ID / non-running / invalid text</text>
-  <text x="840" y="188">Claude + OpenCode backend methods:</text>
-  <text x="840" y="213">steering not implemented for backend …</text>
-  <path d="M760 166 H825" class="line"/>
+  <text x="840" y="135" class="label">4b. Claude / OpenCode backend</text>
+  <text x="840" y="163">Implementation: steer(prompt)</text>
+  <text x="840" y="188">Returns not implemented</text>
+  <text x="840" y="213">Only rejected inside the backend</text>
+  <path d="M725 305 V260 H900 V230" class="line"/>
+  <text x="775" y="252" class="small">steer(prompt)</text>
+  <path d="M1040 230 V280 H750 V305" class="reply"/>
 
   <rect x="30" y="305" width="330" height="130" rx="8" class="box"/>
   <text x="45" y="335" class="label">2. Shared steering client</text>
@@ -46,7 +48,7 @@
   <text x="45" y="388">Send version, request ID, method, prompt</text>
   <text x="45" y="413">Wait for correlated, bounded response</text>
   <path d="M190 230 V305" class="line"/>
-  <text x="205" y="273" class="small">Codex only</text>
+  <text x="205" y="273" class="small">All backends</text>
 
   <rect x="435" y="305" width="325" height="130" rx="8" class="box"/>
   <text x="450" y="335" class="label">3. Existing waap agent run owner</text>
@@ -58,12 +60,12 @@
   <path d="M435 410 H360" class="reply"/>
 
   <rect x="825" y="305" width="325" height="130" rx="8" class="box"/>
-  <text x="840" y="335" class="label">4. Existing Codex app server</text>
-  <text x="840" y="363">turn/steer</text>
+  <text x="840" y="335" class="label">4a. Codex backend: steer(prompt)</text>
+  <text x="840" y="363">Existing app server: turn/steer</text>
   <text x="840" y="388">threadId, expectedTurnId</text>
   <text x="840" y="413">input: [{ type: text, text: prompt }]</text>
   <path d="M760 350 H825" class="line"/>
-  <text x="768" y="338" class="small">JSON-RPC</text>
+  <text x="768" y="338" class="small">call</text>
   <path d="M825 410 H760" class="reply"/>
 
   <rect x="435" y="510" width="325" height="155" rx="8" class="state"/>
