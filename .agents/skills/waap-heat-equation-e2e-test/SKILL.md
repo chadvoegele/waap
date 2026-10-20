@@ -14,7 +14,7 @@ This skill describes an end-to-end waap test by making a simple 2D heat equation
 3. Use the waap skill to create a ticket to write the implementation tickets based on the spec.
 4. Run a waap planner agent for that ticket.
 5. Repeatedly run waap developer agents for unblocked pending tickets.
-6. While the visualization developer is running, steer it to write the final ASCII-art visualization to `final-heatmap.txt` and commit it. Introduce this request only through steering, not the initial spec or instructions. Use Codex for this agent and the waap CLI documentation for command usage.
+6. While the visualization developer is running, steer it to write the final ASCII-art visualization to `final-heatmap.txt` and commit it.
 7. Run the final program and compare its visualization with `final-heatmap.txt`.
 8. Verify the output is numerically plausible and satisfies the spec.
 
