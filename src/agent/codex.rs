@@ -3,12 +3,12 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{ChildStdin, ChildStdout, Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 use serde_json::{json, Value as JsonValue};
 
 use super::backend::{
-    AbortContext, AgentSystemBackend, RunHandle, RunOutcome, StartContext, StartedRun,
+    signal_agent_run, AbortContext, AgentSystemBackend, InterruptHandler, RunHandle, RunOutcome,
+    StartContext, StartedRun,
 };
 use super::process::AgentProcess;
 use super::{AgentRunOptions, ReasoningEffort};
@@ -44,35 +44,13 @@ impl AgentSystemBackend for CodexBackend {
     }
 
     fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
-        signal_codex_run(context.agent_id)
+        signal_agent_run(context.agent_id)
     }
 }
 
 struct CodexAppServer {
     client: CodexClient<BufReader<ChildStdout>, ChildStdin, io::Stdout>,
     _process: AgentProcess,
-}
-
-struct InterruptHandler {
-    flag: Arc<AtomicBool>,
-    registration: signal_hook::SigId,
-}
-
-impl InterruptHandler {
-    fn register() -> io::Result<Self> {
-        let flag = Arc::new(AtomicBool::new(false));
-        let registration =
-            signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&flag)).map_err(
-                |error| io::Error::other(format!("failed to install SIGTERM handler: {error}")),
-            )?;
-        Ok(Self { flag, registration })
-    }
-}
-
-impl Drop for InterruptHandler {
-    fn drop(&mut self) {
-        signal_hook::low_level::unregister(self.registration);
-    }
 }
 
 struct CodexRun {
@@ -93,11 +71,7 @@ impl RunHandle for CodexRun {
             &turn_id,
             &self.interrupt.flag,
         )?;
-        if status.is_success() {
-            Ok(RunOutcome::Completed)
-        } else {
-            Ok(RunOutcome::Failed(std::process::ExitCode::FAILURE))
-        }
+        Ok(status.outcome())
     }
 }
 
@@ -156,24 +130,6 @@ fn get_codex_run_config(options: &AgentRunOptions) -> io::Result<CodexRunConfig>
     })
 }
 
-fn signal_codex_run(agent_id: &str) -> io::Result<()> {
-    let mut command = ProcessCommand::new("pkill");
-    command
-        .arg("-TERM")
-        .arg("-f")
-        .arg(format!("agent run --agent-id {agent_id}"));
-    map_pkill_status(command)
-}
-
-fn map_pkill_status(mut command: ProcessCommand) -> io::Result<()> {
-    let status = command.status()?;
-    match status.code() {
-        Some(0) | Some(1) => Ok(()),
-        Some(code) => Err(io::Error::other(format!("pkill exited with status {code}"))),
-        None => Err(io::Error::other("pkill terminated by signal")),
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TurnStatus {
     Completed,
@@ -183,8 +139,12 @@ enum TurnStatus {
 }
 
 impl TurnStatus {
-    fn is_success(self) -> bool {
-        matches!(self, TurnStatus::Completed)
+    fn outcome(self) -> RunOutcome {
+        match self {
+            Self::Completed => RunOutcome::Completed,
+            Self::Interrupted => RunOutcome::Aborted,
+            Self::Failed | Self::InProgress => RunOutcome::Failed(std::process::ExitCode::FAILURE),
+        }
     }
 
     fn from_wire(value: &str) -> Option<TurnStatus> {
@@ -816,11 +776,17 @@ mod tests {
     }
 
     #[test]
-    fn is_success_only_for_completed() {
-        assert!(TurnStatus::Completed.is_success());
-        assert!(!TurnStatus::Failed.is_success());
-        assert!(!TurnStatus::Interrupted.is_success());
-        assert!(!TurnStatus::InProgress.is_success());
+    fn turn_status_maps_interruption_to_aborted_outcome() {
+        assert_eq!(TurnStatus::Completed.outcome(), RunOutcome::Completed);
+        assert_eq!(TurnStatus::Interrupted.outcome(), RunOutcome::Aborted);
+        assert_eq!(
+            TurnStatus::Failed.outcome(),
+            RunOutcome::Failed(std::process::ExitCode::FAILURE)
+        );
+        assert_eq!(
+            TurnStatus::InProgress.outcome(),
+            RunOutcome::Failed(std::process::ExitCode::FAILURE)
+        );
     }
 
     #[test]
@@ -854,22 +820,5 @@ mod tests {
 
         assert_eq!(status, TurnStatus::Completed);
         assert!(client.writer.is_empty(), "no request should be written");
-    }
-
-    #[test]
-    fn signal_status_maps_zero_and_one_to_ok_and_other_to_err() {
-        for code in [0, 1] {
-            let mut command = ProcessCommand::new("sh");
-            command.arg("-c").arg(format!("exit {code}"));
-            assert!(
-                map_pkill_status(command).is_ok(),
-                "exit {code} should be Ok"
-            );
-        }
-
-        let mut command = ProcessCommand::new("sh");
-        command.arg("-c").arg("exit 2");
-        let error = map_pkill_status(command).expect_err("exit 2 should be Err");
-        assert!(error.to_string().contains("status 2"));
     }
 }

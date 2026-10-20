@@ -63,14 +63,14 @@ pub(crate) enum AgentCommand {
         agent_id: String,
 
         /// Agent system used to run the agent.
-        #[arg(long, value_enum, default_value = "opencode")]
+        #[arg(long, value_enum, default_value = "pi")]
         system: AgentSystem,
 
-        /// Codex model for this run (overrides CODEX_MODEL).
+        /// Pi or Codex model for this run (overrides the backend environment).
         #[arg(long, value_parser = parse_non_empty_model)]
         model: Option<String>,
 
-        /// Codex reasoning effort for this run (overrides CODEX_REASONING_EFFORT).
+        /// Pi or Codex reasoning effort (overrides the backend environment).
         #[arg(long, value_enum)]
         reasoning_effort: Option<ReasoningEffort>,
     },
@@ -79,7 +79,7 @@ pub(crate) enum AgentCommand {
         #[arg(long)]
         agent_id: String,
     },
-    /// Stop running agents, aborting OpenCode sessions when session_id is present.
+    /// Stop running agents, aborting the persisted backend session when present.
     Stop {
         #[arg(long)]
         agent_id: Option<String>,
@@ -486,7 +486,7 @@ mod tests {
             Command::Agent {
                 command: AgentCommand::Run {
                     agent_id,
-                    system: AgentSystem::Opencode,
+                    system: AgentSystem::Pi,
                     ..
                 }
             } if agent_id == "aa-3881fda0"
@@ -544,6 +544,36 @@ mod tests {
     }
 
     #[test]
+    fn parses_agent_run_with_pi_system_and_options() {
+        let cli = Cli::try_parse_from([
+            "waap",
+            "agent",
+            "run",
+            "--agent-id",
+            "aa-3881fda0",
+            "--system",
+            "pi",
+            "--model",
+            "openai-codex/gpt-5.6-sol",
+            "--reasoning-effort",
+            "high",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Agent {
+                command: AgentCommand::Run {
+                    system: AgentSystem::Pi,
+                    model: Some(model),
+                    reasoning_effort: Some(ReasoningEffort::High),
+                    ..
+                }
+            } if model == "openai-codex/gpt-5.6-sol"
+        ));
+    }
+
+    #[test]
     fn parses_agent_run_with_codex_model_and_reasoning_effort() {
         let cli = Cli::try_parse_from([
             "waap",
@@ -573,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_codex_run_options_independently() {
+    fn parses_pi_or_codex_run_options_independently() {
         let model = Cli::try_parse_from([
             "waap",
             "agent",
