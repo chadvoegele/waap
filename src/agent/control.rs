@@ -1059,6 +1059,11 @@ pub(super) mod tests {
         assert!(!path.exists());
         assert!(UnixStream::connect(&path).is_err());
         let stale = UnixListener::bind(&path).unwrap();
+        // A concurrent test's fork can retain the listener until its child execs.
+        assert_eq!(
+            unsafe { libc::shutdown(std::os::fd::AsRawFd::as_raw_fd(&stale), libc::SHUT_RDWR) },
+            0
+        );
         drop(stale);
         assert!(UnixStream::connect(&path).is_err());
         let error = ControlServer::bind(

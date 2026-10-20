@@ -63,16 +63,19 @@ fn not_in_repository() -> io::Error {
 
 /// Find the application worktree containing `start`.
 pub(crate) fn find_git_root(start: &Path) -> io::Result<PathBuf> {
-    let mut current = start.canonicalize()?;
-    loop {
-        if current.join(".git").exists() {
-            return Ok(current);
-        }
-        current = current
-            .parent()
-            .ok_or_else(not_in_repository)?
-            .to_path_buf();
+    let start = start.canonicalize()?;
+    let mut command = Command::new("git");
+    command
+        .current_dir(&start)
+        .args(["rev-parse", "--show-toplevel"]);
+    #[cfg(test)]
+    crate::test_git::isolate(&mut command);
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(not_in_repository());
     }
+    let path = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
+    PathBuf::from(OsString::from_vec(path.to_vec())).canonicalize()
 }
 
 /// Find the dedicated waap state worktree for the repository containing `start`.
@@ -286,6 +289,20 @@ mod tests {
             find_waap_root(&linked, None).unwrap(),
             find_waap_root(&repo, None).unwrap()
         );
+    }
+
+    #[test]
+    fn empty_git_marker_does_not_make_an_ancestor_a_repository() {
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join(".git")).unwrap();
+        let nested = dir.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+
+        let error = find_git_root(&nested).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(crate::state::StateLock::acquire_for_read(&nested)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
