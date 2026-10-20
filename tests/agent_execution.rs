@@ -3,15 +3,28 @@
 mod common;
 
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use serde_json::{json, Value};
 
 use common::{git, init_repo, isolate_git_config};
 
 fn waap(root: &Path, args: &[&str], mode: &str) -> Output {
     let runtime = tempfile::tempdir().unwrap();
     fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    waap_command(root, mode, runtime.path())
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+fn waap_command(root: &Path, mode: &str, runtime: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_waap"));
     isolate_git_config(&mut command);
     command
@@ -26,15 +39,13 @@ fn waap(root: &Path, args: &[&str], mode: &str) -> Output {
             ),
         )
         .env("WAAP_TEST_MODE", mode)
-        .env("XDG_RUNTIME_DIR", runtime.path())
+        .env("XDG_RUNTIME_DIR", runtime)
         .env("WAAP_TEST_PID_FILE", root.join("backend.pid"))
         .env_remove("CODEX_MODEL")
         .env_remove("CODEX_REASONING_EFFORT")
         .args(["--waap-root", root.join(".state").to_str().unwrap()])
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .unwrap()
+        .stdin(Stdio::null());
+    command
 }
 
 fn seed_backend(root: &Path) {
@@ -47,11 +58,16 @@ import json, os, sys, time
 with open(os.environ['WAAP_TEST_PID_FILE'], 'w') as file:
     file.write(str(os.getpid()))
 mode = os.environ['WAAP_TEST_MODE']
+root = os.path.dirname(os.environ['WAAP_TEST_PID_FILE'])
+steers = 0
 def emit(value):
     print(json.dumps(value), flush=True)
 for line in sys.stdin:
     request = json.loads(line)
     method = request['method']
+    if mode.startswith('steering'):
+        with open(os.path.join(root, 'requests.ndjson'), 'a') as log:
+            log.write(json.dumps(request) + '\n')
     if 'id' not in request:
         continue
     if mode == 'malformed':
@@ -62,9 +78,28 @@ for line in sys.stdin:
         result = {'thread': {'id': 'th_test'}}
     if method == 'turn/start':
         result = {'turn': {'id': 'tu_test'}}
+    if method == 'turn/steer':
+        steers += 1
+        result = {'turnId': 'tu_test'}
+        emit({'method': 'item/agentMessage/delta', 'params': {
+            'threadId': 'th_test', 'turnId': 'tu_test', 'delta': 'steered output\n'}})
     emit({'id': request['id'], 'result': result})
+    if method == 'turn/interrupt':
+        emit({'method': 'turn/completed', 'params': {
+            'threadId': 'th_test', 'turn': {'id': 'tu_test', 'status': 'interrupted'}}})
+        time.sleep(60)
+    if method == 'turn/steer' and steers == 2:
+        while not os.path.exists(os.path.join(root, 'release')):
+            time.sleep(0.005)
+        emit({'method': 'turn/completed', 'params': {
+            'threadId': 'th_test', 'turn': {'id': 'tu_test', 'status': 'completed'}}})
+        time.sleep(60)
     if method == 'thread/start' and mode == 'publication-failed':
         time.sleep(60)
+    if method == 'turn/start' and mode.startswith('steering'):
+        emit({'method': 'item/agentMessage/delta', 'params': {
+            'threadId': 'th_test', 'turnId': 'tu_test', 'delta': 'native turn active\n'}})
+        continue
     if method == 'turn/start':
         emit({'method': 'turn/completed', 'params': {
             'threadId': 'th_test', 'turn': {'id': 'tu_test',
@@ -166,5 +201,157 @@ fn codex_success_failure_and_malformed_startup_reap_process_and_clean_worktree()
         assert!(!root.join("worktrees/aa-test").exists());
         assert!(!git(root, &["worktree", "list"]).contains("worktrees/aa-test"));
         assert!(waap(root, &["check"], mode).status.success());
+    }
+}
+
+struct RunningChild(Option<std::process::Child>);
+
+impl Drop for RunningChild {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.0 {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn wait_until(mut predicate: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !predicate() {
+        assert!(Instant::now() < deadline, "condition did not become true");
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn submit_native_steering(socket: &Path, prompt: &str) -> Value {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    writeln!(
+        stream,
+        "{}",
+        json!({"version":1,"request_id":request_id,
+        "method":"steer","prompt":prompt})
+    )
+    .unwrap();
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).unwrap();
+    let response: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["request_id"], request_id);
+    assert_eq!(response["accepted"], true, "{response}");
+    response
+}
+
+#[test]
+fn native_codex_steering_through_run_owner_preserves_state_output_and_cleanup() {
+    for interrupt in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        init_repo(root);
+        seed_backend(root);
+        assert!(waap(root, &["init"], "steering").status.success());
+        assert!(waap(root, &["agent", "new", "--name", "Test"], "steering")
+            .status
+            .success());
+        let runtime = tempfile::tempdir().unwrap();
+        fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let mut child = RunningChild(Some(
+            waap_command(root, "steering", runtime.path())
+                .args(["agent", "run", "--agent-id", "aa-test", "--system", "codex"])
+                .stdout(fs::File::create(root.join("run.stdout")).unwrap())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        ));
+        let socket = runtime
+            .path()
+            .join("waap/control")
+            .join(root.canonicalize().unwrap().strip_prefix("/").unwrap())
+            .join("agents/aa-test.sock");
+        wait_until(|| {
+            socket.exists()
+                && fs::read_to_string(root.join("run.stdout"))
+                    .unwrap()
+                    .contains("native turn active")
+        });
+        let record_path = root.join(".state/agents/aa-test/agent.md");
+        let record = fs::read(&record_path).unwrap();
+        let head = git(&root.join(".state"), &["rev-parse", "HEAD"]);
+        let prompt = "  exact\nλ 'quotes' \"double\" $(touch /never) & ; ";
+        submit_native_steering(&socket, prompt);
+        assert_eq!(fs::read(&record_path).unwrap(), record);
+        assert_eq!(git(&root.join(".state"), &["rev-parse", "HEAD"]), head);
+        assert!(root.join("worktrees/aa-test").is_dir());
+        if interrupt {
+            assert_eq!(
+                unsafe { libc::kill(child.0.as_ref().unwrap().id() as i32, libc::SIGTERM) },
+                0
+            );
+        } else {
+            submit_native_steering(&socket, "second");
+            fs::write(root.join("release"), "complete").unwrap();
+        }
+        wait_until(|| child.0.as_mut().unwrap().try_wait().unwrap().is_some());
+        let output = child.0.take().unwrap().wait_with_output().unwrap();
+        assert_eq!(output.status.success(), !interrupt, "{output:?}");
+        assert!(fs::read_to_string(root.join("run.stdout"))
+            .unwrap()
+            .contains("steered output"));
+        let record = fs::read_to_string(record_path).unwrap();
+        assert!(record.contains(if interrupt {
+            "status = \"failed\""
+        } else {
+            "status = \"completed\""
+        }));
+        assert!(record.contains("session_id = \"th_test\""));
+        assert!(!socket.exists());
+        assert!(!root.join("worktrees/aa-test").exists());
+        let pid = fs::read_to_string(root.join("backend.pid")).unwrap();
+        assert!(!Path::new(&format!("/proc/{pid}")).exists());
+        let requests: Vec<Value> = fs::read_to_string(root.join("requests.ndjson"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(requests.iter().all(|request| matches!(
+            request["method"].as_str(),
+            Some(
+                "initialize"
+                    | "initialized"
+                    | "thread/start"
+                    | "turn/start"
+                    | "turn/steer"
+                    | "turn/interrupt"
+            )
+        )));
+        for method in ["initialize", "thread/start", "turn/start"] {
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|request| request["method"] == method)
+                    .count(),
+                1
+            );
+        }
+        let steering: Vec<_> = requests
+            .iter()
+            .filter(|request| request["method"] == "turn/steer")
+            .collect();
+        assert_eq!(steering.len(), if interrupt { 1 } else { 2 });
+        assert_eq!(
+            steering[0]["params"],
+            json!({"threadId":"th_test","expectedTurnId":"tu_test",
+            "input":[{"type":"text","text":prompt}]})
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request["method"] == "turn/interrupt")
+                .count(),
+            usize::from(interrupt)
+        );
+        assert!(waap(root, &["check"], "steering").status.success());
     }
 }
