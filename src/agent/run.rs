@@ -1,4 +1,3 @@
-use std::ffi::OsStr;
 use std::io;
 use std::path::Path;
 use std::process::ExitCode;
@@ -17,6 +16,7 @@ use crate::agent::{
 };
 use crate::cli::OutputFormat;
 use crate::git::commit_paths;
+use crate::root::ControlRoot;
 
 fn print_run_agent_report(
     output_format: &OutputFormat,
@@ -37,9 +37,11 @@ fn print_run_agent_report(
     }
 }
 
+/// Defer root errors until after ready/backend checks and the running transition.
 pub(crate) fn run_agent(
     repository_root: &Path,
     waap_root: &Path,
+    control_root: io::Result<ControlRoot>,
     output_format: &OutputFormat,
     agent_id: &str,
     system: &AgentSystem,
@@ -50,22 +52,22 @@ pub(crate) fn run_agent(
     run_agent_with_backend(
         repository_root,
         waap_root,
+        control_root,
         output_format,
         agent_id,
         system,
         backend.as_mut(),
-        std::env::var_os("XDG_RUNTIME_DIR").as_deref(),
     )
 }
 
 fn run_agent_with_backend(
     repository_root: &Path,
     waap_root: &Path,
+    control_root: io::Result<ControlRoot>,
     output_format: &OutputFormat,
     agent_id: &str,
     system: &AgentSystem,
     backend: &mut dyn AgentSystemBackend,
-    runtime_dir: Option<&OsStr>,
 ) -> io::Result<ExitCode> {
     {
         let _lock = crate::state::StateLock::acquire(waap_root)?;
@@ -88,11 +90,11 @@ fn run_agent_with_backend(
     let result = run_started_agent(
         repository_root,
         waap_root,
+        control_root,
         output_format,
         agent_id,
         system,
         backend,
-        runtime_dir,
     );
 
     match result {
@@ -123,14 +125,15 @@ fn run_agent_with_backend(
 fn run_started_agent(
     repository_root: &Path,
     waap_root: &Path,
+    control_root: io::Result<ControlRoot>,
     output_format: &OutputFormat,
     agent_id: &str,
     system: &AgentSystem,
     backend: &mut dyn AgentSystemBackend,
-    runtime_dir: Option<&OsStr>,
 ) -> io::Result<RunOutcome> {
     let repository_root = repository_root.canonicalize()?;
-    super::control::socket_path(&repository_root, agent_id, runtime_dir)?;
+    let control_root = control_root?;
+    super::control::socket_path(&control_root, agent_id)?;
     let mut worktree = AgentWorktree::create(&repository_root, agent_id)?;
     let prompt = build_agent_goal(waap_root, agent_id);
     let run_result = backend
@@ -148,8 +151,7 @@ fn run_started_agent(
                 &started.session_id,
                 system.clone(),
             )?;
-            ControlServer::bind(&repository_root, agent_id, runtime_dir)?
-                .wait(started.handle.as_ref())
+            ControlServer::bind(&control_root, agent_id)?.wait(started.handle.as_ref())
         });
     let cleanup_result = worktree.cleanup();
     collapse_errors(run_result, cleanup_result)
@@ -389,11 +391,11 @@ mod tests {
         super::run_agent_with_backend(
             repository_root,
             waap_root,
+            crate::root::find_control_root_in(repository_root, Some(runtime.path().as_os_str())),
             output_format,
             agent_id,
             system,
             backend,
-            Some(runtime.path().as_os_str()),
         )
     }
 
@@ -445,11 +447,11 @@ mod tests {
         let result = super::run_agent_with_backend(
             repository.path(),
             repository.path(),
+            crate::root::find_control_root_in(repository.path(), Some(runtime.path().as_os_str())),
             &OutputFormat::Json,
             agent_id,
             &AgentSystem::Codex,
             &mut backend,
-            Some(runtime.path().as_os_str()),
         )
         .unwrap();
         assert_eq!(result, ExitCode::SUCCESS);
@@ -850,6 +852,7 @@ mod tests {
         let error = run_agent(
             dir.path(),
             dir.path(),
+            Err(std::io::Error::other("injected control-root failure")),
             &OutputFormat::Json,
             agent_id,
             &AgentSystem::Opencode,
@@ -886,6 +889,7 @@ mod tests {
         let error = run_agent(
             dir.path(),
             dir.path(),
+            Err(std::io::Error::other("injected control-root failure")),
             &OutputFormat::Json,
             agent_id,
             &AgentSystem::Opencode,
@@ -929,6 +933,7 @@ mod tests {
                 let error = run_agent(
                     dir.path(),
                     dir.path(),
+                    Err(std::io::Error::other("injected control-root failure")),
                     &OutputFormat::Json,
                     agent_id,
                     &system,
@@ -962,6 +967,7 @@ mod tests {
         let error = run_agent(
             dir.path(),
             dir.path(),
+            Err(std::io::Error::other("injected control-root failure")),
             &OutputFormat::Json,
             agent_id,
             &AgentSystem::Codex,

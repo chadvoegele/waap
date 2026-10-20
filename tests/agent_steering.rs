@@ -180,10 +180,14 @@ fn validation_rejects_unknown_agents_nonrunning_statuses_and_blank_prompts_befor
             .unwrap();
         assert!(diagnostic(&output).contains("prompt must contain a non-whitespace character"));
     }
-    assert!(
-        diagnostic(&fixture.steer("aa-missing", "data").output().unwrap())
-            .contains("does not exist")
-    );
+    assert!(diagnostic(
+        &fixture
+            .steer("aa-missing", "data")
+            .env_remove("XDG_RUNTIME_DIR")
+            .output()
+            .unwrap()
+    )
+    .contains("does not exist"));
     assert_eq!(fixture.snapshot(), before);
     for status in ["ready", "completed", "aborted", "failed"] {
         fixture.record(status, Some("codex"));
@@ -200,6 +204,60 @@ fn validation_rejects_unknown_agents_nonrunning_statuses_and_blank_prompts_befor
         listener.accept().unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
     );
+}
+
+#[test]
+fn run_preserves_status_validation_and_ready_failure_with_missing_runtime() {
+    let fixture = Fixture::new();
+    for (agent_id, message) in [
+        ("aa-missing", "does not exist"),
+        ("aa-test", "running -> running"),
+    ] {
+        let before = fixture.snapshot();
+        let output = fixture
+            .command()
+            .args(["agent", "run", "--agent-id", agent_id, "--system", "claude"])
+            .env_remove("XDG_RUNTIME_DIR")
+            .output()
+            .unwrap();
+        assert!(diagnostic(&output).contains(message));
+        assert_eq!(fixture.snapshot(), before);
+    }
+    fixture.record("ready", None);
+    let state = fixture.repo.path().join(".state");
+    let before = git(&state, &["rev-parse", "HEAD"]);
+    let worktree_paths = || {
+        git(fixture.repo.path(), &["worktree", "list", "--porcelain"])
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let worktrees = worktree_paths();
+    let output = fixture
+        .command()
+        .args([
+            "agent",
+            "run",
+            "--agent-id",
+            "aa-test",
+            "--system",
+            "claude",
+        ])
+        .env_remove("XDG_RUNTIME_DIR")
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("XDG_RUNTIME_DIR must be set"));
+    assert!(fs::read_to_string(fixture.record_path())
+        .unwrap()
+        .contains("status = \"failed\""));
+    assert_eq!(
+        git(&state, &["rev-list", "--count", &format!("{before}..HEAD")]),
+        "2"
+    );
+    assert_eq!(worktree_paths(), worktrees);
+    assert!(!fixture.runtime.path().join("waap").exists());
 }
 
 #[test]

@@ -1,7 +1,54 @@
 use std::env;
+use std::ffi::OsStr;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+
+/// A repository-scoped control path and its private runtime-directory boundary.
+#[derive(Debug)]
+pub(crate) struct ControlRoot {
+    runtime_dir: PathBuf,
+    path: PathBuf,
+}
+
+impl ControlRoot {
+    pub(crate) fn runtime_dir(&self) -> &Path {
+        &self.runtime_dir
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+pub(crate) fn find_control_root(repository_root: &Path) -> io::Result<ControlRoot> {
+    find_control_root_in(repository_root, env::var_os("XDG_RUNTIME_DIR").as_deref())
+}
+
+pub(crate) fn find_control_root_in(
+    repository_root: &Path,
+    runtime_dir: Option<&OsStr>,
+) -> io::Result<ControlRoot> {
+    let runtime_dir = runtime_dir
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "XDG_RUNTIME_DIR must be set to a private runtime directory",
+            )
+        })?;
+    if !runtime_dir.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "XDG_RUNTIME_DIR must be an absolute path",
+        ));
+    }
+    let path = runtime_dir
+        .join("waap/control")
+        .join(repository_relative_path(repository_root)?);
+    Ok(ControlRoot { runtime_dir, path })
+}
 
 fn not_in_repository() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, "not inside a git repository")
@@ -93,8 +140,58 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{find_git_root, find_waap_root};
+    use super::{find_control_root_in, find_git_root, find_waap_root};
     use crate::test_git::{init_repo_with_commit, run as git};
+
+    #[test]
+    fn control_root_uses_injected_runtime_and_primary_repository_identity() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let other = dir.path().join("other");
+        let linked = dir.path().join("linked");
+        for path in [&repo, &other] {
+            fs::create_dir(path).unwrap();
+            init_repo_with_commit(path);
+        }
+        git(
+            &repo,
+            &["worktree", "add", linked.to_str().unwrap(), "-b", "linked"],
+        );
+        let runtime = dir.path().join("runtime");
+        let resolve =
+            |path: &std::path::Path| find_control_root_in(path, Some(runtime.as_os_str())).unwrap();
+        let control_root = resolve(&repo);
+        assert_eq!(control_root.runtime_dir(), runtime);
+        assert_eq!(
+            control_root.path(),
+            runtime
+                .join("waap/control")
+                .join(repo.canonicalize().unwrap().strip_prefix("/").unwrap())
+        );
+        assert_eq!(resolve(&linked).path(), control_root.path());
+        assert_ne!(resolve(&other).path(), control_root.path());
+        assert!(!runtime.exists(), "resolution must not create directories");
+    }
+
+    #[test]
+    fn control_root_rejects_missing_empty_and_relative_runtime() {
+        use std::ffi::OsStr;
+
+        let repo = tempdir().unwrap();
+        init_repo_with_commit(repo.path());
+        for (runtime, message) in [
+            (None, "XDG_RUNTIME_DIR must be set"),
+            (Some(OsStr::new("")), "XDG_RUNTIME_DIR must be set"),
+            (
+                Some(OsStr::new("relative")),
+                "XDG_RUNTIME_DIR must be an absolute path",
+            ),
+        ] {
+            let error = find_control_root_in(repo.path(), runtime).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains(message));
+        }
+    }
 
     #[test]
     fn derives_state_path_from_primary_repository() {

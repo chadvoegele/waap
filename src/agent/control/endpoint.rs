@@ -1,4 +1,3 @@
-use std::ffi::OsStr;
 use std::fs::{self, DirBuilder};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
@@ -6,12 +5,11 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 use crate::ids::is_record_id;
-use crate::root::repository_relative_path;
+use crate::root::ControlRoot;
 
 pub(in crate::agent) fn socket_path(
-    repository_root: &Path,
+    control_root: &ControlRoot,
     agent_id: &str,
-    runtime_dir: Option<&OsStr>,
 ) -> io::Result<PathBuf> {
     if !is_record_id(agent_id, "aa-") {
         return Err(io::Error::new(
@@ -19,25 +17,9 @@ pub(in crate::agent) fn socket_path(
             "invalid agent ID",
         ));
     }
-    let runtime = runtime_dir
-        .filter(|value| !value.is_empty())
-        .map(Path::new)
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "XDG_RUNTIME_DIR must be set to a private runtime directory",
-            )
-        })?;
-    if !runtime.is_absolute() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "XDG_RUNTIME_DIR must be an absolute path",
-        ));
-    }
-    require_private_directory(runtime)?;
-    let path = runtime
-        .join("waap/control")
-        .join(repository_relative_path(repository_root)?)
+    require_private_directory(control_root.runtime_dir())?;
+    let path = control_root
+        .path()
         .join("agents")
         .join(format!("{agent_id}.sock"));
     let address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
@@ -54,7 +36,8 @@ pub(in crate::agent) fn socket_path(
     Ok(path)
 }
 
-pub(super) fn prepare_parent(path: &Path, runtime_dir: &Path) -> io::Result<()> {
+pub(super) fn prepare_parent(path: &Path, control_root: &ControlRoot) -> io::Result<()> {
+    let runtime_dir = control_root.runtime_dir();
     let mut directory = runtime_dir.to_path_buf();
     for component in path
         .parent()
@@ -111,7 +94,40 @@ fn validate_directory(path: &Path, is_directory: bool, uid: u32, mode: u32) -> i
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::root::find_control_root_in;
     use crate::test_git::{init_repo_with_commit, run as git};
+    use std::ffi::OsStr;
+
+    fn resolve_socket(
+        repository_root: &Path,
+        agent_id: &str,
+        runtime_dir: Option<&OsStr>,
+    ) -> io::Result<PathBuf> {
+        socket_path(
+            &find_control_root_in(repository_root, runtime_dir)?,
+            agent_id,
+        )
+    }
+
+    #[test]
+    fn injected_control_root_does_not_resolve_repository_again() {
+        let runtime = tempfile::tempdir().unwrap();
+        fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        init_repo_with_commit(repo.path());
+        let control_root =
+            find_control_root_in(repo.path(), Some(runtime.path().as_os_str())).unwrap();
+        fs::remove_dir_all(repo.path().join(".git")).unwrap();
+        assert_eq!(
+            socket_path(&control_root, "aa-1").unwrap(),
+            control_root.path().join("agents/aa-1.sock")
+        );
+        fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(socket_path(&control_root, "aa-1")
+            .unwrap_err()
+            .to_string()
+            .contains("private (0700)"));
+    }
 
     #[test]
     fn socket_identity_is_symmetric_across_worktrees_and_isolates_repositories() {
@@ -130,7 +146,7 @@ mod tests {
             &["worktree", "add", linked.to_str().unwrap(), "-b", "linked"],
         );
         let resolve =
-            |repo: &Path| socket_path(repo, "aa-1", Some(runtime.path().as_os_str())).unwrap();
+            |repo: &Path| resolve_socket(repo, "aa-1", Some(runtime.path().as_os_str())).unwrap();
         let expected = runtime
             .path()
             .join("waap/control")
@@ -147,7 +163,7 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
         init_repo_with_commit(repo.path());
         for value in [None, Some(OsStr::new("")), Some(OsStr::new("relative"))] {
-            assert!(socket_path(repo.path(), "aa-1", value).is_err());
+            assert!(resolve_socket(repo.path(), "aa-1", value).is_err());
         }
         assert!(
             validate_directory(runtime.path(), true, unsafe { libc::geteuid() } + 1, 0o700)
@@ -157,9 +173,9 @@ mod tests {
             validate_directory(runtime.path(), false, unsafe { libc::geteuid() }, 0o700).is_err()
         );
         fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o750)).unwrap();
-        assert!(socket_path(repo.path(), "aa-1", Some(runtime.path().as_os_str())).is_err());
+        assert!(resolve_socket(repo.path(), "aa-1", Some(runtime.path().as_os_str())).is_err());
         fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let error = socket_path(
+        let error = resolve_socket(
             repo.path(),
             &format!("aa-{}", "a".repeat(63)),
             Some(runtime.path().as_os_str()),
@@ -168,9 +184,11 @@ mod tests {
         assert!(error.to_string().contains("platform limit"));
         assert!(error.to_string().contains("shorten XDG_RUNTIME_DIR"));
         assert!(!runtime.path().join("waap").exists());
-        assert!(socket_path(repo.path(), "../escape", Some(runtime.path().as_os_str())).is_err());
+        assert!(
+            resolve_socket(repo.path(), "../escape", Some(runtime.path().as_os_str())).is_err()
+        );
         let link = repo.path().join("runtime-link");
         std::os::unix::fs::symlink(runtime.path(), &link).unwrap();
-        assert!(socket_path(repo.path(), "aa-1", Some(link.as_os_str())).is_err());
+        assert!(resolve_socket(repo.path(), "aa-1", Some(link.as_os_str())).is_err());
     }
 }

@@ -16,7 +16,7 @@ use crate::check::{check_waap, print_check_result};
 use crate::cli::{AgentCommand, Cli, Command, TicketCommand};
 use crate::init::{init_project, print_init_report};
 use crate::repair::{print_repair_report, repair_project};
-use crate::root::{find_git_root, find_waap_root};
+use crate::root::{find_control_root, find_git_root, find_waap_root};
 use crate::ticket::{
     create_ticket, get_ticket, list_tickets, print_ticket_get_report, print_ticket_list,
     print_ticket_report, print_updated_ticket_report, update_ticket,
@@ -122,6 +122,7 @@ pub(crate) fn run() -> ExitCode {
                 match run_agent(
                     repository_root,
                     waap_root,
+                    find_control_root(repository_root),
                     &cli.output_format,
                     &agent_id,
                     &system,
@@ -145,7 +146,12 @@ pub(crate) fn run() -> ExitCode {
                 }
             },
             AgentCommand::Steer { agent_id, prompt } => {
-                match steer_agent(repository_root, waap_root, &agent_id, &prompt) {
+                match steer_agent(
+                    waap_root,
+                    find_control_root(repository_root),
+                    &agent_id,
+                    &prompt,
+                ) {
                     Ok(()) => {
                         print_steering_report(&cli.output_format, &agent_id);
                         ExitCode::SUCCESS

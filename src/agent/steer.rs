@@ -1,4 +1,3 @@
-use std::env;
 use std::io;
 use std::path::Path;
 
@@ -7,10 +6,12 @@ use serde_json::json;
 use super::control::{client, socket_path};
 use super::load_agent_content;
 use crate::cli::OutputFormat;
+use crate::root::ControlRoot;
 
+/// Agent and prompt validation takes precedence over root-resolution errors.
 pub(crate) fn steer_agent(
-    repository_root: &Path,
     waap_root: &Path,
+    control_root: io::Result<ControlRoot>,
     agent_id: &str,
     prompt: &str,
 ) -> io::Result<()> {
@@ -30,11 +31,7 @@ pub(crate) fn steer_agent(
             ),
         ));
     }
-    let path = socket_path(
-        repository_root,
-        agent_id,
-        env::var_os("XDG_RUNTIME_DIR").as_deref(),
-    )?;
+    let path = socket_path(&control_root?, agent_id)?;
     client::submit(&path, prompt)
 }
 

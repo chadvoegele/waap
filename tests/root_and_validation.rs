@@ -30,6 +30,7 @@ fn waap_with_log_level(cwd: &Path, stdin: &str, args: &[&str], log_level: Option
     let mut command = Command::new(env!("CARGO_BIN_EXE_waap"));
     isolate_git_config(&mut command);
     command.env_remove("WAAP_LOG_LEVEL");
+    command.env_remove("XDG_RUNTIME_DIR");
     if let Some(repository_root) = repository_root(cwd) {
         command.env("HOME", repository_root.join(".test-home"));
     }
@@ -59,6 +60,49 @@ fn stdout(output: &Output) -> String {
 
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn unrelated_commands_work_without_runtime_directory() {
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+    for (input, args) in [
+        ("", vec!["init"]),
+        ("# Agent\n", vec!["agent", "new", "--name", "Test"]),
+        ("# Ticket\n", vec!["ticket", "new", "--name", "Task"]),
+        ("", vec!["check"]),
+        ("", vec!["agent", "get", "--agent-id", "aa-test"]),
+        ("", vec!["agent", "list"]),
+        (
+            "",
+            vec![
+                "agent",
+                "update",
+                "--agent-id",
+                "aa-test",
+                "--set-status",
+                "aborted",
+            ],
+        ),
+        ("", vec!["agent", "stop"]),
+        ("", vec!["ticket", "get", "--ticket-id", "tt-task"]),
+        ("", vec!["ticket", "list"]),
+        (
+            "",
+            vec![
+                "ticket",
+                "update",
+                "--ticket-id",
+                "tt-task",
+                "--set-status",
+                "in-progress",
+            ],
+        ),
+        ("", vec!["check"]),
+    ] {
+        let output = waap(dir.path(), input, &args);
+        assert!(output.status.success(), "{args:?}: {}", stderr(&output));
+    }
 }
 
 #[test]

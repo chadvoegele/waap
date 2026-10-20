@@ -1,10 +1,9 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::thread;
@@ -14,6 +13,7 @@ use serde_json::Value;
 
 use super::backend::{RunHandle, RunOutcome, SteeringError};
 use super::worktree::collapse_errors;
+use crate::root::ControlRoot;
 
 pub(super) mod client;
 mod endpoint;
@@ -74,13 +74,9 @@ enum Stage {
 }
 
 impl ControlServer {
-    pub(super) fn bind(
-        repository_root: &Path,
-        agent_id: &str,
-        runtime_dir: Option<&OsStr>,
-    ) -> io::Result<Self> {
-        let path = socket_path(repository_root, agent_id, runtime_dir)?;
-        prepare_parent(&path, Path::new(runtime_dir.unwrap()))?;
+    pub(super) fn bind(control_root: &ControlRoot, agent_id: &str) -> io::Result<Self> {
+        let path = socket_path(control_root, agent_id)?;
+        prepare_parent(&path, control_root)?;
         let listener = UnixListener::bind(&path).map_err(|error| {
             io::Error::new(error.kind(), format!("failed to bind control socket {}: {error}; existing endpoints are not automatically removed", path.display()))
         })?;
@@ -478,6 +474,7 @@ pub(super) mod tests {
 
     use super::*;
     use crate::agent::backend::{fake::FakeBackend, AgentSystemBackend, StartContext};
+    use crate::root::find_control_root_in;
     use crate::test_git::init_repo_with_commit;
 
     struct Fixture {
@@ -496,8 +493,11 @@ pub(super) mod tests {
             fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
             let repo = tempfile::tempdir().unwrap();
             init_repo_with_commit(repo.path());
-            let server =
-                ControlServer::bind(repo.path(), "aa-1", Some(runtime.path().as_os_str())).unwrap();
+            let server = ControlServer::bind(
+                &find_control_root_in(repo.path(), Some(runtime.path().as_os_str())).unwrap(),
+                "aa-1",
+            )
+            .unwrap();
             let (commands, command_rx) = mpsc::sync_channel(1);
             let (replies, reply_rx) = mpsc::channel();
             Self {
@@ -1014,9 +1014,9 @@ pub(super) mod tests {
         let mut first = Fixture::new();
         let mut second = Fixture::new();
         second.server = ControlServer::bind(
-            second.repo.path(),
+            &find_control_root_in(second.repo.path(), Some(first.runtime.path().as_os_str()))
+                .unwrap(),
             "aa-1",
-            Some(first.runtime.path().as_os_str()),
         )
         .unwrap();
         assert_ne!(first.server.path, second.server.path);
@@ -1063,9 +1063,12 @@ pub(super) mod tests {
         drop(stale);
         assert!(UnixStream::connect(&path).is_err());
         let error = ControlServer::bind(
-            fixture.repo.path(),
+            &find_control_root_in(
+                fixture.repo.path(),
+                Some(fixture.runtime.path().as_os_str()),
+            )
+            .unwrap(),
             "aa-1",
-            Some(fixture.runtime.path().as_os_str()),
         )
         .err()
         .unwrap();
@@ -1081,9 +1084,12 @@ pub(super) mod tests {
         let parent = fixture.server.path.parent().unwrap();
         fs::set_permissions(parent, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(ControlServer::bind(
-            fixture.repo.path(),
-            "aa-2",
-            Some(fixture.runtime.path().as_os_str())
+            &find_control_root_in(
+                fixture.repo.path(),
+                Some(fixture.runtime.path().as_os_str())
+            )
+            .unwrap(),
+            "aa-2"
         )
         .is_err());
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).unwrap();
@@ -1095,9 +1101,8 @@ pub(super) mod tests {
         )
         .unwrap();
         assert!(ControlServer::bind(
-            fixture.repo.path(),
-            "aa-2",
-            Some(runtime.path().as_os_str())
+            &find_control_root_in(fixture.repo.path(), Some(runtime.path().as_os_str())).unwrap(),
+            "aa-2"
         )
         .is_err());
     }
