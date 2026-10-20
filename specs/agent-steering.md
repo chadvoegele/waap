@@ -108,8 +108,8 @@ the canonical primary repository path's OS bytes. All linked worktrees resolve
 the same primary path. The truncated hash can collide; existing endpoint files
 must never be silently reused or removed. No persisted endpoint registry is used.
 
-New agent slugs contain at most 55 ASCII characters (58 including `aa-`),
-including any collision suffix. Ticket slugs retain their 63-character limit.
+New agent and ticket slugs contain at most 53 ASCII characters (56 including
+`aa-` or `tt-`), including any collision suffix.
 Existing agent IDs remain readable under the existing validation rules; socket
 availability depends on the full path length, not the generation limit.
 
@@ -262,8 +262,8 @@ including on delivery failure. No persistent state migration is required.
   version and missing-method rejection without restart or new-turn fallback.
 - Socket naming tests: deterministic SHA-256 over canonical OS path bytes,
   including non-UTF-8 paths; identical primary/worktree hashes and distinct test
-  repositories; generated agent boundaries and collision suffixes at 55 characters;
-  unchanged 63-character ticket slugs and readable historical agent IDs; full-path
+  repositories; generated agent and ticket boundaries and collision suffixes at
+  53 characters, and readable historical IDs; full-path
   byte boundary and rejection before socket, backend, or worktree creation.
 - Isolation/lifecycle tests: shared socket lookup across repository worktrees,
   same agent ID in two repositories, stale endpoint, restricted endpoint access,

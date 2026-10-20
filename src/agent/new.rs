@@ -147,14 +147,17 @@ mod tests {
     #[test]
     fn create_agent_caps_new_ids_without_invalidating_historical_records() {
         let dir = tempdir().unwrap();
-        let name = "a".repeat(55);
+        let name = "a".repeat(crate::ids::MAX_SLUG_LEN);
         let first = create_agent_with_markdown(dir.path(), Some(&name), "Instructions.").unwrap();
         let second = create_agent_with_markdown(dir.path(), Some(&name), "Instructions.").unwrap();
         let longer =
             create_agent_with_markdown(dir.path(), Some(&"b".repeat(63)), "Instructions.").unwrap();
         assert_eq!(first.agent_id, format!("aa-{name}"));
         for report in [&first, &second, &longer] {
-            assert_eq!(report.agent_id.len(), 58);
+            assert_eq!(
+                report.agent_id.len(),
+                "aa-".len() + crate::ids::MAX_SLUG_LEN
+            );
         }
         let historical = format!("aa-{}", "c".repeat(63));
         let historical_path = dir.path().join("agents").join(&historical).join("agent.md");

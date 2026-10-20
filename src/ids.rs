@@ -1,6 +1,8 @@
 use std::io;
 use std::path::Path;
 
+pub(crate) const MAX_SLUG_LEN: usize = 53;
+
 pub(crate) fn random_hex_chars(hex_char_count: usize) -> io::Result<String> {
     let mut bytes = vec![0_u8; hex_char_count / 2];
     getrandom::getrandom(&mut bytes).map_err(|error| io::Error::other(error.to_string()))?;
@@ -12,9 +14,8 @@ pub(crate) fn available_record_id(
     prefix: &str,
     name: Option<&str>,
 ) -> io::Result<String> {
-    let max_slug_len = if prefix == "aa-" { 55 } else { 63 };
     if let Some(name) = name {
-        let slug = slugify_name(name, max_slug_len)?;
+        let slug = slugify_name(name)?;
         let record_id = format!("{prefix}{slug}");
         if !records_dir.join(&record_id).exists() {
             return Ok(record_id);
@@ -23,7 +24,7 @@ pub(crate) fn available_record_id(
         loop {
             let record_id = format!(
                 "{prefix}{}",
-                slug_with_hash_from_slug(&slug, &random_hex_chars(4)?, max_slug_len)
+                slug_with_hash_from_slug(&slug, &random_hex_chars(4)?)
             );
             if !records_dir.join(&record_id).exists() {
                 return Ok(record_id);
@@ -39,7 +40,7 @@ pub(crate) fn available_record_id(
     }
 }
 
-fn slugify_name(name: &str, max_slug_len: usize) -> io::Result<String> {
+fn slugify_name(name: &str) -> io::Result<String> {
     let mut slug = String::new();
     let mut previous_dash = false;
 
@@ -69,15 +70,15 @@ fn slugify_name(name: &str, max_slug_len: usize) -> io::Result<String> {
         slug.push_str("ticket");
     }
 
-    if slug.len() > max_slug_len {
-        slug = slug_with_hash_from_slug(&slug, &random_hex_chars(4)?, max_slug_len);
+    if slug.len() > MAX_SLUG_LEN {
+        slug = slug_with_hash_from_slug(&slug, &random_hex_chars(4)?);
     }
 
     Ok(slug)
 }
 
-fn slug_with_hash_from_slug(slug: &str, hash: &str, max_slug_len: usize) -> String {
-    let prefix_len = slug.len().min(max_slug_len - hash.len() - 1);
+fn slug_with_hash_from_slug(slug: &str, hash: &str) -> String {
+    let prefix_len = slug.len().min(MAX_SLUG_LEN - hash.len() - 1);
     let mut prefix = slug[..prefix_len].trim_end_matches('-').to_string();
     if prefix.is_empty() {
         prefix.push_str("ticket");
@@ -106,30 +107,29 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{available_record_id, is_record_id, slugify_name};
+    use super::{available_record_id, is_record_id, slugify_name, MAX_SLUG_LEN};
 
     #[test]
     fn slug_generation_matches_shared_rules() {
         assert_eq!(
-            slugify_name("  List All Tickets!  ", 63).unwrap(),
+            slugify_name("  List All Tickets!  ").unwrap(),
             "list-all-tickets"
         );
         assert_eq!(
-            slugify_name("Bad---Spaces   Here", 63).unwrap(),
+            slugify_name("Bad---Spaces   Here").unwrap(),
             "bad-spaces-here"
         );
-        assert_eq!(slugify_name("Café: déjà_vu", 63).unwrap(), "caf-djvu");
+        assert_eq!(slugify_name("Café: déjà_vu").unwrap(), "caf-djvu");
     }
 
     #[test]
     fn long_slug_is_truncated_with_hex_hash() {
         let slug = slugify_name(
             "This is a very long record name that should be truncated because it exceeds limits",
-            63,
         )
         .unwrap();
 
-        assert!(slug.len() <= 63);
+        assert_eq!(slug.len(), MAX_SLUG_LEN);
         assert_eq!(slug.as_bytes()[slug.len() - 5], b'-');
         assert!(slug[slug.len() - 4..]
             .bytes()
@@ -149,20 +149,20 @@ mod tests {
 
     #[test]
     fn generated_agent_and_ticket_boundaries_include_collision_suffixes() {
-        for (prefix, max_slug_len) in [("aa-", 55), ("tt-", 63)] {
+        for prefix in ["aa-", "tt-"] {
             let dir = tempdir().unwrap();
-            for length in [max_slug_len - 1, max_slug_len, max_slug_len + 1, 100] {
+            for length in [MAX_SLUG_LEN - 1, MAX_SLUG_LEN, MAX_SLUG_LEN + 1, 100] {
                 let name = "a".repeat(length);
                 let id = available_record_id(dir.path(), prefix, Some(&name)).unwrap();
-                assert_eq!(id.len(), prefix.len() + length.min(max_slug_len));
+                assert_eq!(id.len(), prefix.len() + length.min(MAX_SLUG_LEN));
                 assert!(is_record_id(&id, prefix));
-                if length <= max_slug_len {
+                if length <= MAX_SLUG_LEN {
                     assert_eq!(id, format!("{prefix}{name}"));
                 }
                 fs::create_dir(dir.path().join(&id)).unwrap();
                 let collision = available_record_id(dir.path(), prefix, Some(&name)).unwrap();
                 assert_ne!(collision, id);
-                assert_eq!(collision.len(), prefix.len() + max_slug_len);
+                assert_eq!(collision.len(), prefix.len() + MAX_SLUG_LEN);
                 assert!(is_record_id(&collision, prefix));
                 let suffix = &collision[collision.len() - 4..];
                 assert!(suffix
