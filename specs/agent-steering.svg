@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1180" height="850" viewBox="0 0 1180 850" role="img" aria-labelledby="title desc">
   <title id="title">Waap agent steering: Codex-first design</title>
-  <desc id="desc">The steer CLI reads unchanged agent metadata, rejects non-running or unsupported agents, and sends a correlated control request to the existing run owner. The owner sends turn/steer on its existing Codex connection. Acceptance returns along the reverse path. Persistent metadata and transient control state are shown separately.</desc>
+  <desc id="desc">The steer CLI reads unchanged agent metadata, rejects non-running agents, and sends backend-neutral NDJSON to a Unix socket owned by shared run orchestration. Shared orchestration queues requests and invokes the active backend steering method; Claude and OpenCode return not implemented. The owner sends turn/steer on its existing Codex connection. Acceptance returns along the reverse path. Persistent metadata and transient control state are shown separately.</desc>
   <defs>
     <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10z" fill="#334155"/></marker>
     <style>
@@ -23,7 +23,7 @@
   <text x="45" y="135" class="label">1. waap agent steer</text>
   <text x="45" y="162">--agent-id ID --prompt TEXT</text>
   <text x="45" y="187">Validate ID, prompt, running status</text>
-  <text x="45" y="212">Dispatch persisted backend</text>
+  <text x="45" y="212">Resolve repository + agent socket</text>
 
   <rect x="435" y="105" width="325" height="125" rx="8" class="state"/>
   <text x="450" y="135" class="label">Persistent agent record (unchanged)</text>
@@ -34,25 +34,25 @@
   <text x="374" y="142" class="small">read</text>
 
   <rect x="825" y="105" width="325" height="125" rx="8" class="error"/>
-  <text x="840" y="135" class="label">Reject before delivery</text>
+  <text x="840" y="135" class="label">Validation / backend errors</text>
   <text x="840" y="163">Unknown ID / non-running / invalid text</text>
-  <text x="840" y="188">Claude + OpenCode:</text>
+  <text x="840" y="188">Claude + OpenCode backend methods:</text>
   <text x="840" y="213">steering not implemented for backend …</text>
   <path d="M760 166 H825" class="line"/>
 
   <rect x="30" y="305" width="330" height="130" rx="8" class="box"/>
-  <text x="45" y="335" class="label">2. Codex steering adapter</text>
-  <text x="45" y="363">Locate repository/run-scoped endpoint</text>
-  <text x="45" y="388">Send unchanged prompt + identity</text>
+  <text x="45" y="335" class="label">2. Shared steering client</text>
+  <text x="45" y="363">Locate repository/agent-scoped socket</text>
+  <text x="45" y="388">Send version, request ID, method, prompt</text>
   <text x="45" y="413">Wait for correlated, bounded response</text>
   <path d="M190 230 V305" class="line"/>
   <text x="205" y="273" class="small">Codex only</text>
 
   <rect x="435" y="305" width="325" height="130" rx="8" class="box"/>
   <text x="450" y="335" class="label">3. Existing waap agent run owner</text>
-  <text x="450" y="363">Local control interface (new)</text>
-  <text x="450" y="388">Validate run/session; require active turn</text>
-  <text x="450" y="413">Multiplex steering + existing event loop</text>
+  <text x="450" y="363">Unix socket + NDJSON parser (new)</text>
+  <text x="450" y="388">Bounded FIFO; call backend steer(prompt)</text>
+  <text x="450" y="413">Service requests while backend runs</text>
   <path d="M360 350 H435" class="line"/>
   <text x="370" y="338" class="small">request</text>
   <path d="M435 410 H360" class="reply"/>
@@ -68,9 +68,9 @@
 
   <rect x="435" y="510" width="325" height="155" rx="8" class="state"/>
   <text x="450" y="540" class="label">Transient data model (new)</text>
-  <text x="450" y="568">Repository + agent → run ID + endpoint</text>
-  <text x="450" y="593">Owner: thread ID + active turn ID</text>
-  <text x="450" y="618">Request: ID + expected identity + prompt</text>
+  <text x="450" y="568">Repository + agent → socket endpoint</text>
+  <text x="450" y="593">Backend: thread ID + active turn ID</text>
+  <text x="450" y="618">Shared: bounded queue + correlations</text>
   <text x="450" y="643">Response: request ID + accepted/error</text>
   <path d="M595 435 V510" class="line"/>
   <text x="610" y="478" class="small">owns / validates</text>
@@ -92,6 +92,6 @@
 
   <rect x="30" y="715" width="1120" height="100" rx="8" fill="#f8fafc" stroke="#64748b"/>
   <text x="45" y="745" class="label">Control boundary and lifecycle</text>
-  <text x="45" y="772">Current OS user only • repository isolation • unique run identity • reject stale/mismatched requests • clean up on exit</text>
-  <text x="45" y="797">IPC transport/layout and concrete timeouts remain implementation decisions. No persistent state migration.</text>
+  <text x="45" y="772">Current user only • repository isolation • one-shot agents • no run ID or handshake • busy if queue full • clean up on exit</text>
+  <text x="45" y="797">Socket: $XDG_RUNTIME_DIR/waap/control/&lt;repo-path&gt;/agents/&lt;agent-id&gt;.sock — never tracked in waap state.</text>
 </svg>
