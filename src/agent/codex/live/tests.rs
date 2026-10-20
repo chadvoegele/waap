@@ -511,3 +511,36 @@ fn timed_out_mailbox_request_is_cancelled_before_owner_dispatch() {
     assert!(state.cancelled);
     assert!(!state.dispatched);
 }
+
+#[test]
+fn malformed_native_errors_leave_acceptance_unknown() {
+    for response in [
+        json!({"error": null}),
+        json!({"error": {}}),
+        json!({"error": {"code": -32603}}),
+        json!({"error": {"message": "secret prompt"}}),
+        json!({"error": {"code": "invalid", "message": "secret prompt"}}),
+        json!({"error": {"code": -32603, "message": "secret prompt"},
+            "result": {"turnId": "tu"}}),
+    ] {
+        let (status, _) = with_run(|server, mailbox, _, _| {
+            server.start(mailbox);
+            thread::scope(|scope| {
+                let steering = scope.spawn(|| mailbox.steer("secret prompt", deadline()));
+                let request = server.read();
+                let mut response = response;
+                response["id"] = request["id"].clone();
+                server.send(response);
+                let error = steering.join().unwrap().unwrap_err();
+                assert!(
+                    matches!(error, SteeringError::AcceptanceUnknown { .. }),
+                    "{error:?}"
+                );
+                assert!(!error.to_string().contains("secret prompt"));
+            });
+            server.complete("completed");
+            wait_until(|| !mailbox.active.load(Ordering::Acquire));
+        });
+        assert_eq!(status.unwrap(), TurnStatus::Completed);
+    }
+}

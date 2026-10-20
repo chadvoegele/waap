@@ -45,7 +45,7 @@ pub(in crate::agent) fn socket_path(
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "control socket path exceeds the {}-byte platform limit: {}",
+                "control socket path exceeds the {}-byte platform limit: {}; shorten XDG_RUNTIME_DIR or the repository path",
                 address.sun_path.len() - 1,
                 path.display()
             ),
@@ -166,6 +166,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("platform limit"));
+        assert!(error.to_string().contains("shorten XDG_RUNTIME_DIR"));
         assert!(!runtime.path().join("waap").exists());
         assert!(socket_path(repo.path(), "../escape", Some(runtime.path().as_os_str())).is_err());
         let link = repo.path().join("runtime-link");

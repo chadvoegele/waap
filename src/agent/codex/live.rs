@@ -243,26 +243,37 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) => return Err(error),
             }
-            let mut consumed = 0;
-            while let Some(end) = buffer[consumed..].iter().position(|byte| *byte == b'\n') {
-                let end = consumed + end + 1;
-                let line = &buffer[consumed..end];
-                consumed = end;
-                if line.iter().all(u8::is_ascii_whitespace) {
-                    continue;
-                }
-                let message = serde_json::from_slice(line).map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "codex app-server sent malformed JSON",
-                    )
-                })?;
-                if let Some(status) = self.process_message(&mut turn, &message)? {
-                    return status;
-                }
+            if let Some(status) = self.process_frames(&mut turn, &mut buffer)? {
+                return status;
             }
-            buffer.drain(..consumed);
         }
+    }
+
+    fn process_frames(
+        &mut self,
+        turn: &mut LiveTurn<'_>,
+        buffer: &mut Vec<u8>,
+    ) -> io::Result<Option<io::Result<TurnStatus>>> {
+        let mut consumed = 0;
+        while let Some(end) = buffer[consumed..].iter().position(|byte| *byte == b'\n') {
+            let end = consumed + end + 1;
+            let line = &buffer[consumed..end];
+            consumed = end;
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            let message = serde_json::from_slice(line).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "codex app-server sent malformed JSON",
+                )
+            })?;
+            if let Some(status) = self.process_message(turn, &message)? {
+                return Ok(Some(status));
+            }
+        }
+        buffer.drain(..consumed);
+        Ok(None)
     }
 
     fn dispatch_steering(&mut self, turn: &mut LiveTurn<'_>, mut request: SteerRequest) {
@@ -352,60 +363,15 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
         message: &JsonValue,
     ) -> io::Result<Option<io::Result<TurnStatus>>> {
         if message.get("method").is_some() {
-            if message.get("id").is_some() {
-                return Ok(None);
-            }
-            if let Some(turn_id) = &turn.turn_id {
-                if let Some(delta) = delta_for_turn(message, turn.thread_id, turn_id) {
-                    self.out.write_all(delta.as_bytes())?;
-                    self.out.flush()?;
-                }
-                return Ok(completed_status_for_turn(message, turn.thread_id, turn_id));
-            }
-            if message
-                .pointer("/params/threadId")
-                .and_then(JsonValue::as_str)
-                == Some(turn.thread_id)
-            {
-                self.forward_delta(message)?;
-                if let Some(id) = message
-                    .pointer("/params/turn/id")
-                    .and_then(JsonValue::as_str)
-                {
-                    if let Some(status) = completed_status_for_turn(message, turn.thread_id, id) {
-                        turn.early_completion = Some((id.to_string(), status));
-                    }
-                }
-            }
-            return Ok(None);
+            return self.process_notification(turn, message);
         }
         let Some(id) = message.get("id").and_then(JsonValue::as_i64) else {
             return Ok(None);
         };
         if id == turn.start_id {
-            if let Some(error) = message.get("error") {
-                return Err(io::Error::other(format!(
-                    "codex turn/start rejected (code {})",
-                    error["code"]
-                )));
-            }
-            let turn_id = message
-                .pointer("/result/turn/id")
-                .and_then(JsonValue::as_str)
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "codex turn/start response is missing turn.id",
-                    )
-                })?;
-            turn.turn_id = Some(turn_id.to_string());
-            if let Some((id, status)) = turn.early_completion.take() {
-                if id == turn_id {
-                    return Ok(Some(status));
-                }
-            }
-            turn.active.store(true, Ordering::Release);
-        } else if turn
+            return self.accept_started_turn(turn, message);
+        }
+        if turn
             .pending
             .as_ref()
             .is_some_and(|pending| pending.id == id)
@@ -420,24 +386,92 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
         }
         Ok(None)
     }
+
+    fn process_notification(
+        &mut self,
+        turn: &mut LiveTurn<'_>,
+        message: &JsonValue,
+    ) -> io::Result<Option<io::Result<TurnStatus>>> {
+        if message.get("id").is_some() {
+            return Ok(None);
+        }
+        if let Some(turn_id) = &turn.turn_id {
+            if let Some(delta) = delta_for_turn(message, turn.thread_id, turn_id) {
+                self.out.write_all(delta.as_bytes())?;
+                self.out.flush()?;
+            }
+            return Ok(completed_status_for_turn(message, turn.thread_id, turn_id));
+        }
+        if message
+            .pointer("/params/threadId")
+            .and_then(JsonValue::as_str)
+            != Some(turn.thread_id)
+        {
+            return Ok(None);
+        }
+        self.forward_delta(message)?;
+        if let Some(id) = message
+            .pointer("/params/turn/id")
+            .and_then(JsonValue::as_str)
+        {
+            if let Some(status) = completed_status_for_turn(message, turn.thread_id, id) {
+                turn.early_completion = Some((id.to_string(), status));
+            }
+        }
+        Ok(None)
+    }
+
+    fn accept_started_turn(
+        &self,
+        turn: &mut LiveTurn<'_>,
+        message: &JsonValue,
+    ) -> io::Result<Option<io::Result<TurnStatus>>> {
+        if let Some(error) = message.get("error") {
+            return Err(io::Error::other(format!(
+                "codex turn/start rejected (code {})",
+                error["code"]
+            )));
+        }
+        let turn_id = message
+            .pointer("/result/turn/id")
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "codex turn/start response is missing turn.id",
+                )
+            })?;
+        turn.turn_id = Some(turn_id.to_string());
+        if let Some((id, status)) = turn.early_completion.take() {
+            if id == turn_id {
+                return Ok(Some(status));
+            }
+        }
+        turn.active.store(true, Ordering::Release);
+        Ok(None)
+    }
 }
 
 fn steering_response(message: &JsonValue, expected_turn: &str) -> SteeringResult {
     if let Some(error) = message.get("error") {
-        let code = error.get("code").and_then(JsonValue::as_i64);
-        let diagnostic = error
-            .get("message")
-            .and_then(JsonValue::as_str)
-            .unwrap_or("");
-        let missing = code == Some(-32601)
-            || (code == Some(-32600)
+        let (Some(code), Some(diagnostic)) = (
+            error.get("code").and_then(JsonValue::as_i64),
+            error.get("message").and_then(JsonValue::as_str),
+        ) else {
+            return Err(unknown("the server returned an invalid turn/steer error"));
+        };
+        if message.get("result").is_some() {
+            return Err(unknown("the server returned both a result and an error"));
+        }
+        let missing = code == -32601
+            || (code == -32600
                 && (diagnostic.starts_with("Invalid request: unknown variant `turn/steer`")
                     || diagnostic.starts_with("unknown variant `turn/steer`")));
         return Err(if missing {
             reject("unsupported_backend_version", "Codex app-server does not support turn/steer; upgrade Codex to a version with native turn/steer support")
         } else {
             // The server's message can echo submitted input; keep routine diagnostics prompt-free.
-            SteeringError::Rejected { code: "backend_rejected", message: format!("Codex rejected turn/steer (RPC error code {}); verify that the turn is still active", code.map_or_else(|| "unknown".to_string(), |code| code.to_string())) }
+            reject("backend_rejected", &format!("Codex rejected turn/steer (RPC error code {code}); verify that the turn is still active"))
         });
     }
     if message

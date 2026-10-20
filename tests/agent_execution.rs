@@ -90,6 +90,9 @@ for line in sys.stdin:
                 emit({'method': 'item/agentMessage/delta', 'params': {
                     'threadId': 'th_test', 'turnId': 'tu_test', 'delta': 'waiting for acknowledgement\n'}})
                 time.sleep(0.01)
+        if mode == 'steering-invalid-error':
+            emit({'id': request['id'], 'error': None})
+            continue
         if mode == 'steering-eof':
             sys.exit(0)
         if mode in ('steering-rejected', 'steering-missing'):
@@ -470,6 +473,7 @@ fn native_failures_reach_cli_without_prompt_disclosure_retries_or_lifecycle_chan
         ("steering-rejected", "backend_rejected"),
         ("steering-missing", "unsupported_backend_version"),
         ("steering-eof", "acceptance is unknown"),
+        ("steering-invalid-error", "acceptance is unknown"),
     ] {
         let mut run = SteeringRun::start(mode);
         let before = run.snapshot();

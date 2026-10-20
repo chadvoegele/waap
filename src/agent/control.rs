@@ -248,15 +248,7 @@ impl ControlServer {
         let mut remaining = VecDeque::new();
         while let Some(pending) = self.pending.pop_front() {
             if now >= pending.deadline {
-                self.reply_to(
-                    &pending,
-                    rejection(
-                        Some(&pending.request.request_id),
-                        "timeout",
-                        "Steering request expired before dispatch.",
-                    ),
-                    now,
-                );
+                self.reject_expired(&pending, now);
             } else {
                 remaining.push_back(pending);
             }
@@ -284,15 +276,7 @@ impl ControlServer {
         }
         while let Some(pending) = self.pending.pop_front() {
             if now >= pending.deadline {
-                self.reply_to(
-                    &pending,
-                    rejection(
-                        Some(&pending.request.request_id),
-                        "timeout",
-                        "Steering request expired before dispatch.",
-                    ),
-                    now,
-                );
+                self.reject_expired(&pending, now);
                 continue;
             }
             if commands
@@ -316,6 +300,18 @@ impl ControlServer {
             });
             break;
         }
+    }
+
+    fn reject_expired(&mut self, pending: &Pending, now: Instant) {
+        self.reply_to(
+            pending,
+            rejection(
+                Some(&pending.request.request_id),
+                "timeout",
+                "Steering request expired before dispatch.",
+            ),
+            now,
+        );
     }
 
     fn reply_to(&mut self, pending: &Pending, value: Value, now: Instant) {
