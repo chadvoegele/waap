@@ -1,7 +1,7 @@
 +++
 name = "Rebase Pi backend PR 6 onto refactored main"
 creation_date = 2026-10-20T11:05:42Z
-status = "in-progress"
+status = "completed"
 +++
 
 Rebase https://github.com/chadvoegele/waap/pull/6 (docs/pi-agent-system-spec) onto latest origin/main and adapt the implementation to the architecture refactor in PR #7.
