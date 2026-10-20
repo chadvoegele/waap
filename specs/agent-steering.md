@@ -256,4 +256,3 @@ including on delivery failure. No persistent state migration is required.
   handshake is required.
 - Regression tests: run output, stop interruption, completion, and worktree cleanup
   continue to work while steering requests are processed.
-
