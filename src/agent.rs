@@ -20,6 +20,7 @@ use crate::toml::{datetime_string, toml_string};
 mod backend;
 mod claude;
 mod codex;
+mod control;
 mod get;
 mod list;
 mod new;

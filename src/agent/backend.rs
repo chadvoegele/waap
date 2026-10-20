@@ -36,20 +36,13 @@ pub(super) trait RunHandle: Sync {
     fn wait(&self) -> io::Result<RunOutcome>;
 
     /// Returns only after acknowledgement or failure, within the caller's deadline.
-    #[allow(dead_code)] // Used by the dependent control-socket ticket.
     fn steer(&self, prompt: &str, deadline: Instant) -> Result<(), SteeringError>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum SteeringError {
-    Rejected {
-        code: &'static str,
-        message: String,
-    },
-    #[allow(dead_code)] // Used when native backend delivery cannot be confirmed.
-    AcceptanceUnknown {
-        message: String,
-    },
+    Rejected { code: &'static str, message: String },
+    AcceptanceUnknown { message: String },
 }
 
 impl SteeringError {

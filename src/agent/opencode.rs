@@ -667,6 +667,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(started.session_id, "ses_123");
+        crate::agent::control::tests::assert_backend_socket_rejection(
+            |prompt, deadline| started.handle.steer(prompt, deadline),
+            "opencode",
+        );
         let error = started
             .handle
             .steer("steer", std::time::Instant::now())

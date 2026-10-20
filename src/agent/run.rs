@@ -1,11 +1,14 @@
+use std::ffi::OsStr;
 use std::io;
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
 use super::backend::{AgentSystemBackend, RunHandle, RunOutcome, StartContext};
+use super::control::ControlServer;
 use super::worktree::{collapse_errors, AgentWorktree};
 use crate::agent::{
     agent_report_json, load_agent_report, print_agent_report_human, read_agent_record,
@@ -51,6 +54,7 @@ pub(crate) fn run_agent(
         agent_id,
         system,
         backend.as_mut(),
+        std::env::var_os("XDG_RUNTIME_DIR").as_deref(),
     )
 }
 
@@ -61,6 +65,7 @@ fn run_agent_with_backend(
     agent_id: &str,
     system: &AgentSystem,
     backend: &mut dyn AgentSystemBackend,
+    runtime_dir: Option<&OsStr>,
 ) -> io::Result<ExitCode> {
     {
         let _lock = crate::state::StateLock::acquire(waap_root)?;
@@ -87,6 +92,7 @@ fn run_agent_with_backend(
         agent_id,
         system,
         backend,
+        runtime_dir,
     );
 
     match result {
@@ -121,8 +127,10 @@ fn run_started_agent(
     agent_id: &str,
     system: &AgentSystem,
     backend: &mut dyn AgentSystemBackend,
+    runtime_dir: Option<&OsStr>,
 ) -> io::Result<RunOutcome> {
     let repository_root = repository_root.canonicalize()?;
+    super::control::socket_path(&repository_root, agent_id, runtime_dir)?;
     let mut worktree = AgentWorktree::create(&repository_root, agent_id)?;
     let prompt = build_agent_goal(waap_root, agent_id);
     let run_result = backend
@@ -140,14 +148,16 @@ fn run_started_agent(
                 &started.session_id,
                 system.clone(),
             )?;
-            wait_for_run(started.handle.as_ref(), |_| {})
+            ControlServer::bind(&repository_root, agent_id, runtime_dir)?
+                .wait(started.handle.as_ref())
         });
     let cleanup_result = worktree.cleanup();
     collapse_errors(run_result, cleanup_result)
 }
 
-fn wait_for_run(
+pub(super) fn wait_for_run(
     handle: &dyn RunHandle,
+    completed: &AtomicBool,
     mut service_control: impl FnMut(&dyn RunHandle),
 ) -> io::Result<RunOutcome> {
     thread::scope(|scope| {
@@ -155,9 +165,11 @@ fn wait_for_run(
         let worker = thread::Builder::new()
             .name("waap-run-wait".to_string())
             .spawn_scoped(scope, move || {
-                let outcome = handle.wait();
+                let outcome =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle.wait()));
+                completed.store(true, Ordering::Release);
                 let _ = finished.send(());
-                outcome
+                outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
             })?;
         loop {
             match completion.try_recv() {
@@ -349,8 +361,8 @@ mod tests {
 
     use super::{
         build_agent_goal, collapse_errors, mark_completed, mark_failed, mark_running,
-        persist_failed_after_error, require_ready_agent, run_agent, run_agent_with_backend,
-        transition_and_commit_status, update_agent_session, AgentWorktree,
+        persist_failed_after_error, require_ready_agent, run_agent, transition_and_commit_status,
+        update_agent_session, AgentWorktree,
     };
     use crate::agent::backend::{fake::FakeBackend, RunOutcome};
     use crate::agent::worktree::agent_worktree_dir;
@@ -362,6 +374,99 @@ mod tests {
     use crate::cli::OutputFormat;
     use crate::git::{create_worktree, remove_worktree};
     use crate::test_git::{init_repo_with_commit, run as git};
+
+    fn run_agent_with_backend(
+        repository_root: &Path,
+        waap_root: &Path,
+        output_format: &OutputFormat,
+        agent_id: &str,
+        system: &AgentSystem,
+        backend: &mut dyn crate::agent::backend::AgentSystemBackend,
+    ) -> std::io::Result<ExitCode> {
+        let runtime = tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        super::run_agent_with_backend(
+            repository_root,
+            waap_root,
+            output_format,
+            agent_id,
+            system,
+            backend,
+            Some(runtime.path().as_os_str()),
+        )
+    }
+
+    #[test]
+    fn socket_runs_without_state_lock_or_steering_metadata_changes() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+
+        let repository = tempdir().unwrap();
+        init_repo_with_commit(repository.path());
+        let agent_id = "aa-1";
+        let record = seed_agent_record(repository.path(), agent_id, "ready");
+        let runtime = tempdir().unwrap();
+        fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let path = runtime
+            .path()
+            .join("waap/control")
+            .join(crate::root::repository_relative_path(repository.path()).unwrap())
+            .join("agents/aa-1.sock");
+        let endpoint = path.clone();
+        let root = repository.path().to_path_buf();
+        let prompt = "  λ\n'\" $() `prompt`  ";
+        let mut backend = FakeBackend {
+            wait_action: Some(Box::new(move || {
+                let _lock = crate::state::StateLock::acquire(&root)?;
+                let record = root.join("agents/aa-1/agent.md");
+                let before = fs::read(&record)?;
+                let head = git(&root, &["rev-parse", "HEAD"]);
+                let mut socket = UnixStream::connect(&path)?;
+                socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+                writeln!(
+                    socket,
+                    "{}",
+                    json!({"version":1,"request_id":uuid::Uuid::from_u128(1).to_string(),"method":"steer","prompt":prompt})
+                )?;
+                let mut line = String::new();
+                BufReader::new(socket).read_line(&mut line)?;
+                let response: serde_json::Value = serde_json::from_str(&line)?;
+                assert_eq!(response["accepted"], true);
+                assert_eq!(fs::read(&record)?, before);
+                assert_eq!(git(&root, &["rev-parse", "HEAD"]), head);
+                fs::write(root.join("output"), "backend output continued")?;
+                Ok(())
+            })),
+            ..FakeBackend::default()
+        };
+        let result = super::run_agent_with_backend(
+            repository.path(),
+            repository.path(),
+            &OutputFormat::Json,
+            agent_id,
+            &AgentSystem::Codex,
+            &mut backend,
+            Some(runtime.path().as_os_str()),
+        )
+        .unwrap();
+        assert_eq!(result, ExitCode::SUCCESS);
+        assert_eq!(backend.steer_calls.lock().unwrap()[0].0, prompt);
+        assert_eq!(
+            fs::read_to_string(repository.path().join("output")).unwrap(),
+            "backend output continued"
+        );
+        assert!(fs::read_to_string(record)
+            .unwrap()
+            .contains("status = \"completed\""));
+        assert!(!endpoint.exists());
+        assert!(!repository
+            .path()
+            .join(agent_worktree_dir(agent_id))
+            .exists());
+    }
 
     #[test]
     fn active_run_services_steering_while_wait_and_output_progress() {
@@ -409,20 +514,24 @@ mod tests {
             let deadline = Instant::now() + Duration::from_secs(5);
             let mut serviced = false;
 
-            let outcome = super::wait_for_run(started.handle.as_ref(), |handle| {
-                if serviced {
-                    return;
-                }
-                started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-                assert_eq!(
-                    handle.steer(prompt, deadline),
-                    steer_error.clone().map_or(Ok(()), Err)
-                );
-                release_tx.send(()).unwrap();
-                finished_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-                assert_eq!(*output.lock().unwrap(), ["streamed output"]);
-                serviced = true;
-            })
+            let outcome = super::wait_for_run(
+                started.handle.as_ref(),
+                &super::AtomicBool::new(false),
+                |handle| {
+                    if serviced {
+                        return;
+                    }
+                    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    assert_eq!(
+                        handle.steer(prompt, deadline),
+                        steer_error.clone().map_or(Ok(()), Err)
+                    );
+                    release_tx.send(()).unwrap();
+                    finished_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    assert_eq!(*output.lock().unwrap(), ["streamed output"]);
+                    serviced = true;
+                },
+            )
             .unwrap();
 
             assert!(serviced);

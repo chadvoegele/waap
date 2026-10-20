@@ -10,6 +10,8 @@ use std::process::{Command, Output, Stdio};
 use common::{git, init_repo, isolate_git_config};
 
 fn waap(root: &Path, args: &[&str], mode: &str) -> Output {
+    let runtime = tempfile::tempdir().unwrap();
+    fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_waap"));
     isolate_git_config(&mut command);
     command
@@ -24,6 +26,7 @@ fn waap(root: &Path, args: &[&str], mode: &str) -> Output {
             ),
         )
         .env("WAAP_TEST_MODE", mode)
+        .env("XDG_RUNTIME_DIR", runtime.path())
         .env("WAAP_TEST_PID_FILE", root.join("backend.pid"))
         .env_remove("CODEX_MODEL")
         .env_remove("CODEX_REASONING_EFFORT")

@@ -39,6 +39,18 @@ pub(crate) fn find_waap_root(
         };
     }
 
+    let repository_path = repository_relative_path(start)?;
+    let home = env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "HOME must be an absolute path")
+        })?;
+    Ok(home.join(".local/state/waap/data").join(repository_path))
+}
+
+/// The primary repository's absolute path, without its root component.
+pub(crate) fn repository_relative_path(start: &Path) -> io::Result<PathBuf> {
     let repository_root = find_git_root(start)?;
     let mut command = Command::new("git");
     command.current_dir(&repository_root).args([
@@ -64,19 +76,13 @@ pub(crate) fn find_waap_root(
         ));
     }
     let primary_repository_root = common_git_dir.parent().ok_or_else(not_in_repository)?;
-    let home = env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "HOME must be an absolute path")
-        })?;
-    let mut waap_root = home.join(".local/state/waap/data");
-    for component in primary_repository_root.components() {
-        if let Component::Normal(component) = component {
-            waap_root.push(component);
-        }
-    }
-    Ok(waap_root)
+    Ok(primary_repository_root
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(component) => Some(component),
+            _ => None,
+        })
+        .collect())
 }
 
 #[cfg(test)]

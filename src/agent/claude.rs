@@ -174,6 +174,10 @@ mod tests {
             child: Mutex::new(spawn_claude_attached(&command).unwrap()),
         };
         let wait_lock = run.child.lock().unwrap();
+        crate::agent::control::tests::assert_backend_socket_rejection(
+            |prompt, deadline| run.steer(prompt, deadline),
+            "claude",
+        );
         let error = run.steer("steer", Instant::now()).unwrap_err();
         assert_eq!(error, SteeringError::not_implemented("claude"));
         assert_eq!(
