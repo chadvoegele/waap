@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="850" viewBox="0 0 1180 850" role="img" aria-labelledby="title desc">
+  <title id="title">Waap agent steering: Codex-first design</title>
+  <desc id="desc">The steer CLI reads unchanged agent metadata, rejects non-running agents, and sends backend-neutral NDJSON to a Unix socket owned by shared run orchestration. Shared orchestration queues requests and invokes the active backend steering method; Claude and OpenCode return not implemented. The owner sends turn/steer on its existing Codex connection. Acceptance returns along the reverse path. Persistent metadata and transient control state are shown separately.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10z" fill="#334155"/></marker>
+    <style>
+      text { font-family: sans-serif; fill: #0f172a; font-size: 15px; }
+      .heading { font-size: 24px; font-weight: bold; }
+      .label { font-size: 17px; font-weight: bold; }
+      .small { font-size: 14px; }
+      .box { fill: #eff6ff; stroke: #2563eb; stroke-width: 2; }
+      .state { fill: #f0fdf4; stroke: #15803d; stroke-width: 2; }
+      .error { fill: #fff7ed; stroke: #c2410c; stroke-width: 2; }
+      .line { fill: none; stroke: #334155; stroke-width: 2; marker-end: url(#arrow); }
+      .reply { fill: none; stroke: #334155; stroke-width: 2; stroke-dasharray: 7 5; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <rect width="1180" height="850" fill="white"/>
+  <text x="30" y="38" class="heading">Agent steering — existing Codex run, no restart</text>
+  <text x="30" y="67">Solid arrows: requests / reads. Dashed arrows: acknowledgements / errors.</text>
+
+  <rect x="30" y="105" width="330" height="125" rx="8" class="box"/>
+  <text x="45" y="135" class="label">1. waap agent steer</text>
+  <text x="45" y="162">--agent-id ID --prompt TEXT</text>
+  <text x="45" y="187">Validate ID, prompt, running status</text>
+  <text x="45" y="212">Resolve repository + agent socket</text>
+
+  <rect x="435" y="105" width="325" height="125" rx="8" class="state"/>
+  <text x="450" y="135" class="label">Persistent agent record (unchanged)</text>
+  <text x="450" y="163">status = running</text>
+  <text x="450" y="188">system = codex | claude | opencode</text>
+  <text x="450" y="213">session_id = Codex thread ID</text>
+  <path d="M360 154 H435" class="line"/>
+  <text x="374" y="142" class="small">read</text>
+
+  <rect x="825" y="105" width="325" height="125" rx="8" class="error"/>
+  <text x="840" y="135" class="label">4b. Claude / OpenCode backend</text>
+  <text x="840" y="163">Implementation: steer(prompt)</text>
+  <text x="840" y="188">Returns not implemented</text>
+  <text x="840" y="213">Only rejected inside the backend</text>
+  <path d="M725 305 V260 H900 V230" class="line"/>
+  <text x="775" y="252" class="small">steer(prompt)</text>
+  <path d="M1040 230 V280 H750 V305" class="reply"/>
+
+  <rect x="30" y="305" width="330" height="130" rx="8" class="box"/>
+  <text x="45" y="335" class="label">2. Shared steering client</text>
+  <text x="45" y="363">Locate repository/agent-scoped socket</text>
+  <text x="45" y="388">Send version, request ID, method, prompt</text>
+  <text x="45" y="413">Wait for correlated, bounded response</text>
+  <path d="M190 230 V305" class="line"/>
+  <text x="205" y="273" class="small">All backends</text>
+
+  <rect x="435" y="305" width="325" height="130" rx="8" class="box"/>
+  <text x="450" y="335" class="label">3. Existing waap agent run owner</text>
+  <text x="450" y="363">Unix socket + NDJSON parser (new)</text>
+  <text x="450" y="388">Bounded FIFO; call backend steer(prompt)</text>
+  <text x="450" y="413">Service requests while backend runs</text>
+  <path d="M360 350 H435" class="line"/>
+  <text x="370" y="338" class="small">request</text>
+  <path d="M435 410 H360" class="reply"/>
+
+  <rect x="825" y="305" width="325" height="130" rx="8" class="box"/>
+  <text x="840" y="335" class="label">4a. Codex backend: steer(prompt)</text>
+  <text x="840" y="363">Existing app server: turn/steer</text>
+  <text x="840" y="388">threadId, expectedTurnId</text>
+  <text x="840" y="413">input: [{ type: text, text: prompt }]</text>
+  <path d="M760 350 H825" class="line"/>
+  <text x="768" y="338" class="small">call</text>
+  <path d="M825 410 H760" class="reply"/>
+
+  <rect x="435" y="510" width="325" height="155" rx="8" class="state"/>
+  <text x="450" y="540" class="label">Transient data model (new)</text>
+  <text x="450" y="568">Repository + agent → socket endpoint</text>
+  <text x="450" y="593">Backend: thread ID + active turn ID</text>
+  <text x="450" y="618">Shared: bounded queue + correlations</text>
+  <text x="450" y="643">Response: request ID + accepted/error</text>
+  <path d="M595 435 V510" class="line"/>
+  <text x="610" y="478" class="small">owns / validates</text>
+
+  <rect x="30" y="510" width="330" height="155" rx="8" class="error"/>
+  <text x="45" y="540" class="label">Caller result</text>
+  <text x="45" y="568">Success only after Codex accepts</text>
+  <text x="45" y="593">Errors: absent endpoint, no active turn,</text>
+  <text x="45" y="618">rejection, exit, transport error, timeout</text>
+  <text x="45" y="643">Unknown acceptance → report; never retry</text>
+  <path d="M190 435 V510" class="reply"/>
+
+  <rect x="825" y="510" width="325" height="155" rx="8" class="state"/>
+  <text x="840" y="540" class="label">Preserved behavior</text>
+  <text x="840" y="568">Same session, turn, and worktree</text>
+  <text x="840" y="593">No metadata writes or state commits</text>
+  <text x="840" y="618">Run output + stop + completion continue</text>
+  <text x="840" y="643">Acceptance ≠ execution or completion</text>
+
+  <rect x="30" y="715" width="1120" height="100" rx="8" fill="#f8fafc" stroke="#64748b"/>
+  <text x="45" y="745" class="label">Control boundary and lifecycle</text>
+  <text x="45" y="772">Current user only • repository isolation • one-shot agents • no run ID or handshake • busy if queue full • clean up on exit</text>
+  <text x="45" y="797">Socket: $XDG_RUNTIME_DIR/waap/control/&lt;repo-path&gt;/agents/&lt;agent-id&gt;.sock — never tracked in waap state.</text>
+</svg>
