@@ -4,7 +4,6 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-/// A repository-scoped control path and its private runtime-directory boundary.
 #[derive(Debug)]
 pub(crate) struct ControlRoot {
     runtime_dir: PathBuf,
@@ -96,7 +95,6 @@ pub(crate) fn find_waap_root(
     Ok(home.join(".local/state/waap/data").join(repository_path))
 }
 
-/// The primary repository's absolute path, without its root component.
 pub(crate) fn repository_relative_path(start: &Path) -> io::Result<PathBuf> {
     let repository_root = find_git_root(start)?;
     let mut command = Command::new("git");

@@ -37,7 +37,6 @@ fn print_run_agent_report(
     }
 }
 
-/// Defer root errors until after ready/backend checks and the running transition.
 pub(crate) fn run_agent(
     repository_root: &Path,
     waap_root: &Path,

@@ -145,7 +145,6 @@ impl Drop for SteerRequest {
 }
 
 pub(super) fn set_nonblocking(pipe: &impl AsRawFd) -> io::Result<()> {
-    // These descriptors remain owned by the app-server client throughout the call.
     let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
     if flags < 0
         || unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
@@ -629,7 +628,6 @@ mod tests {
                 );
                 server.accept(&request["id"]);
                 assert_eq!(steering.join().unwrap(), Ok(()));
-                // A second request must reuse this same turn and have a distinct RPC ID.
                 let second = scope.spawn(|| mailbox.steer("second", deadline()));
                 let next = server.read();
                 assert_eq!(next["method"], METHOD_TURN_STEER);

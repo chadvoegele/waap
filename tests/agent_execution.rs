@@ -579,7 +579,6 @@ fn completion_during_native_submission_reports_uncertainty_and_rejects_pending_r
         .unwrap();
         pending.push((id, stream));
     }
-    // The overflow reply proves all sixteen earlier frames reached the queue.
     let overflow = run.steer("overflow").output().unwrap();
     assert!(!overflow.status.success(), "{overflow:?}");
     assert!(String::from_utf8_lossy(&overflow.stderr).contains("busy"));

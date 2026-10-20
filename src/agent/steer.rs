@@ -8,7 +8,6 @@ use super::load_agent_content;
 use crate::cli::OutputFormat;
 use crate::root::ControlRoot;
 
-/// Agent and prompt validation takes precedence over root-resolution errors.
 pub(crate) fn steer_agent(
     waap_root: &Path,
     control_root: io::Result<ControlRoot>,

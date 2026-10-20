@@ -154,7 +154,6 @@ impl ControlServer {
     }
 
     fn accept_connections(&mut self, now: Instant) {
-        // Bound work per tick even if a local caller continually opens connections.
         for _ in 0..MAX_CONNECTIONS {
             let stream = match self.listener.as_ref().unwrap().accept() {
                 Ok((stream, _)) => stream,
