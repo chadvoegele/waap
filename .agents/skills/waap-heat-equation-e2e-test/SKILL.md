@@ -1,43 +1,84 @@
 ---
 name: waap-heat-equation-e2e-test
-description: Use when end-to-end testing waap by planning, implementing, steering, and verifying a 2D heat equation finite-difference program.
+description: Use when end-to-end testing waap by planning, implementing, and verifying a 2D heat equation finite-difference program.
 ---
 
 # Heat Equation E2E
 
-Use waap as a user would to build a 2D heat equation simulator in a temporary Git repository. Get command usage from the waap skill and CLI documentation.
+This skill describes an end-to-end waap test by making a simple 2D heat equation simulator.
 
-## Setup
+## Steps
 
-Use the waap binary being tested and authenticated Codex agents. Keep test repositories and runtime paths short:
+1. Create a new repository in a temporary directory.
+2. Write a spec for a 2D heat equation simulator using a finite difference method.
+3. Use the waap skill to create a ticket to write the implementation tickets based on the spec.
+4. Run a waap planner agent for that ticket.
+5. Repeatedly run waap developer agents for unblocked pending tickets.
+6. While the visualization developer is running, steer it to write the final ASCII-art visualization to `final-heatmap.txt` and commit it. Introduce this request only through steering, not the initial spec or instructions. Use Codex for this agent and the waap CLI documentation for command usage.
+7. Run the final program and compare its visualization with `final-heatmap.txt`.
+8. Verify the output is numerically plausible and satisfies the spec.
+
+## Runtime Prerequisites
+
+Use a `waap` binary on `PATH`. When testing an uninstalled local checkout, prepend the checkout's target directory before running commands in the temporary repository:
+
+```sh
+export PATH="/path/to/waap/target/debug:$PATH"
+```
+
+Set a private runtime directory for steering:
 
 ```sh
 export XDG_RUNTIME_DIR=$(mktemp -d /tmp/waap-runtime.XXXXXX)
 ```
 
-## Specification
+## Test Repository Setup
 
-Write `specs/spec.md` requiring:
+Create all test files under a temporary directory.
 
-- A runnable CLI using stable explicit finite differences on a square grid of at least 20 by 20 cells.
-- An initial hot spot on one edge, with the rest cool; advance until stable.
-- A final summary: center and edge temperatures, minimum, maximum, and average.
-- A terminal ASCII-art visualization mode.
-- A verification command checking that the center warms, the minimum stays non-negative, and the maximum never exceeds the initial hot spot temperature.
+```sh
+tmpdir=$(mktemp -d)
+cd "$tmpdir"
+git init
+mkdir -p specs
+```
 
-## Workflow
+Write `specs/spec.md` with these requirements:
 
-1. Initialize the temporary repository and waap state; commit the specification.
-2. Create a planning ticket and run a planner to produce implementation tickets.
-3. Run developer agents for unblocked tickets, through the visualization implementation.
-4. While the visualization developer is active, steer it to **write the final ASCII-art visualization to `final-heatmap.txt` and commit it with its implementation**. Introduce this requirement only through steering, not the initial specification or instructions.
-5. Finish the remaining tickets. Run the simulator, its verification command, and visualization mode; compare the visualization with `final-heatmap.txt`.
+```markdown
+# 2D Heat Equation Simulator
+
+Build a small command-line program that simulates the 2D heat equation on a square grid using an explicit finite difference method.
+
+## Requirements
+
+1. The program must be runnable.
+2. Use a square grid of at least 20 by 20 cells.
+3. Initialize the grid with a hot spot on one edge, rest cool.
+4. Advance the system until stable.
+5. Use a stable explicit finite difference update for the 2D heat equation.
+6. Print or write a final summary containing at least the center temperature, edge temperatures, minimum temperature, maximum temperature, and average temperature.
+7. Include a test or verification command that checks the simulation result is plausible.
+8. Include a visualization mode that writes an ASCII-art style grid in the terminal.
+
+## Acceptance Criteria
+
+1. The program runs without errors.
+2. The final center temperature is higher than its initial temperature.
+3. The minimum temperature is non-negative.
+4. The maximum temperature does not exceed the initial hot spot temperature.
+5. The verification command exits successfully.
+```
 
 ## Success Criteria
 
-- All tickets and agents complete, and `waap check` passes.
-- The simulator satisfies the specification and numerical checks.
-- Steering is accepted, and the committed `.txt` contains the actual final visualization—not a synthetic marker.
-- Record commands, results, and the test repository path. Report failures honestly and retain artifacts for diagnosis.
+The end-to-end run succeeds only when:
 
-Remove the test-created runtime directory after all agents exit.
+1. `waap check` passes.
+2. All waap tickets and agents are marked as completed.
+3. The generated heat equation program runs.
+4. The verification command passes.
+5. Steering is accepted and the committed `final-heatmap.txt` matches the program's final visualization.
+6. The result is documented with the temporary repository path and commands used.
+
+If any step fails, fix the workflow or generated project and rerun from the failed step until the program is verified.
