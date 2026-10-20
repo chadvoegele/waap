@@ -1,7 +1,8 @@
 +++
 name = "Steering run interface"
 creation_date = 2026-10-20T13:56:15Z
-status = "ready"
+status = "running"
+system = "codex"
 +++
 
 # Waap developer: Steering run interface
