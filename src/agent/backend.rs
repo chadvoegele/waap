@@ -1,6 +1,7 @@
 use std::io;
 use std::path::Path;
 use std::process::{ExitCode, ExitStatus};
+use std::time::Instant;
 
 #[derive(Debug, PartialEq)]
 pub(super) enum RunOutcome {
@@ -30,9 +31,47 @@ pub(super) struct StartedRun {
     pub(super) handle: Box<dyn RunHandle>,
 }
 
-pub(super) trait RunHandle {
-    fn wait(self: Box<Self>) -> io::Result<RunOutcome>;
+pub(super) trait RunHandle: Sync {
+    /// Called once, on a scoped worker; steering may run concurrently.
+    fn wait(&self) -> io::Result<RunOutcome>;
+
+    /// Returns only after acknowledgement or failure, within the caller's deadline.
+    #[allow(dead_code)] // Used by the dependent control-socket ticket.
+    fn steer(&self, prompt: &str, deadline: Instant) -> Result<(), SteeringError>;
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum SteeringError {
+    Rejected {
+        code: &'static str,
+        message: String,
+    },
+    #[allow(dead_code)] // Used when native backend delivery cannot be confirmed.
+    AcceptanceUnknown {
+        message: String,
+    },
+}
+
+impl SteeringError {
+    pub(super) fn not_implemented(backend: &str) -> Self {
+        Self::Rejected {
+            code: "not_implemented",
+            message: format!("steering not implemented for backend {backend}"),
+        }
+    }
+}
+
+impl std::fmt::Display for SteeringError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected { message, .. } | Self::AcceptanceUnknown { message } => {
+                formatter.write_str(message)
+            }
+        }
+    }
+}
+
+impl std::error::Error for SteeringError {}
 
 pub(super) struct AbortContext<'a> {
     pub(super) waap_root: &'a Path,
@@ -53,9 +92,9 @@ pub(super) trait AgentSystemBackend {
 
 #[cfg(test)]
 pub(super) mod fake {
-    use std::cell::Cell;
     use std::path::PathBuf;
-    use std::rc::Rc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use super::*;
 
@@ -80,10 +119,12 @@ pub(super) mod fake {
         pub(crate) outcome: Option<RunOutcome>,
         pub(crate) start_error: Option<String>,
         pub(crate) wait_error: Option<String>,
-        pub(crate) wait_action: Option<Box<dyn FnOnce() -> io::Result<()>>>,
+        pub(crate) wait_action: Option<Box<dyn FnOnce() -> io::Result<()> + Send>>,
         pub(crate) abort_error: Option<String>,
         pub(crate) start_calls: Vec<StartCall>,
-        pub(crate) wait_calls: Rc<Cell<usize>>,
+        pub(crate) wait_calls: Arc<AtomicUsize>,
+        pub(crate) steer_calls: Arc<Mutex<Vec<(String, Instant)>>>,
+        pub(crate) steer_error: Option<SteeringError>,
         pub(crate) abort_calls: Vec<AbortCall>,
     }
 
@@ -97,29 +138,49 @@ pub(super) mod fake {
                 wait_action: None,
                 abort_error: None,
                 start_calls: Vec::new(),
-                wait_calls: Rc::new(Cell::new(0)),
+                wait_calls: Arc::new(AtomicUsize::new(0)),
+                steer_calls: Arc::new(Mutex::new(Vec::new())),
+                steer_error: None,
                 abort_calls: Vec::new(),
             }
         }
     }
 
     struct FakeRun {
+        state: Mutex<Option<FakeRunState>>,
+        wait_calls: Arc<AtomicUsize>,
+        steer_calls: Arc<Mutex<Vec<(String, Instant)>>>,
+        steer_error: Option<SteeringError>,
+    }
+
+    struct FakeRunState {
         outcome: RunOutcome,
         error: Option<String>,
-        action: Option<Box<dyn FnOnce() -> io::Result<()>>>,
-        wait_calls: Rc<Cell<usize>>,
+        action: Option<Box<dyn FnOnce() -> io::Result<()> + Send>>,
     }
 
     impl RunHandle for FakeRun {
-        fn wait(mut self: Box<Self>) -> io::Result<RunOutcome> {
-            self.wait_calls.set(self.wait_calls.get() + 1);
-            if let Some(action) = self.action.take() {
+        fn wait(&self) -> io::Result<RunOutcome> {
+            self.wait_calls.fetch_add(1, Ordering::SeqCst);
+            let state = self.state.lock().unwrap().take().unwrap();
+            if let Some(action) = state.action {
                 action()?;
             }
-            if let Some(error) = self.error {
+            if let Some(error) = state.error {
                 Err(io::Error::other(error))
             } else {
-                Ok(self.outcome)
+                Ok(state.outcome)
+            }
+        }
+
+        fn steer(&self, prompt: &str, deadline: Instant) -> Result<(), SteeringError> {
+            self.steer_calls
+                .lock()
+                .unwrap()
+                .push((prompt.to_string(), deadline));
+            match &self.steer_error {
+                Some(error) => Err(error.clone()),
+                None => Ok(()),
             }
         }
     }
@@ -139,10 +200,14 @@ pub(super) mod fake {
             Ok(StartedRun {
                 session_id: self.session_id.clone(),
                 handle: Box::new(FakeRun {
-                    outcome: self.outcome.take().unwrap_or(RunOutcome::Completed),
-                    error: self.wait_error.take(),
-                    action: self.wait_action.take(),
-                    wait_calls: Rc::clone(&self.wait_calls),
+                    state: Mutex::new(Some(FakeRunState {
+                        outcome: self.outcome.take().unwrap_or(RunOutcome::Completed),
+                        error: self.wait_error.take(),
+                        action: self.wait_action.take(),
+                    })),
+                    wait_calls: Arc::clone(&self.wait_calls),
+                    steer_calls: Arc::clone(&self.steer_calls),
+                    steer_error: self.steer_error.clone(),
                 }),
             })
         }

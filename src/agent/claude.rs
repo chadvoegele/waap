@@ -2,12 +2,15 @@ use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitStatus, Stdio};
+use std::sync::Mutex;
+use std::time::Instant;
 
 use super::process::AgentProcess;
 use uuid::Uuid;
 
 use super::backend::{
     AbortContext, AgentSystemBackend, RunHandle, RunOutcome, StartContext, StartedRun,
+    SteeringError,
 };
 
 pub(super) struct ClaudeBackend {
@@ -35,7 +38,7 @@ impl AgentSystemBackend for ClaudeBackend {
         Ok(StartedRun {
             session_id,
             handle: Box::new(ClaudeRun {
-                child: spawn_claude_attached(&command)?,
+                child: Mutex::new(spawn_claude_attached(&command)?),
             }),
         })
     }
@@ -46,12 +49,20 @@ impl AgentSystemBackend for ClaudeBackend {
 }
 
 struct ClaudeRun {
-    child: AgentProcess,
+    child: Mutex<AgentProcess>,
 }
 
 impl RunHandle for ClaudeRun {
-    fn wait(mut self: Box<Self>) -> io::Result<RunOutcome> {
-        Ok(RunOutcome::from_exit_status(self.child.wait()?))
+    fn wait(&self) -> io::Result<RunOutcome> {
+        let mut child = self
+            .child
+            .lock()
+            .map_err(|_| io::Error::other("Claude process lock poisoned"))?;
+        Ok(RunOutcome::from_exit_status(child.wait()?))
+    }
+
+    fn steer(&self, _prompt: &str, _deadline: Instant) -> Result<(), SteeringError> {
+        Err(SteeringError::not_implemented("claude"))
     }
 }
 
@@ -147,6 +158,31 @@ mod tests {
         build_claude_run_command, map_pkill_status, spawn_claude_attached, ClaudeRunCommand,
         ClaudeRunConfig,
     };
+
+    #[test]
+    fn steering_rejection_does_not_acquire_the_process_wait_lock() {
+        use super::{ClaudeRun, RunHandle, SteeringError};
+        use std::sync::Mutex;
+        use std::time::Instant;
+
+        let command = ClaudeRunCommand {
+            program: "sh".to_string(),
+            args: vec!["-c".to_string(), "exit 0".to_string()],
+            working_dir: std::env::temp_dir(),
+        };
+        let run = ClaudeRun {
+            child: Mutex::new(spawn_claude_attached(&command).unwrap()),
+        };
+        let wait_lock = run.child.lock().unwrap();
+        let error = run.steer("steer", Instant::now()).unwrap_err();
+        assert_eq!(error, SteeringError::not_implemented("claude"));
+        assert_eq!(
+            error.to_string(),
+            "steering not implemented for backend claude"
+        );
+        drop(wait_lock);
+        assert_eq!(run.wait().unwrap(), super::RunOutcome::Completed);
+    }
 
     #[test]
     fn spawn_claude_attached_returns_child_with_exit_code() {

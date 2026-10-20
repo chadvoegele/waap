@@ -3,12 +3,14 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{ChildStdin, ChildStdout, Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use serde_json::{json, Value as JsonValue};
 
 use super::backend::{
     AbortContext, AgentSystemBackend, RunHandle, RunOutcome, StartContext, StartedRun,
+    SteeringError,
 };
 use super::process::AgentProcess;
 use super::{AgentRunOptions, ReasoningEffort};
@@ -35,7 +37,7 @@ impl AgentSystemBackend for CodexBackend {
         Ok(StartedRun {
             session_id: thread_id.clone(),
             handle: Box::new(CodexRun {
-                server,
+                server: Mutex::new(Some(server)),
                 interrupt,
                 thread_id,
                 prompt: context.prompt.to_string(),
@@ -76,19 +78,22 @@ impl Drop for InterruptHandler {
 }
 
 struct CodexRun {
-    server: CodexAppServer,
+    server: Mutex<Option<CodexAppServer>>,
     interrupt: InterruptHandler,
     thread_id: String,
     prompt: String,
 }
 
 impl RunHandle for CodexRun {
-    fn wait(mut self: Box<Self>) -> io::Result<RunOutcome> {
-        let turn_id = self
+    fn wait(&self) -> io::Result<RunOutcome> {
+        let mut server = self
             .server
-            .client
-            .turn_start(&self.thread_id, &self.prompt)?;
-        let status = self.server.client.pump_until_turn_completed(
+            .lock()
+            .map_err(|_| io::Error::other("Codex app-server lock poisoned"))?
+            .take()
+            .ok_or_else(|| io::Error::other("Codex run already waited"))?;
+        let turn_id = server.client.turn_start(&self.thread_id, &self.prompt)?;
+        let status = server.client.pump_until_turn_completed(
             &self.thread_id,
             &turn_id,
             &self.interrupt.flag,
@@ -98,6 +103,10 @@ impl RunHandle for CodexRun {
         } else {
             Ok(RunOutcome::Failed(std::process::ExitCode::FAILURE))
         }
+    }
+
+    fn steer(&self, _prompt: &str, _deadline: Instant) -> Result<(), SteeringError> {
+        Err(SteeringError::not_implemented("codex"))
     }
 }
 

@@ -1,8 +1,11 @@
 use std::io;
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
+use std::time::Duration;
 
-use super::backend::{AgentSystemBackend, RunOutcome, StartContext};
+use super::backend::{AgentSystemBackend, RunHandle, RunOutcome, StartContext};
 use super::worktree::{collapse_errors, AgentWorktree};
 use crate::agent::{
     agent_report_json, load_agent_report, print_agent_report_human, read_agent_record,
@@ -137,10 +140,40 @@ fn run_started_agent(
                 &started.session_id,
                 system.clone(),
             )?;
-            started.handle.wait()
+            wait_for_run(started.handle.as_ref(), |_| {})
         });
     let cleanup_result = worktree.cleanup();
     collapse_errors(run_result, cleanup_result)
+}
+
+fn wait_for_run(
+    handle: &dyn RunHandle,
+    mut service_control: impl FnMut(&dyn RunHandle),
+) -> io::Result<RunOutcome> {
+    thread::scope(|scope| {
+        let (finished, completion) = mpsc::channel();
+        let worker = thread::Builder::new()
+            .name("waap-run-wait".to_string())
+            .spawn_scoped(scope, move || {
+                let outcome = handle.wait();
+                let _ = finished.send(());
+                outcome
+            })?;
+        loop {
+            match completion.try_recv() {
+                Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            service_control(handle);
+            match completion.recv_timeout(Duration::from_millis(10)) {
+                Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+        }
+        worker
+            .join()
+            .map_err(|_| io::Error::other("agent wait worker panicked"))?
+    })
 }
 
 fn build_agent_goal(waap_root: &Path, agent_id: &str) -> String {
@@ -309,6 +342,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::ExitCode;
+    use std::sync::atomic::Ordering;
 
     use serde_json::json;
     use tempfile::tempdir;
@@ -328,6 +362,107 @@ mod tests {
     use crate::cli::OutputFormat;
     use crate::git::{create_worktree, remove_worktree};
     use crate::test_git::{init_repo_with_commit, run as git};
+
+    #[test]
+    fn active_run_services_steering_while_wait_and_output_progress() {
+        use std::sync::{mpsc, Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        use crate::agent::backend::{AgentSystemBackend, StartContext, SteeringError};
+
+        for steer_error in [
+            None,
+            Some(SteeringError::Rejected {
+                code: "backend_rejected",
+                message: "request rejected".to_string(),
+            }),
+            Some(SteeringError::AcceptanceUnknown {
+                message: "steering acceptance is unknown".to_string(),
+            }),
+        ] {
+            let (started_tx, started_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let (finished_tx, finished_rx) = mpsc::channel();
+            let output = Arc::new(Mutex::new(Vec::new()));
+            let wait_output = Arc::clone(&output);
+            let mut backend = FakeBackend {
+                steer_error: steer_error.clone(),
+                wait_action: Some(Box::new(move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    wait_output.lock().unwrap().push("streamed output");
+                    finished_tx.send(()).unwrap();
+                    Ok(())
+                })),
+                ..FakeBackend::default()
+            };
+            let dir = tempdir().unwrap();
+            let started = backend
+                .start(StartContext {
+                    agent_id: "aa-00000001",
+                    prompt: "initial prompt",
+                    repository_root: dir.path(),
+                    worktree_dir: dir.path(),
+                })
+                .unwrap();
+            let prompt = "  steer\nUnicode: λ; quotes: '\"; $(data)  ";
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut serviced = false;
+
+            let outcome = super::wait_for_run(started.handle.as_ref(), |handle| {
+                if serviced {
+                    return;
+                }
+                started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                assert_eq!(
+                    handle.steer(prompt, deadline),
+                    steer_error.clone().map_or(Ok(()), Err)
+                );
+                release_tx.send(()).unwrap();
+                finished_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                assert_eq!(*output.lock().unwrap(), ["streamed output"]);
+                serviced = true;
+            })
+            .unwrap();
+
+            assert!(serviced);
+            assert_eq!(outcome, RunOutcome::Completed);
+            assert_eq!(backend.wait_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                *backend.steer_calls.lock().unwrap(),
+                [(prompt.to_string(), deadline)]
+            );
+        }
+    }
+
+    #[test]
+    fn wait_worker_panic_persists_failure_and_cleans_worktree() {
+        let mut backend = FakeBackend {
+            wait_action: Some(Box::new(|| panic!("wait failed"))),
+            ..FakeBackend::default()
+        };
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let agent_id = "aa-00000001";
+        seed_agent_record(dir.path(), agent_id, "ready");
+
+        let error = run_agent_with_backend(
+            dir.path(),
+            dir.path(),
+            &OutputFormat::Json,
+            agent_id,
+            &AgentSystem::Codex,
+            &mut backend,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "agent wait worker panicked");
+        assert_eq!(
+            read_agent_record(dir.path(), agent_id).unwrap().0.status,
+            "failed"
+        );
+        assert!(!dir.path().join(agent_worktree_dir(agent_id)).exists());
+    }
 
     #[test]
     fn agent_worktree_creates_and_explicitly_removes_agent_directory() {
@@ -767,7 +902,7 @@ mod tests {
 
             assert_eq!(code, ExitCode::SUCCESS);
             assert_eq!(backend.start_calls.len(), 1);
-            assert_eq!(backend.wait_calls.get(), 1);
+            assert_eq!(backend.wait_calls.load(Ordering::SeqCst), 1);
             let call = &backend.start_calls[0];
             assert_eq!(call.agent_id, agent_id);
             assert_eq!(call.prompt, build_agent_goal(dir.path(), agent_id));
@@ -821,7 +956,7 @@ mod tests {
 
         assert_eq!(code, ExitCode::SUCCESS);
         assert_eq!(backend.start_calls.len(), 1);
-        assert_eq!(backend.wait_calls.get(), 1);
+        assert_eq!(backend.wait_calls.load(Ordering::SeqCst), 1);
         let (metadata, _) = read_agent_record(dir.path(), agent_id).unwrap();
         assert_eq!(metadata.session_id.as_deref(), Some("th_authentic"));
         let running_record = git(dir.path(), &["show", "HEAD~2:agents/aa-00000001/agent.md"]);
@@ -864,7 +999,7 @@ mod tests {
         let metadata = read_agent_record(dir.path(), agent_id).unwrap().0;
         assert_eq!(metadata.status, "failed");
         assert_eq!(metadata.session_id.as_deref(), Some("claude-session"));
-        assert_eq!(backend.wait_calls.get(), 1);
+        assert_eq!(backend.wait_calls.load(Ordering::SeqCst), 1);
         assert!(!dir.path().join(agent_worktree_dir(agent_id)).exists());
         assert_eq!(
             git(dir.path(), &["log", "-1", "--format=%s"]),
@@ -966,7 +1101,7 @@ mod tests {
 
         assert_eq!(error.to_string(), "launch failed");
         assert_eq!(backend.start_calls.len(), 1);
-        assert_eq!(backend.wait_calls.get(), 0);
+        assert_eq!(backend.wait_calls.load(Ordering::SeqCst), 0);
         assert!(!dir.path().join(agent_worktree_dir(agent_id)).exists());
         assert_eq!(
             read_agent_record(dir.path(), agent_id).unwrap().0.status,
@@ -1030,7 +1165,7 @@ mod tests {
         let metadata = read_agent_record(dir.path(), agent_id).unwrap().0;
         assert_eq!(metadata.status, "failed");
         assert_eq!(metadata.session_id.as_deref(), Some("ses_existing"));
-        assert_eq!(backend.wait_calls.get(), 0);
+        assert_eq!(backend.wait_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -1088,7 +1223,7 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.to_string(), "wait failed");
-        assert_eq!(backend.wait_calls.get(), 1);
+        assert_eq!(backend.wait_calls.load(Ordering::SeqCst), 1);
         let metadata = read_agent_record(dir.path(), agent_id).unwrap().0;
         assert_eq!(metadata.status, "failed");
         assert_eq!(metadata.session_id.as_deref(), Some("ses_started"));
