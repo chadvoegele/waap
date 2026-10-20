@@ -15,6 +15,7 @@ use serde_json::Value;
 use super::backend::{RunHandle, RunOutcome, SteeringError};
 use super::worktree::collapse_errors;
 
+pub(super) mod client;
 mod endpoint;
 mod protocol;
 
@@ -25,7 +26,7 @@ use protocol::{parse_request, rejection, response, Request, MAX_FRAME_BYTES};
 const MAX_CONNECTIONS: usize = 32;
 const MAX_PENDING: usize = 16;
 const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
-const ACK_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(super) struct ControlServer {
     listener: Option<UnixListener>,

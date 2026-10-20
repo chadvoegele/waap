@@ -8,8 +8,9 @@ use log::LevelFilter;
 
 use crate::agent::{
     create_agent, list_agents, load_agent_content, print_agent_content_report, print_agent_list,
-    print_agent_stop_report, print_created_agent_report, print_updated_agent_report, run_agent,
-    stop_agents_with_systems, update_agent, AgentRunOptions,
+    print_agent_stop_report, print_created_agent_report, print_steering_report,
+    print_updated_agent_report, run_agent, steer_agent, stop_agents_with_systems, update_agent,
+    AgentRunOptions,
 };
 use crate::check::{check_waap, print_check_result};
 use crate::cli::{AgentCommand, Cli, Command, TicketCommand};
@@ -143,6 +144,15 @@ pub(crate) fn run() -> ExitCode {
                     ExitCode::from(1)
                 }
             },
+            AgentCommand::Steer { agent_id, prompt } => {
+                match steer_agent(repository_root, waap_root, &agent_id, &prompt) {
+                    Ok(()) => {
+                        print_steering_report(&cli.output_format, &agent_id);
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => command_error("failed to steer agent", error),
+                }
+            }
             AgentCommand::Stop { agent_id } => {
                 match stop_agents_with_systems(waap_root, agent_id.as_deref()) {
                     Ok(report) => {

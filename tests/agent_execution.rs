@@ -3,9 +3,7 @@
 mod common;
 
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::thread;
@@ -223,25 +221,25 @@ fn wait_until(mut predicate: impl FnMut() -> bool) {
     }
 }
 
-fn submit_native_steering(socket: &Path, prompt: &str) -> Value {
-    let request_id = uuid::Uuid::new_v4().to_string();
-    let mut stream = UnixStream::connect(socket).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(3)))
+fn submit_native_steering(root: &Path, runtime: &Path, prompt: &str) {
+    let output = waap_command(root, "steering", runtime)
+        .args([
+            "--output-format",
+            "json",
+            "agent",
+            "steer",
+            "--agent-id",
+            "aa-test",
+            "--prompt",
+            prompt,
+        ])
+        .output()
         .unwrap();
-    writeln!(
-        stream,
-        "{}",
-        json!({"version":1,"request_id":request_id,
-        "method":"steer","prompt":prompt})
-    )
-    .unwrap();
-    let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line).unwrap();
-    let response: Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(response["request_id"], request_id);
-    assert_eq!(response["accepted"], true, "{response}");
-    response
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"agent_id": "aa-test", "accepted": true})
+    );
 }
 
 #[test]
@@ -280,7 +278,7 @@ fn native_codex_steering_through_run_owner_preserves_state_output_and_cleanup() 
         let record = fs::read(&record_path).unwrap();
         let head = git(&root.join(".state"), &["rev-parse", "HEAD"]);
         let prompt = "  exact\nλ 'quotes' \"double\" $(touch /never) & ; ";
-        submit_native_steering(&socket, prompt);
+        submit_native_steering(root, runtime.path(), prompt);
         assert_eq!(fs::read(&record_path).unwrap(), record);
         assert_eq!(git(&root.join(".state"), &["rev-parse", "HEAD"]), head);
         assert!(root.join("worktrees/aa-test").is_dir());
@@ -290,7 +288,7 @@ fn native_codex_steering_through_run_owner_preserves_state_output_and_cleanup() 
                 0
             );
         } else {
-            submit_native_steering(&socket, "second");
+            submit_native_steering(root, runtime.path(), "second");
             fs::write(root.join("release"), "complete").unwrap();
         }
         wait_until(|| child.0.as_mut().unwrap().try_wait().unwrap().is_some());
