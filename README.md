@@ -73,6 +73,8 @@ Continue working on `tt-file-picker` until done
 
 Then run your agent with `waap agent run --agent-id aa-file-picker-implementer`.
 
+Steer a running Codex agent with `waap agent steer --agent-id aa-file-picker-implementer --prompt "Focus on keyboard navigation"`.
+
 ## `waap` Loop
 
 For more complex workflows, follow the same idea but with multiple tickets and use a `waap` loop:
@@ -91,36 +93,6 @@ waap --help
 waap ticket --help
 waap agent --help
 ```
-
-### Steer a running agent
-
-```sh
-waap agent steer --agent-id "$agentid" --prompt "$prompt"
-waap --output-format json agent steer --agent-id "$agentid" --prompt "$prompt"
-```
-
-Both flags are required; the prompt must contain non-whitespace text. Quoted
-multiline prompts are preserved. Codex supports native steering of its current
-turn. Claude and OpenCode return `steering not implemented for backend <backend>`.
-
-Before `agent run` or `agent steer`, set `XDG_RUNTIME_DIR` to an existing absolute
-runtime directory owned by your OS user with permissions `0700` (typically
-`/run/user/$UID`). There is no fallback. Control sockets live under
-`$XDG_RUNTIME_DIR/waap/control/<repository-path>/agents/<agent-id>.sock`, outside
-waap state; all worktrees of a repository share that path. Paths exceeding the
-platform's Unix socket limit fail with a diagnostic.
-
-Success confirms backend acceptance, without waiting for action or completion.
-JSON success is `{"agent_id":"…","accepted":true}`. Steering preserves the
-session, turn, worktree, instructions, and lifecycle status.
-
-Connections have a 2-second timeout, writes are bounded to 2 seconds, and the
-acknowledgement deadline is 30 seconds after sending, including server queue time.
-Failures exit nonzero. If delivery cannot be confirmed, the diagnostic says
-`acceptance is unknown`; check the running agent before deciding whether to send
-again. There are no automatic retries or reconnections. Missing or stale sockets
-fail without repairing the agent record. Only records marked `running` can be
-steered, and the backend must have an active turn.
 
 ## Skill Resources
 
