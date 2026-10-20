@@ -38,6 +38,19 @@ impl AgentProcess {
             .ok_or_else(|| io::Error::other("agent process stdout is unavailable"))
     }
 
+    pub(super) fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        let status = self.child.try_wait()?;
+        if status.is_some() {
+            self.reaped = true;
+        }
+        Ok(status)
+    }
+
+    pub(super) fn terminate(&mut self) -> io::Result<ExitStatus> {
+        self.child.kill()?;
+        self.wait()
+    }
+
     pub(super) fn wait(&mut self) -> io::Result<ExitStatus> {
         let status = self.child.wait()?;
         self.reaped = true;

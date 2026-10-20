@@ -3,13 +3,12 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{ChildStdin, ChildStdout, Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 use serde_json::{json, Value as JsonValue};
 
 use super::backend::{
-    signal_agent_run, AbortContext, AgentSystemBackend, RunHandle, RunOutcome, StartContext,
-    StartedRun,
+    signal_agent_run, AbortContext, AgentSystemBackend, InterruptHandler, RunHandle, RunOutcome,
+    StartContext, StartedRun,
 };
 use super::process::AgentProcess;
 use super::{AgentRunOptions, ReasoningEffort};
@@ -52,28 +51,6 @@ impl AgentSystemBackend for CodexBackend {
 struct CodexAppServer {
     client: CodexClient<BufReader<ChildStdout>, ChildStdin, io::Stdout>,
     _process: AgentProcess,
-}
-
-struct InterruptHandler {
-    flag: Arc<AtomicBool>,
-    registration: signal_hook::SigId,
-}
-
-impl InterruptHandler {
-    fn register() -> io::Result<Self> {
-        let flag = Arc::new(AtomicBool::new(false));
-        let registration =
-            signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&flag)).map_err(
-                |error| io::Error::other(format!("failed to install SIGTERM handler: {error}")),
-            )?;
-        Ok(Self { flag, registration })
-    }
-}
-
-impl Drop for InterruptHandler {
-    fn drop(&mut self) {
-        signal_hook::low_level::unregister(self.registration);
-    }
 }
 
 struct CodexRun {

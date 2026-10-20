@@ -2,7 +2,7 @@ use std::env;
 use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Command as ProcessCommand, ExitCode, Stdio};
+use std::process::{ChildStdin, ChildStdout, Command as ProcessCommand, ExitCode, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::Arc;
@@ -13,9 +13,10 @@ use clap::ValueEnum;
 use serde_json::{json, Map, Value as JsonValue};
 
 use super::backend::{
-    signal_agent_run, AbortContext, AgentSystemBackend, RunHandle, RunOutcome, StartContext,
-    StartedRun,
+    signal_agent_run, AbortContext, AgentSystemBackend, InterruptHandler, RunHandle, RunOutcome,
+    StartContext, StartedRun,
 };
+use super::process::AgentProcess;
 use super::{AgentRunOptions, ReasoningEffort};
 
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -44,9 +45,6 @@ impl PiBackend {
 impl AgentSystemBackend for PiBackend {
     fn start(&mut self, context: StartContext<'_>) -> io::Result<StartedRun> {
         let interrupt = Arc::new(AtomicBool::new(false));
-        signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&interrupt)).map_err(
-            |error| io::Error::other(format!("failed to install SIGTERM handler: {error}")),
-        )?;
         start_pi_run(&self.config, context, interrupt, Box::new(io::stdout()))
     }
 
@@ -182,6 +180,7 @@ fn start_pi_run(
     interrupt: Arc<AtomicBool>,
     output: Box<dyn Write + Send>,
 ) -> io::Result<StartedRun> {
+    let interrupt = InterruptHandler::register_flag(interrupt)?;
     let mut client = PiRpcClient::spawn(config, context.agent_id, context.worktree_dir, output)?;
     let mut startup_state = PiState::default();
     let response = client.command("get_state", &[], &mut startup_state, None)?;
@@ -204,7 +203,7 @@ fn start_pi_run(
 
 pub(super) struct PiRun {
     client: PiRpcClient,
-    interrupt: Arc<AtomicBool>,
+    interrupt: InterruptHandler,
     prompt: String,
 }
 
@@ -215,11 +214,11 @@ impl RunHandle for PiRun {
             "prompt",
             &[("message", JsonValue::String(self.prompt.clone()))],
             &mut state,
-            Some(&self.interrupt),
+            Some(&self.interrupt.flag),
         )?;
 
         while !state.settled || state.abort_request_id.is_some() {
-            self.client.maybe_abort(&self.interrupt, &mut state)?;
+            self.client.maybe_abort(&self.interrupt.flag, &mut state)?;
             match self.client.receive(POLL_INTERVAL)? {
                 Some(record) => self.client.process_record(record, &mut state)?,
                 None if state.owner_interrupted => {
@@ -271,7 +270,7 @@ enum ReaderMessage {
 }
 
 pub(super) struct PiRpcClient {
-    child: Option<Child>,
+    child: Option<AgentProcess>,
     stdin: Option<ChildStdin>,
     receiver: Receiver<ReaderMessage>,
     reader_thread: Option<JoinHandle<()>>,
@@ -288,19 +287,13 @@ impl PiRpcClient {
         output: Box<dyn Write + Send>,
     ) -> io::Result<Self> {
         let mut command = pi_command(config, agent_id, worktree_dir);
-        let mut child = command
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| io::Error::other("Pi RPC stdin is unavailable"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| io::Error::other("Pi RPC stdout is unavailable"))?;
+            .stderr(Stdio::inherit());
+        let mut child = AgentProcess::spawn(&mut command)?;
+        let stdin = child.take_stdin()?;
+        let stdout = child.take_stdout()?;
         let (sender, receiver) = mpsc::channel();
         let reader_thread = thread::spawn(move || read_records(stdout, sender));
 
@@ -508,8 +501,7 @@ impl PiRpcClient {
                 break status;
             }
             if Instant::now() >= deadline {
-                child.kill()?;
-                let status = child.wait()?;
+                let status = child.terminate()?;
                 self.join_reader();
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -1010,10 +1002,11 @@ printf '{"type":"response","id":"%s","command":"prompt","success":false,"error":
         ] {
             let dir = tempdir().unwrap();
             let script = fake_script(dir.path(), body);
+            let interrupt = Arc::new(AtomicBool::new(false));
             let result = start_pi_run(
                 &fake_config(&script),
                 context(dir.path(), "prompt"),
-                Arc::new(AtomicBool::new(false)),
+                Arc::clone(&interrupt),
                 Box::new(io::sink()),
             );
             match result {
@@ -1024,6 +1017,7 @@ printf '{"type":"response","id":"%s","command":"prompt","success":false,"error":
                 Err(error) => assert_eq!(error.kind(), expected_kind, "{error}"),
             }
             assert_fake_child_reaped(&script);
+            assert_eq!(Arc::strong_count(&interrupt), 1);
         }
 
         let dir = tempdir().unwrap();
@@ -1129,6 +1123,23 @@ IFS= read -r ignored"#,
     }
 
     #[test]
+    fn shutdown_timeout_terminates_and_reaps_unresponsive_child() {
+        let dir = tempdir().unwrap();
+        let script = fake_script(dir.path(), "IFS= read -r line\nwhile :; do :; done");
+        let mut config = fake_config(&script);
+        config.command_timeout = Duration::from_millis(50);
+        let mut client =
+            PiRpcClient::spawn(&config, "aa-12345678", dir.path(), Box::new(io::sink())).unwrap();
+        client.send_command("get_state", &[]).unwrap();
+        // The child ignores stdin closure and must be killed when the deadline expires.
+        let error = client.finish(false).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(client.child.is_none());
+        assert!(client.reader_thread.is_none());
+        assert_fake_child_reaped(&script);
+    }
+
+    #[test]
     fn dropping_started_run_closes_and_reaps_child_before_prompt() {
         let _lock = PI_ENV_LOCK.lock().unwrap();
         let dir = tempdir().unwrap();
@@ -1144,16 +1155,19 @@ while IFS= read -r line; do :; done
 "#,
         );
         env::set_var("WAAP_TEST_PID_FILE", &pid_file);
+        let interrupt = Arc::new(AtomicBool::new(false));
         let started = start_pi_run(
             &fake_config(&script),
             context(dir.path(), "never sent"),
-            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&interrupt),
             Box::new(io::sink()),
         )
         .unwrap();
         let pid = fs::read_to_string(&pid_file).unwrap();
 
+        assert!(Arc::strong_count(&interrupt) > 1);
         drop(started);
+        assert_eq!(Arc::strong_count(&interrupt), 1);
 
         assert!(!Path::new("/proc").join(pid).exists());
         env::remove_var("WAAP_TEST_PID_FILE");

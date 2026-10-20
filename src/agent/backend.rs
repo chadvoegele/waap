@@ -1,6 +1,8 @@
 use std::io;
 use std::path::Path;
 use std::process::{Command, ExitCode, ExitStatus};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 #[derive(Debug, PartialEq)]
 pub(super) enum RunOutcome {
@@ -67,6 +69,31 @@ fn map_pkill_status(mut command: Command) -> io::Result<()> {
         Some(0) | Some(1) => Ok(()),
         Some(code) => Err(io::Error::other(format!("pkill exited with status {code}"))),
         None => Err(io::Error::other("pkill terminated by signal")),
+    }
+}
+
+pub(super) struct InterruptHandler {
+    pub(super) flag: Arc<AtomicBool>,
+    registration: signal_hook::SigId,
+}
+
+impl InterruptHandler {
+    pub(super) fn register() -> io::Result<Self> {
+        Self::register_flag(Arc::new(AtomicBool::new(false)))
+    }
+
+    pub(super) fn register_flag(flag: Arc<AtomicBool>) -> io::Result<Self> {
+        let registration =
+            signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&flag)).map_err(
+                |error| io::Error::other(format!("failed to install SIGTERM handler: {error}")),
+            )?;
+        Ok(Self { flag, registration })
+    }
+}
+
+impl Drop for InterruptHandler {
+    fn drop(&mut self) {
+        signal_hook::low_level::unregister(self.registration);
     }
 }
 
