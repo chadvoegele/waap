@@ -1,7 +1,7 @@
 +++
 status = "draft"
 created = 2026-10-20
-last_update = 2026-10-20
+last_update = 2026-10-22
 +++
 
 # Agent steering
@@ -81,14 +81,15 @@ output must identify the agent and confirm acceptance; JSON output must identify
 `agent_id` and indicate `accepted: true`, following existing output conventions.
 
 The live run must continue processing Codex events while accepting control
-requests. Responses must be correlated to their requests so simultaneous steering
-calls cannot receive each other's acknowledgements or interfere with run output.
+requests. Only one steering call is supported at a time per run. Responses must
+be correlated to their requests and must not interfere with run output.
 
 Missing control endpoints, startup before an active turn exists, exited runs,
 completed turns, transport errors, Codex rejection, and acknowledgement timeouts
-must produce a nonzero exit code and a clear diagnostic. Connection and
-acknowledgement waits must be bounded. If delivery may have occurred but cannot
-be confirmed, the diagnostic must say acceptance is unknown. There must be no
+must produce a nonzero exit code and a clear diagnostic. Connection timing is
+OS-controlled; acknowledgement reads use an inactivity timeout. If delivery may
+have occurred but cannot be confirmed, the diagnostic must say acceptance is
+unknown. There must be no
 automatic retry, fallback to `turn/start`, or delivery to a later run.
 
 ### Control socket and lifecycle
@@ -154,7 +155,7 @@ calling the backend. A valid request receives one of these response shapes:
 ```
 
 ```json
-{"version":1,"request_id":"uuid","accepted":false,"error":{"code":"busy","message":"Steering queue is full."}}
+{"version":1,"request_id":"uuid","accepted":false,"error":{"code":"no_active_turn","message":"No active turn."}}
 ```
 
 `accepted: false` means the request is known not to have been accepted. If backend
@@ -166,45 +167,42 @@ include `invalid_request`, `unsupported_version`, `unknown_method`,
 `not_implemented`, `no_active_turn`, `agent_exited`, `backend_rejected`,
 `request_too_large`, `timeout`, and `unsupported_backend_version`.
 
-Shared orchestration must use a bounded, in-memory FIFO queue for concurrent
-requests, dispatching them sequentially to the backend. Ordering is determined by
-server enqueue order, not client invocation time. Queueing is not acceptance;
-responses follow backend acknowledgement or rejection. A full queue must reject
-excess requests with `busy`. Pending requests must be rejected with `agent_exited`
-if the agent finishes before dispatch. No requests survive the run.
+Shared orchestration handles one active connection at a time, from reading its
+request through writing its response. Additional accepted connections are closed
+without reading or dispatching their requests. There is no steering queue.
+A caller encountering a closed connection receives a busy-or-unavailable
+diagnostic; without a correlated response, acceptance is unknown. Users may retry
+manually, understanding that an uncertain submission may already have succeeded.
+No automatic retries are permitted.
 
-### Resource limits and deadlines
+### Resource limits and timeouts
 
-The following limits are required for the initial implementation:
+Use stdlib Unix sockets and blocking buffered I/O on a single socket worker,
+separate from the run lifecycle thread. No async runtime or custom readiness
+polling is needed.
 
 | Resource | Limit | Required behavior |
 | --- | --- | --- |
-| Socket connection | 2 seconds | Fail clearly if connection cannot be established |
-| Steering acknowledgement | 30 seconds, including queue time | Expire undispatched requests; report uncertainty after unconfirmed dispatch |
-| Pending steering queue | 16 requests, plus one being dispatched | Reject overflow immediately with `busy` |
+| Socket connection | OS-controlled | Use standard Unix socket connect; no application connect deadline |
+| Active control connections | 1 per agent | Close additional accepted connections without buffering requests |
 | Request frame | 64 KiB, including JSON overhead and terminating newline | Reject larger frames with `request_too_large` |
-| Concurrent control connections | 32 per agent | Immediately close excess accepted connections without allocating request buffers |
-| Incomplete request | 5 seconds from connection acceptance | Close if a complete frame has not arrived |
+| Socket read/write inactivity | 5 seconds | Fail stalled request reads and writes |
+| Backend steering acknowledgement | 30 seconds from dispatch | Report uncertainty after unconfirmed delivery |
+| Client acknowledgement read inactivity | 35 seconds | Allow the backend acknowledgement window plus response overhead |
 
-The client acknowledgement deadline starts after it sends the complete request;
-the server's 30-second deadline starts when it receives the complete frame. These
-are monotonic deadlines and must not reset when a request moves out of the queue.
-The client must not report a transport timeout as definite rejection when it lacks
-a response establishing that fact.
+Socket timeouts apply per blocking operation, not to the complete message. A peer
+that continues making progress may take longer than the inactivity timeout.
+Frames remain bounded in memory regardless of timing. Each connection handles
+only its first frame and closes after the response.
 
-Before dispatching, the server must check the request deadline. A request that
-expires while queued must be removed without calling the backend and receive
-`accepted: false` with `timeout`. After dispatch, missing acknowledgement by the
-deadline must produce `accepted: null` with `acceptance_unknown`, not a definite
-rejection. No automatic retries are permitted. A timed-out dispatched operation
-must not cause concurrent backend dispatch or corrupt response correlation when
-a late acknowledgement arrives.
+The backend receives a monotonic acknowledgement deadline and must return within
+it. A timed-out dispatched operation must not cause concurrent backend dispatch
+or corrupt correlation when a late acknowledgement arrives.
 
-Shared orchestration must service control connections while waiting for backend
-completion, and the backend must continue processing events during steering.
-It must not block exclusively in the existing `wait()` interface. Parsing,
-queueing, and response correlation belong to shared orchestration; Codex protocol
-multiplexing and thread/turn details belong to the Codex backend.
+The run continues processing backend events and completion during steering.
+On completion, remove the endpoint and shut down any active control connection
+to wake blocked socket I/O. An in-progress backend call may take until its
+acknowledgement deadline to return. No requests survive the run.
 
 ### Interfaces and data model
 
@@ -213,7 +211,7 @@ The following are logical interface contracts, not mandated Rust type names:
 | Interface | Input | Result |
 | --- | --- | --- |
 | CLI / shared steer orchestration | Agent ID, prompt | Validate record, resolve socket, send request |
-| Shared run control server | Version, request ID, method, prompt | Parse, validate, queue, invoke backend, respond |
+| Shared run control server | Version, request ID, method, prompt | Parse, validate, invoke backend, respond |
 | Active backend run interface: `steer(prompt)` | Unchanged prompt | Accepted or descriptive error; Claude/OpenCode return not implemented |
 | Local run control response | Request ID, acceptance, optional error | Correlated result or acceptance unknown |
 | Codex app-server request | `turn/steer { threadId, expectedTurnId, input: [{ type: "text", text: prompt }] }` | Protocol acknowledgement or error |
@@ -222,8 +220,8 @@ Existing persistent agent metadata remains unchanged: `status`, `system`, and
 `session_id` retain their meanings; Codex `session_id` is its thread ID. Steering
 must not rewrite these fields, modify `agent.md`, or create a waap state commit.
 
-Transient shared state consists of the socket, pending connections, bounded queue,
-and request correlations. The Codex backend alone owns its thread ID, active turn
+Transient shared state consists of the listener, one active connection, and its
+request correlation. The Codex backend alone owns its thread ID, active turn
 ID, and app-server connection. There is no new persisted waap state, run ID, or
 handshake state. Prompts must not be added to routine diagnostics.
 
@@ -249,15 +247,13 @@ including on delivery failure. No persistent state migration is required.
   acceptance/rejection, and response correlation amid unrelated notifications.
 - Local-control integration tests: deliver to an already-running fake Codex
   app server through the run owner, without starting another session or turn;
-  concurrent requests, FIFO dispatch, queue saturation returning `busy`, and
-  pending-request rejection on exit; bounded timeouts; exit during submission;
-  startup and completed-turn rejection; ambiguous acknowledgement loss without
-  retry; NDJSON framing, version/schema validation, and request correlation.
-- Limit/deadline tests: 2-second connection timeout, 30-second acknowledgement
-  deadline including queue time, 16 pending requests plus one dispatch, 64-KiB
-  frame boundary, 32-connection cap, and 5-second incomplete-frame timeout.
-  Use controlled clocks where possible. Verify expired queued requests never
-  reach the backend and late acknowledgements cannot corrupt later responses.
+  close concurrent calls without backend dispatch, permit a later manual retry,
+  preserve output while acknowledgement is pending, and handle exit during
+  submission; startup and completed-turn rejection; ambiguous acknowledgement
+  loss without retry; NDJSON framing, schema validation, and request correlation.
+- Resource tests: 64-KiB frame boundary including newline, bounded reads,
+  inactivity timeouts, one active connection, and endpoint cleanup with an
+  incomplete request. Late acknowledgements must not corrupt later responses.
 - Codex compatibility tests: native `turn/steer` against the supported app-server
   version and missing-method rejection without restart or new-turn fallback.
 - Socket naming tests: deterministic SHA-256 over canonical OS path bytes,

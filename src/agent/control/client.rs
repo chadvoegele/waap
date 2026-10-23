@@ -1,18 +1,13 @@
-use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::ffi::OsStrExt;
+use std::io::{self, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::protocol::MAX_FRAME_BYTES;
-use super::ACK_TIMEOUT;
-
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+use super::{read_frame, ACK_TIMEOUT, IO_TIMEOUT};
 
 pub(in crate::agent) fn submit(path: &Path, prompt: &str) -> io::Result<()> {
     let request_id = Uuid::new_v4().to_string();
@@ -26,55 +21,16 @@ pub(in crate::agent) fn submit(path: &Path, prompt: &str) -> io::Result<()> {
             "request_too_large: steering request exceeds 64 KiB including JSON and newline",
         ));
     }
-    let mut stream = connect(path, Instant::now() + CONNECT_TIMEOUT).map_err(|error| {
+    let mut stream = UnixStream::connect(path).map_err(|error| {
         io::Error::new(error.kind(), format!("cannot connect to control socket {}: {error}; agent may be starting, exited, or have a stale endpoint", path.display()))
     })?;
-    exchange(&mut stream, &frame, &request_id, WRITE_TIMEOUT, ACK_TIMEOUT)
-}
-
-fn connect(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
-    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
-    let bytes = path.as_os_str().as_bytes();
-    if bytes.len() >= address.sun_path.len() || bytes.contains(&0) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "invalid control socket path",
-        ));
-    }
-    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
-    for (target, byte) in address.sun_path.iter_mut().zip(bytes) {
-        *target = *byte as libc::c_char;
-    }
-    let fd = unsafe {
-        libc::socket(
-            libc::AF_UNIX,
-            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
-            0,
-        )
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let stream = unsafe { UnixStream::from_raw_fd(fd) };
-    let result = unsafe {
-        libc::connect(
-            fd,
-            &address as *const _ as *const libc::sockaddr,
-            std::mem::size_of_val(&address) as libc::socklen_t,
-        )
-    };
-    if result == 0 {
-        return Ok(stream);
-    }
-    let error = io::Error::last_os_error();
-    if error.raw_os_error() != Some(libc::EINPROGRESS) {
-        return Err(error);
-    }
-    wait_ready(&stream, libc::POLLOUT, deadline)?;
-    if let Some(error) = stream.take_error()? {
-        return Err(error);
-    }
-    Ok(stream)
+    exchange(
+        &mut stream,
+        &frame,
+        &request_id,
+        IO_TIMEOUT,
+        ACK_TIMEOUT + IO_TIMEOUT,
+    )
 }
 
 fn exchange(
@@ -84,109 +40,19 @@ fn exchange(
     write_timeout: Duration,
     ack_timeout: Duration,
 ) -> io::Result<()> {
-    write_frame(stream, frame, Instant::now() + write_timeout)
-        .map_err(|error| unknown(&format!("request write failed: {error}")))?;
-    let response = read_frame(stream, Instant::now() + ack_timeout)
-        .map_err(|error| unknown(&format!("acknowledgement failed: {error}")))?;
+    stream.set_write_timeout(Some(write_timeout))?;
+    stream.set_read_timeout(Some(ack_timeout))?;
+    stream.write_all(frame).map_err(|error| {
+        unknown(&format!(
+            "request write failed (agent may be busy or unavailable): {error}"
+        ))
+    })?;
+    let response = read_frame(stream).map_err(|error| {
+        unknown(&format!(
+            "acknowledgement failed (agent may be busy or unavailable): {error}"
+        ))
+    })?;
     validate_response(&response, request_id)
-}
-
-fn write_frame(stream: &mut UnixStream, mut frame: &[u8], deadline: Instant) -> io::Result<()> {
-    while !frame.is_empty() {
-        wait_ready(stream, libc::POLLOUT, deadline)?;
-        match stream.write(frame) {
-            Ok(0) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "control socket closed",
-                ))
-            }
-            Ok(count) => frame = &frame[count..],
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                ) => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(())
-}
-
-fn read_frame(stream: &mut UnixStream, deadline: Instant) -> io::Result<Vec<u8>> {
-    let mut frame = Vec::new();
-    loop {
-        wait_ready(stream, libc::POLLIN, deadline)?;
-        let mut buffer = [0; 4096];
-        match stream.read(&mut buffer) {
-            Ok(0) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "control socket closed before a complete response",
-                ))
-            }
-            Ok(count) => {
-                frame.extend_from_slice(&buffer[..count]);
-                if frame.len() > MAX_FRAME_BYTES {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "response exceeds 64 KiB",
-                    ));
-                }
-                if let Some(end) = frame.iter().position(|byte| *byte == b'\n') {
-                    if end + 1 != frame.len() {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "expected one response frame",
-                        ));
-                    }
-                    return Ok(frame);
-                }
-                if frame.len() == MAX_FRAME_BYTES {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "unterminated response exceeds frame limit",
-                    ));
-                }
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                ) => {}
-            Err(error) => return Err(error),
-        }
-    }
-}
-
-fn wait_ready(stream: &UnixStream, events: libc::c_short, deadline: Instant) -> io::Result<()> {
-    loop {
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .filter(|duration| !duration.is_zero())
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::TimedOut, "control socket deadline exceeded")
-            })?;
-        let mut descriptor = libc::pollfd {
-            fd: stream.as_raw_fd(),
-            events,
-            revents: 0,
-        };
-        let milliseconds = remaining
-            .as_millis()
-            .saturating_add(1)
-            .min(i32::MAX as u128) as i32;
-        let ready = unsafe { libc::poll(&mut descriptor, 1, milliseconds) };
-        if ready > 0 {
-            return Ok(());
-        }
-        if ready < 0 {
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::Interrupted {
-                return Err(error);
-            }
-        }
-    }
 }
 
 fn validate_response(frame: &[u8], request_id: &str) -> io::Result<()> {
@@ -231,18 +97,9 @@ fn unknown(reason: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Read};
     use std::os::unix::net::UnixListener;
     use std::thread;
-
-    fn pair() -> (UnixStream, UnixStream) {
-        let (client, server) = UnixStream::pair().unwrap();
-        client.set_nonblocking(true).unwrap();
-        server
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        (client, server)
-    }
 
     #[test]
     fn submit_preserves_prompt_and_uses_one_correlated_version_one_request() {
@@ -377,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_stale_and_saturated_endpoints_fail_without_reconnection() {
+    fn missing_and_stale_endpoints_fail_without_reconnection() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("control.sock");
         assert!(submit(&path, "data")
@@ -385,81 +242,24 @@ mod tests {
             .to_string()
             .contains("cannot connect"));
         drop(UnixListener::bind(&path).unwrap());
-        let start = Instant::now();
         assert!(submit(&path, "data")
             .unwrap_err()
             .to_string()
             .contains("stale endpoint"));
-        assert!(start.elapsed() < CONNECT_TIMEOUT);
-        std::fs::remove_file(&path).unwrap();
-        let listener = UnixListener::bind(&path).unwrap();
-        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
-        let _queued = connect(&path, Instant::now() + CONNECT_TIMEOUT).unwrap();
-        let start = Instant::now();
-        assert!(connect(&path, start + CONNECT_TIMEOUT).is_err());
-        assert!(start.elapsed() < CONNECT_TIMEOUT);
     }
 
     #[test]
-    fn acknowledgement_deadline_is_absolute_and_includes_server_queue_wait() {
-        let (mut client, mut server) = pair();
-        thread::scope(|scope| {
-            scope.spawn(move || {
-                let mut request = String::new();
-                BufReader::new(server.try_clone().unwrap())
-                    .read_line(&mut request)
-                    .unwrap();
-                for _ in 0..20 {
-                    if server.write_all(b" ").is_err() {
-                        break;
-                    }
-                    thread::sleep(Duration::from_millis(5));
-                }
-            });
-            let start = Instant::now();
-            let error = exchange(
-                &mut client,
-                b"request\n",
-                "id",
-                WRITE_TIMEOUT,
-                Duration::from_millis(35),
-            )
-            .unwrap_err();
-            assert!(error.to_string().contains("acceptance is unknown"));
-            assert!(error.to_string().contains("deadline exceeded"));
-            assert!(start.elapsed() >= Duration::from_millis(35));
-            assert!(start.elapsed() < Duration::from_secs(1));
-        });
-    }
-
-    #[test]
-    fn writes_to_nonreading_peer_have_a_deadline() {
-        let (mut client, _server) = pair();
-        let size: libc::c_int = 1024;
-        assert_eq!(
-            unsafe {
-                libc::setsockopt(
-                    client.as_raw_fd(),
-                    libc::SOL_SOCKET,
-                    libc::SO_SNDBUF,
-                    &size as *const _ as *const libc::c_void,
-                    std::mem::size_of_val(&size) as libc::socklen_t,
-                )
-            },
-            0
-        );
+    fn missing_acknowledgement_times_out_without_retry() {
+        let (mut client, _server) = UnixStream::pair().unwrap();
         let error = exchange(
             &mut client,
-            &vec![b'x'; MAX_FRAME_BYTES],
+            b"request\n",
             "id",
-            Duration::from_millis(30),
-            ACK_TIMEOUT,
+            IO_TIMEOUT,
+            Duration::from_millis(20),
         )
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("acceptance is unknown: request write failed"));
-        assert!(error.to_string().contains("deadline exceeded"));
+        assert!(error.to_string().contains("acceptance is unknown"));
     }
 
     #[test]
@@ -469,9 +269,8 @@ mod tests {
             b"{}".to_vec(),
             vec![b'x'; MAX_FRAME_BYTES],
             vec![b'x'; MAX_FRAME_BYTES + 1],
-            b"{}\n{}\n".to_vec(),
         ] {
-            let (mut client, mut server) = pair();
+            let (mut client, mut server) = UnixStream::pair().unwrap();
             thread::scope(|scope| {
                 scope.spawn(move || {
                     let mut request = String::new();
@@ -481,66 +280,12 @@ mod tests {
                     let _ = server.write_all(&frame);
                 });
                 assert!(
-                    exchange(&mut client, b"request\n", "id", WRITE_TIMEOUT, ACK_TIMEOUT)
+                    exchange(&mut client, b"request\n", "id", IO_TIMEOUT, ACK_TIMEOUT)
                         .unwrap_err()
                         .to_string()
                         .contains("acceptance is unknown")
                 );
             });
         }
-    }
-
-    #[test]
-    fn expired_readiness_deadline_fails_even_if_socket_is_ready() {
-        let (client, _server) = pair();
-        assert_eq!(
-            wait_ready(&client, libc::POLLOUT, Instant::now())
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::TimedOut
-        );
-        assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(2));
-        assert_eq!(ACK_TIMEOUT, Duration::from_secs(30));
-    }
-
-    #[test]
-    fn acknowledgement_budget_starts_after_complete_send() {
-        let (mut client, mut server) = pair();
-        let size: libc::c_int = 1024;
-        assert_eq!(
-            unsafe {
-                libc::setsockopt(
-                    client.as_raw_fd(),
-                    libc::SOL_SOCKET,
-                    libc::SO_SNDBUF,
-                    &size as *const _ as *const libc::c_void,
-                    std::mem::size_of_val(&size) as libc::socklen_t,
-                )
-            },
-            0
-        );
-        thread::scope(|scope| {
-            scope.spawn(move || {
-                thread::sleep(Duration::from_millis(60));
-                let mut frame = vec![0; MAX_FRAME_BYTES];
-                server.read_exact(&mut frame).unwrap();
-                writeln!(
-                    server,
-                    "{}",
-                    json!({"version":1,"request_id":"id","accepted":true})
-                )
-                .unwrap();
-            });
-            let start = Instant::now();
-            exchange(
-                &mut client,
-                &vec![b'x'; MAX_FRAME_BYTES],
-                "id",
-                WRITE_TIMEOUT,
-                Duration::from_millis(30),
-            )
-            .unwrap();
-            assert!(start.elapsed() >= Duration::from_millis(60));
-        });
     }
 }

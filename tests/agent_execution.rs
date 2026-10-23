@@ -519,39 +519,38 @@ fn native_failures_reach_cli_without_prompt_disclosure_retries_or_lifecycle_chan
 }
 
 #[test]
-fn concurrent_cli_calls_wait_for_native_ack_while_run_output_continues() {
+fn concurrent_cli_call_is_rejected_while_run_output_continues_then_manual_retry_succeeds() {
     let mut run = SteeringRun::start("steering-held");
     let before = run.snapshot();
     let mut first = RunningChild(Some(
         run.steer("first").stdout(Stdio::piped()).spawn().unwrap(),
     ));
     wait_until(|| run.steering_requests().len() == 1);
-    let mut second = RunningChild(Some(
-        run.steer("second").stdout(Stdio::piped()).spawn().unwrap(),
-    ));
+    let second = run.steer("second").output().unwrap();
+    assert!(!second.status.success(), "{second:?}");
+    assert!(String::from_utf8_lossy(&second.stderr).contains("busy or unavailable"));
     wait_until(|| {
         fs::read_to_string(run.repo.path().join("run.stdout"))
             .unwrap()
             .contains("waiting for acknowledgement")
     });
     assert!(first.0.as_mut().unwrap().try_wait().unwrap().is_none());
-    assert!(second.0.as_mut().unwrap().try_wait().unwrap().is_none());
     assert_eq!(
         run.steering_requests().len(),
         1,
-        "only one native dispatch may be active"
+        "busy calls must not dispatch"
     );
     assert_eq!(run.snapshot(), before);
     fs::write(run.repo.path().join("release-steer"), "acknowledge").unwrap();
-    for child in [&mut first, &mut second] {
-        wait_until(|| child.0.as_mut().unwrap().try_wait().unwrap().is_some());
-        let output = child.0.take().unwrap().wait_with_output().unwrap();
-        assert!(output.status.success(), "{output:?}");
-        assert_eq!(
-            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-            json!({"agent_id":run.agent_id, "accepted":true})
-        );
-    }
+    wait_until(|| first.0.as_mut().unwrap().try_wait().unwrap().is_some());
+    let output = first.0.take().unwrap().wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"agent_id":run.agent_id, "accepted":true})
+    );
+    let retry = run.steer("second").output().unwrap();
+    assert!(retry.status.success(), "{retry:?}");
     let requests = run.steering_requests();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0]["params"]["input"][0]["text"], "first");
@@ -563,34 +562,14 @@ fn concurrent_cli_calls_wait_for_native_ack_while_run_output_continues() {
 }
 
 #[test]
-fn completion_during_native_submission_reports_uncertainty_and_rejects_pending_requests() {
-    use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixStream;
-
+fn completion_during_native_submission_reports_uncertainty_without_retry() {
     let mut run = SteeringRun::start("steering-held");
     let mut active = RunningChild(Some(
         run.steer("active").stderr(Stdio::piped()).spawn().unwrap(),
     ));
     wait_until(|| run.steering_requests().len() == 1);
-    let mut pending = Vec::new();
-    for index in 0..16 {
-        let mut stream = UnixStream::connect(&run.socket).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let id = uuid::Uuid::from_u128(index).to_string();
-        writeln!(
-            stream,
-            "{}",
-            json!({"version":1,"request_id":id,
-            "method":"steer","prompt":"pending"})
-        )
-        .unwrap();
-        pending.push((id, stream));
-    }
-    let overflow = run.steer("overflow").output().unwrap();
-    assert!(!overflow.status.success(), "{overflow:?}");
-    assert!(String::from_utf8_lossy(&overflow.stderr).contains("busy"));
+    let busy = run.steer("busy").output().unwrap();
+    assert!(!busy.status.success(), "{busy:?}");
     fs::write(
         run.repo.path().join("complete"),
         "exit before acknowledgement",
@@ -600,18 +579,10 @@ fn completion_during_native_submission_reports_uncertainty_and_rejects_pending_r
     let output = active.0.take().unwrap().wait_with_output().unwrap();
     assert!(!output.status.success(), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("acceptance is unknown"));
-    for (id, stream) in pending {
-        let mut line = String::new();
-        BufReader::new(stream).read_line(&mut line).unwrap();
-        let response: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(response["request_id"], id);
-        assert_eq!(response["accepted"], false);
-        assert_eq!(response["error"]["code"], "agent_exited");
-    }
     assert_eq!(
         run.steering_requests().len(),
         1,
-        "pending calls must never dispatch"
+        "busy calls must never dispatch"
     );
     run.finish("completed", true);
 }
