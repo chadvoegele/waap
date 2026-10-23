@@ -1,89 +1,58 @@
-use std::io::{self, Write};
+use std::io;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::time::Duration;
 
-use serde_json::{json, Value};
-use uuid::Uuid;
-
-use super::protocol::MAX_FRAME_BYTES;
-use super::{read_frame, ACK_TIMEOUT, IO_TIMEOUT};
+use super::protocol::{Request, Response};
+use super::{ControlSocket, ACK_TIMEOUT, IO_TIMEOUT};
 
 pub(in crate::agent) fn submit(path: &Path, prompt: &str) -> io::Result<()> {
-    let request_id = Uuid::new_v4().to_string();
-    let mut frame = serde_json::to_vec(&json!({
-        "version": 1, "request_id": request_id, "method": "steer", "prompt": prompt,
-    }))?;
-    frame.push(b'\n');
-    if frame.len() > MAX_FRAME_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "request_too_large: steering request exceeds 64 KiB including JSON and newline",
-        ));
-    }
-    let mut stream = UnixStream::connect(path).map_err(|error| {
-        io::Error::new(error.kind(), format!("cannot connect to control socket {}: {error}; agent may be starting, exited, or have a stale endpoint", path.display()))
-    })?;
-    exchange(
-        &mut stream,
-        &frame,
-        &request_id,
-        IO_TIMEOUT,
-        ACK_TIMEOUT + IO_TIMEOUT,
-    )
+    ControlSocket::connect(path)?.exchange(Request::steer(prompt))
 }
 
-fn exchange(
-    stream: &mut UnixStream,
-    frame: &[u8],
-    request_id: &str,
-    write_timeout: Duration,
-    ack_timeout: Duration,
-) -> io::Result<()> {
-    stream.set_write_timeout(Some(write_timeout))?;
-    stream.set_read_timeout(Some(ack_timeout))?;
-    stream.write_all(frame).map_err(|error| {
-        unknown(&format!(
-            "request write failed (agent may be busy or unavailable): {error}"
-        ))
-    })?;
-    let response = read_frame(stream).map_err(|error| {
-        unknown(&format!(
-            "acknowledgement failed (agent may be busy or unavailable): {error}"
-        ))
-    })?;
-    validate_response(&response, request_id)
+impl ControlSocket {
+    fn connect(path: &Path) -> io::Result<Self> {
+        let stream = UnixStream::connect(path).map_err(|error| {
+            io::Error::new(error.kind(), format!("cannot connect to control socket {}: {error}; agent may be starting, exited, or have a stale endpoint", path.display()))
+        })?;
+        Self::new(stream, IO_TIMEOUT, ACK_TIMEOUT + IO_TIMEOUT)
+    }
+
+    fn exchange(&mut self, request: Request) -> io::Result<()> {
+        self.write_frame(&request).map_err(|error| {
+            if error.kind() == io::ErrorKind::InvalidInput {
+                error
+            } else {
+                unknown(&format!(
+                    "request write failed (agent may be busy or unavailable): {error}"
+                ))
+            }
+        })?;
+        let frame = self.read_frame().map_err(|error| {
+            unknown(&format!(
+                "acknowledgement failed (agent may be busy or unavailable): {error}"
+            ))
+        })?;
+        validate_response(&frame, &request.request_id)
+    }
 }
 
 fn validate_response(frame: &[u8], request_id: &str) -> io::Result<()> {
     let invalid = || unknown("invalid or uncorrelated control response");
-    let value: Value = serde_json::from_slice(frame).map_err(|_| invalid())?;
-    let object = value.as_object().ok_or_else(invalid)?;
-    if value["version"].as_u64() != Some(1) || value["request_id"].as_str() != Some(request_id) {
+    let response: Response = serde_json::from_slice(frame).map_err(|_| invalid())?;
+    if response.version != 1 || response.request_id.as_deref() != Some(request_id) {
         return Err(invalid());
     }
-    if value["accepted"] == true && object.len() == 3 && !object.contains_key("error") {
-        return Ok(());
-    }
-    let error = value["error"].as_object().ok_or_else(invalid)?;
-    let code = error
-        .get("code")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(invalid)?;
-    let message = error
-        .get("message")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(invalid)?;
-    if object.len() != 4 || error.len() != 2 || !object.contains_key("accepted") {
-        return Err(invalid());
-    }
-    match (&value["accepted"], code) {
-        (Value::Bool(false), code) if code != "acceptance_unknown" => {
-            Err(io::Error::other(format!("{code}: {message}")))
+    match (response.accepted, response.error) {
+        (Some(true), None) => Ok(()),
+        (accepted, Some(error)) if !error.code.is_empty() && !error.message.is_empty() => {
+            match (accepted, error.code.as_str()) {
+                (Some(false), code) if code != "acceptance_unknown" => {
+                    Err(io::Error::other(format!("{code}: {}", error.message)))
+                }
+                (None, "acceptance_unknown") => Err(unknown(&error.message)),
+                _ => Err(invalid()),
+            }
         }
-        (Value::Null, "acceptance_unknown") => Err(unknown(message)),
         _ => Err(invalid()),
     }
 }
@@ -96,10 +65,25 @@ fn unknown(reason: &str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    use super::super::protocol::MAX_FRAME_BYTES;
     use super::*;
-    use std::io::{BufRead, BufReader, Read};
+    use serde_json::{json, Value};
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::net::UnixListener;
     use std::thread;
+    use std::time::Duration;
+    use uuid::Uuid;
+
+    #[test]
+    fn socket_sets_timeouts_on_creation() {
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let socket = ControlSocket::new(stream, IO_TIMEOUT, ACK_TIMEOUT + IO_TIMEOUT).unwrap();
+        assert_eq!(socket.stream.write_timeout().unwrap(), Some(IO_TIMEOUT));
+        assert_eq!(
+            socket.stream.read_timeout().unwrap(),
+            Some(ACK_TIMEOUT + IO_TIMEOUT)
+        );
+    }
 
     #[test]
     fn submit_preserves_prompt_and_uses_one_correlated_version_one_request() {
@@ -176,6 +160,18 @@ mod tests {
             value_with_error[key] = value;
             invalid.push(value_with_error);
         }
+        for error in [
+            json!({"code": 7, "message": "rejected"}),
+            json!({"code": "busy", "message": null}),
+            json!({"code": "busy"}),
+            json!({"code": "busy", "message": "rejected", "extra": true}),
+            json!({"code": "", "message": "rejected"}),
+            json!({"code": "busy", "message": ""}),
+        ] {
+            let mut response = rejected.clone();
+            response["error"] = error;
+            invalid.push(response);
+        }
         let mut missing = uncertain;
         missing.as_object_mut().unwrap().remove("accepted");
         invalid.push(missing);
@@ -227,9 +223,11 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("request_too_large"));
+        let (mut oversized, _) = listener.accept().unwrap();
         assert_eq!(
-            listener.accept().unwrap_err().kind(),
-            io::ErrorKind::WouldBlock
+            oversized.read(&mut [0]).unwrap(),
+            0,
+            "oversized request must not be written"
         );
     }
 
@@ -250,15 +248,9 @@ mod tests {
 
     #[test]
     fn missing_acknowledgement_times_out_without_retry() {
-        let (mut client, _server) = UnixStream::pair().unwrap();
-        let error = exchange(
-            &mut client,
-            b"request\n",
-            "id",
-            IO_TIMEOUT,
-            Duration::from_millis(20),
-        )
-        .unwrap_err();
+        let (client, _server) = UnixStream::pair().unwrap();
+        let mut socket = ControlSocket::new(client, IO_TIMEOUT, Duration::from_millis(20)).unwrap();
+        let error = socket.exchange(Request::steer("request")).unwrap_err();
         assert!(error.to_string().contains("acceptance is unknown"));
     }
 
@@ -270,7 +262,8 @@ mod tests {
             vec![b'x'; MAX_FRAME_BYTES],
             vec![b'x'; MAX_FRAME_BYTES + 1],
         ] {
-            let (mut client, mut server) = UnixStream::pair().unwrap();
+            let (client, mut server) = UnixStream::pair().unwrap();
+            let mut socket = ControlSocket::new(client, IO_TIMEOUT, ACK_TIMEOUT).unwrap();
             thread::scope(|scope| {
                 scope.spawn(move || {
                     let mut request = String::new();
@@ -279,12 +272,11 @@ mod tests {
                         .unwrap();
                     let _ = server.write_all(&frame);
                 });
-                assert!(
-                    exchange(&mut client, b"request\n", "id", IO_TIMEOUT, ACK_TIMEOUT)
-                        .unwrap_err()
-                        .to_string()
-                        .contains("acceptance is unknown")
-                );
+                assert!(socket
+                    .exchange(Request::steer("request"))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("acceptance is unknown"));
             });
         }
     }

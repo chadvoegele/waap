@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
+use serde::Serialize;
 
 use super::backend::{RunHandle, RunOutcome};
 use super::worktree::collapse_errors;
@@ -104,13 +104,12 @@ impl Drop for ControlServer {
 }
 
 fn serve_connection(
-    mut stream: UnixStream,
+    stream: UnixStream,
     handle: &dyn RunHandle,
     completed: &AtomicBool,
 ) -> io::Result<()> {
-    stream.set_read_timeout(Some(IO_TIMEOUT))?;
-    stream.set_write_timeout(Some(IO_TIMEOUT))?;
-    let value = match read_frame(&mut stream) {
+    let mut socket = ControlSocket::new(stream, IO_TIMEOUT, IO_TIMEOUT)?;
+    let value = match socket.read_frame() {
         Ok(frame) => match parse_request(&frame) {
             Ok(request) => {
                 if completed.load(Ordering::Acquire) {
@@ -135,13 +134,39 @@ fn serve_connection(
         ),
         Err(error) => return Err(error),
     };
-    write_response(&mut stream, &value)
+    socket.write_frame(&value)
 }
 
-fn write_response(stream: &mut UnixStream, value: &Value) -> io::Result<()> {
-    let mut frame = serde_json::to_vec(value)?;
-    frame.push(b'\n');
-    stream.write_all(&frame)
+pub(super) struct ControlSocket {
+    stream: UnixStream,
+}
+
+impl ControlSocket {
+    fn new(
+        stream: UnixStream,
+        write_timeout: Duration,
+        read_timeout: Duration,
+    ) -> io::Result<Self> {
+        stream.set_write_timeout(Some(write_timeout))?;
+        stream.set_read_timeout(Some(read_timeout))?;
+        Ok(Self { stream })
+    }
+
+    fn read_frame(&mut self) -> io::Result<Vec<u8>> {
+        read_frame(&mut self.stream)
+    }
+
+    fn write_frame(&mut self, message: &impl Serialize) -> io::Result<()> {
+        let mut frame = serde_json::to_vec(message)?;
+        frame.push(b'\n');
+        if frame.len() > MAX_FRAME_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "request_too_large: control frame exceeds 64 KiB including JSON and newline",
+            ));
+        }
+        self.stream.write_all(&frame)
+    }
 }
 
 // Bound allocation before reading. A limit-sized frame must include its newline.
@@ -167,7 +192,7 @@ pub(in crate::agent) mod tests {
     use super::super::backend::SteeringError;
     use super::*;
     use crate::root::find_control_root_in;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::sync::{
         mpsc::{self, Receiver},
         Mutex,

@@ -1,74 +1,111 @@
-use serde_json::{json, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 use super::super::backend::SteeringError;
 
 pub(super) const MAX_FRAME_BYTES: usize = 64 * 1024;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Request {
+    pub(super) version: u64,
     pub(super) request_id: String,
+    pub(super) method: String,
     pub(super) prompt: String,
 }
 
-pub(super) fn parse_request(frame: &[u8]) -> Result<Request, Value> {
+impl Request {
+    pub(super) fn steer(prompt: &str) -> Self {
+        Self {
+            version: 1,
+            request_id: Uuid::new_v4().to_string(),
+            method: "steer".to_string(),
+            prompt: prompt.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Response {
+    pub(super) version: u64,
+    pub(super) request_id: Option<String>,
+    // Required on the wire, even though its value may be null.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(super) accepted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) error: Option<ResponseError>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ResponseError {
+    pub(super) code: String,
+    pub(super) message: String,
+}
+
+pub(super) fn parse_request(frame: &[u8]) -> Result<Request, Response> {
     let value: Value = serde_json::from_slice(frame)
         .map_err(|_| rejection(None, "invalid_request", "Expected a UTF-8 JSON request."))?;
+    // Preserve a trustworthy ID in schema-error replies, even if other fields fail.
     let id = value
         .get("request_id")
         .and_then(Value::as_str)
-        .filter(|id| Uuid::parse_str(id).is_ok());
+        .filter(|id| Uuid::parse_str(id).is_ok())
+        .map(str::to_owned);
     let invalid = || {
         rejection(
-            id,
+            id.as_deref(),
             "invalid_request",
             "Expected version, UUID request_id, method, and a nonempty prompt.",
         )
     };
-    let object = value.as_object().ok_or_else(invalid)?;
-    if id.is_none() || !object.contains_key("version") || !object.contains_key("method") {
+    let request: Request = serde_json::from_value(value).map_err(|_| invalid())?;
+    if id.is_none() || request.prompt.trim().is_empty() {
         return Err(invalid());
     }
-    let version = value["version"].as_u64().ok_or_else(invalid)?;
-    if version != 1 {
+    if request.version != 1 {
         return Err(rejection(
-            id,
+            id.as_deref(),
             "unsupported_version",
             "Unsupported control protocol version; expected 1.",
         ));
     }
-    let method = value["method"].as_str().ok_or_else(invalid)?;
-    if method != "steer" {
+    if request.method != "steer" {
         return Err(rejection(
-            id,
+            id.as_deref(),
             "unknown_method",
             "Unknown control method; expected steer.",
         ));
     }
-    let prompt = value["prompt"]
-        .as_str()
-        .filter(|text| !text.trim().is_empty())
-        .ok_or_else(invalid)?;
-    if object.len() != 4 {
-        return Err(invalid());
+    Ok(request)
+}
+
+pub(super) fn rejection(id: Option<&str>, code: &str, message: &str) -> Response {
+    Response {
+        version: 1,
+        request_id: id.map(str::to_owned),
+        accepted: Some(false),
+        error: Some(ResponseError {
+            code: code.to_string(),
+            message: message.to_string(),
+        }),
     }
-    Ok(Request {
-        request_id: id.unwrap().to_string(),
-        prompt: prompt.to_string(),
-    })
 }
 
-pub(super) fn rejection(id: Option<&str>, code: &str, message: &str) -> Value {
-    json!({"version": 1, "request_id": id, "accepted": false,
-        "error": {"code": code, "message": message}})
-}
-
-pub(super) fn response(id: &str, result: Result<(), SteeringError>) -> Value {
+pub(super) fn response(id: &str, result: Result<(), SteeringError>) -> Response {
     match result {
-        Ok(()) => json!({"version": 1, "request_id": id, "accepted": true}),
+        Ok(()) => Response {
+            version: 1,
+            request_id: Some(id.to_string()),
+            accepted: Some(true),
+            error: None,
+        },
         Err(SteeringError::Rejected { code, message }) => rejection(Some(id), code, &message),
-        Err(SteeringError::AcceptanceUnknown { message }) => json!({
-            "version": 1, "request_id": id, "accepted": null,
-            "error": {"code": "acceptance_unknown", "message": message}}),
+        Err(SteeringError::AcceptanceUnknown { message }) => Response {
+            accepted: None,
+            ..rejection(Some(id), "acceptance_unknown", &message)
+        },
     }
 }
