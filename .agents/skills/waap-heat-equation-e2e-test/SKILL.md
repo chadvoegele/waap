@@ -14,8 +14,9 @@ This skill describes an end-to-end waap test by making a simple 2D heat equation
 3. Use the waap skill to create a ticket to write the implementation tickets based on the spec.
 4. Run a waap planner agent for that ticket.
 5. Repeatedly run waap developer agents for unblocked pending tickets.
-6. Run the final program.
-7. Verify the output is numerically plausible and satisfies the spec.
+6. While the visualization developer is running, steer it to write the final ASCII-art visualization to `final-heatmap.txt` and commit it.
+7. Run the final program and compare its visualization with `final-heatmap.txt`.
+8. Verify the output is numerically plausible and satisfies the spec.
 
 ## Runtime Prerequisites
 
@@ -23,6 +24,12 @@ Use a `waap` binary on `PATH`. When testing an uninstalled local checkout, prepe
 
 ```sh
 export PATH="/path/to/waap/target/debug:$PATH"
+```
+
+Set a private runtime directory for steering:
+
+```sh
+export XDG_RUNTIME_DIR=$(mktemp -d /tmp/waap-runtime.XXXXXX)
 ```
 
 ## Test Repository Setup
@@ -71,6 +78,7 @@ The end-to-end run succeeds only when:
 2. All waap tickets and agents are marked as completed.
 3. The generated heat equation program runs.
 4. The verification command passes.
-5. The result is documented with the temporary repository path and commands used.
+5. Steering is accepted and the committed `final-heatmap.txt` matches the program's final visualization.
+6. The result is documented with the temporary repository path and commands used.
 
 If any step fails, fix the workflow or generated project and rerun from the failed step until the program is verified.

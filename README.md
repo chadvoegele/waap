@@ -73,6 +73,8 @@ Continue working on `tt-file-picker` until done
 
 Then run your agent with `waap agent run --agent-id aa-file-picker-implementer`.
 
+Steer a running agent with `waap agent steer --agent-id aa-file-picker-implementer --prompt "Focus on keyboard navigation"`.
+
 ## `waap` Loop
 
 For more complex workflows, follow the same idea but with multiple tickets and use a `waap` loop:

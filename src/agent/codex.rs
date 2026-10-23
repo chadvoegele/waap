@@ -3,12 +3,17 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{ChildStdin, ChildStdout, Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+mod live;
+use live::{set_nonblocking, SteeringMailbox};
 
 use serde_json::{json, Value as JsonValue};
 
 use super::backend::{
     AbortContext, AgentSystemBackend, RunHandle, RunOutcome, StartContext, StartedRun,
+    SteeringError,
 };
 use super::process::AgentProcess;
 use super::{AgentRunOptions, ReasoningEffort};
@@ -35,8 +40,9 @@ impl AgentSystemBackend for CodexBackend {
         Ok(StartedRun {
             session_id: thread_id.clone(),
             handle: Box::new(CodexRun {
-                server,
+                server: Mutex::new(Some(server)),
                 interrupt,
+                steering: SteeringMailbox::new(),
                 thread_id,
                 prompt: context.prompt.to_string(),
             }),
@@ -76,22 +82,30 @@ impl Drop for InterruptHandler {
 }
 
 struct CodexRun {
-    server: CodexAppServer,
+    server: Mutex<Option<CodexAppServer>>,
     interrupt: InterruptHandler,
+    steering: SteeringMailbox,
     thread_id: String,
     prompt: String,
 }
 
 impl RunHandle for CodexRun {
-    fn wait(mut self: Box<Self>) -> io::Result<RunOutcome> {
-        let turn_id = self
+    fn wait(&self) -> io::Result<RunOutcome> {
+        let mut server = self
             .server
-            .client
-            .turn_start(&self.thread_id, &self.prompt)?;
-        let status = self.server.client.pump_until_turn_completed(
+            .lock()
+            .map_err(|_| io::Error::other("Codex app-server lock poisoned"))?
+            .take()
+            .ok_or_else(|| io::Error::other("Codex run already waited"))?;
+        set_nonblocking(server.client.reader.get_ref())?;
+        set_nonblocking(&server.client.writer)?;
+        let commands = self.steering.take_receiver()?;
+        let status = server.client.run_turn(
             &self.thread_id,
-            &turn_id,
+            &self.prompt,
             &self.interrupt.flag,
+            &self.steering.active,
+            commands,
         )?;
         if status.is_success() {
             Ok(RunOutcome::Completed)
@@ -99,12 +113,17 @@ impl RunHandle for CodexRun {
             Ok(RunOutcome::Failed(std::process::ExitCode::FAILURE))
         }
     }
+
+    fn steer(&self, prompt: &str, deadline: Instant) -> Result<(), SteeringError> {
+        self.steering.steer(prompt, deadline)
+    }
 }
 
 const METHOD_INITIALIZE: &str = "initialize";
 const METHOD_INITIALIZED: &str = "initialized";
 const METHOD_THREAD_START: &str = "thread/start";
 const METHOD_TURN_START: &str = "turn/start";
+const METHOD_TURN_STEER: &str = "turn/steer";
 const METHOD_TURN_INTERRUPT: &str = "turn/interrupt";
 const METHOD_AGENT_MESSAGE_DELTA: &str = "item/agentMessage/delta";
 const METHOD_TURN_COMPLETED: &str = "turn/completed";
@@ -257,6 +276,9 @@ fn notification_line(method: &str) -> String {
 }
 
 fn delta_for_turn<'a>(message: &'a JsonValue, thread_id: &str, turn_id: &str) -> Option<&'a str> {
+    if message.get("method").and_then(JsonValue::as_str)? != METHOD_AGENT_MESSAGE_DELTA {
+        return None;
+    }
     let params = message.get("params")?;
     if params.get("threadId").and_then(JsonValue::as_str)? != thread_id {
         return None;
@@ -421,69 +443,6 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
                     "codex thread/start response is missing thread.id",
                 )
             })
-    }
-
-    fn turn_start(&mut self, thread_id: &str, prompt: &str) -> io::Result<String> {
-        let params = turn_start_params(
-            thread_id,
-            prompt,
-            self.model.as_deref(),
-            self.reasoning_effort,
-        );
-        let result = self.send_request(METHOD_TURN_START, params)?;
-        result
-            .pointer("/turn/id")
-            .and_then(JsonValue::as_str)
-            .map(str::to_string)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "codex turn/start response is missing turn.id",
-                )
-            })
-    }
-
-    fn turn_interrupt(&mut self, thread_id: &str, turn_id: &str) -> io::Result<()> {
-        self.send_request(
-            METHOD_TURN_INTERRUPT,
-            json!({ "threadId": thread_id, "turnId": turn_id }),
-        )?;
-        Ok(())
-    }
-
-    fn pump_until_turn_completed(
-        &mut self,
-        thread_id: &str,
-        turn_id: &str,
-        interrupt: &AtomicBool,
-    ) -> io::Result<TurnStatus> {
-        let mut interrupt_sent = false;
-        loop {
-            if !interrupt_sent && interrupt.load(Ordering::SeqCst) {
-                self.turn_interrupt(thread_id, turn_id)?;
-                interrupt_sent = true;
-            }
-
-            let message = self.read_message()?.ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "codex app-server closed before the turn completed",
-                )
-            })?;
-
-            if message.get("id").is_some() || message.get("method").is_none() {
-                continue;
-            }
-
-            if let Some(delta) = delta_for_turn(&message, thread_id, turn_id) {
-                self.out.write_all(delta.as_bytes())?;
-                self.out.flush()?;
-                continue;
-            }
-            if let Some(status) = completed_status_for_turn(&message, thread_id, turn_id) {
-                return status;
-            }
-        }
     }
 }
 
@@ -731,129 +690,6 @@ mod tests {
             .expect_err("server error must propagate");
 
         assert!(error.to_string().contains("boom"));
-    }
-
-    #[test]
-    fn turn_start_extracts_turn_id() {
-        let input = "{\"id\":0,\"result\":{\"turn\":{\"id\":\"tu_99\"}}}\n";
-        let mut client = client_over(input);
-
-        let turn_id = client.turn_start("th_1", "go").unwrap();
-
-        assert_eq!(turn_id, "tu_99");
-        let request = parse(&String::from_utf8(client.writer.clone()).unwrap());
-        assert_eq!(request["method"], json!("turn/start"));
-        assert_eq!(request["params"]["input"][0]["text"], json!("go"));
-    }
-
-    #[test]
-    fn pump_returns_status_for_each_turn_completed_value() {
-        for (wire, expected) in [
-            ("completed", TurnStatus::Completed),
-            ("failed", TurnStatus::Failed),
-            ("interrupted", TurnStatus::Interrupted),
-            ("inProgress", TurnStatus::InProgress),
-        ] {
-            let input = format!(
-                "{{\"method\":\"turn/completed\",\"params\":{{\"threadId\":\"th\",\"turn\":{{\"id\":\"tu\",\"status\":\"{wire}\"}}}}}}\n"
-            );
-            let mut client = client_over(&input);
-
-            let status = client
-                .pump_until_turn_completed("th", "tu", &AtomicBool::new(false))
-                .unwrap();
-
-            assert_eq!(status, expected, "wire status {wire}");
-        }
-    }
-
-    #[test]
-    fn pump_rejects_noncanonical_turn_status() {
-        for wire in ["Completed", "Interrupted", "Failed", "InProgress"] {
-            let input = format!(
-                "{{\"method\":\"turn/completed\",\"params\":{{\"threadId\":\"th\",\"turn\":{{\"id\":\"tu\",\"status\":\"{wire}\"}}}}}}\n"
-            );
-            let mut client = client_over(&input);
-
-            let error = client
-                .pump_until_turn_completed("th", "tu", &AtomicBool::new(false))
-                .expect_err("noncanonical status must error");
-
-            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        }
-    }
-
-    #[test]
-    fn pump_forwards_and_concatenates_agent_message_deltas() {
-        let input = concat!(
-            "{\"method\":\"item/agentMessage/delta\",\"params\":{\"threadId\":\"th\",\"turnId\":\"tu\",\"itemId\":\"it\",\"delta\":\"Hello, \"}}\n",
-            "{\"method\":\"item/agentMessage/delta\",\"params\":{\"threadId\":\"th\",\"turnId\":\"tu\",\"itemId\":\"it\",\"delta\":\"world\"}}\n",
-            "{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"th\",\"turn\":{\"id\":\"tu\",\"status\":\"completed\"}}}\n",
-        );
-        let mut client = client_over(input);
-
-        let status = client
-            .pump_until_turn_completed("th", "tu", &AtomicBool::new(false))
-            .unwrap();
-
-        assert_eq!(status, TurnStatus::Completed);
-        assert_eq!(
-            String::from_utf8(client.out.clone()).unwrap(),
-            "Hello, world"
-        );
-    }
-
-    #[test]
-    fn pump_errors_on_eof_before_turn_completed() {
-        let input = "{\"method\":\"item/agentMessage/delta\",\"params\":{\"threadId\":\"th\",\"turnId\":\"tu\",\"itemId\":\"it\",\"delta\":\"x\"}}\n";
-        let mut client = client_over(input);
-
-        let error = client
-            .pump_until_turn_completed("th", "tu", &AtomicBool::new(false))
-            .expect_err("EOF before turn/completed must error");
-
-        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
-    }
-
-    #[test]
-    fn is_success_only_for_completed() {
-        assert!(TurnStatus::Completed.is_success());
-        assert!(!TurnStatus::Failed.is_success());
-        assert!(!TurnStatus::Interrupted.is_success());
-        assert!(!TurnStatus::InProgress.is_success());
-    }
-
-    #[test]
-    fn pump_interrupts_when_flag_is_set_and_returns_interrupted_status() {
-        let input = concat!(
-            "{\"id\":0,\"result\":{}}\n",
-            "{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"th\",\"turn\":{\"id\":\"tu\",\"status\":\"interrupted\"}}}\n",
-        );
-        let mut client = client_over(input);
-        let interrupt = AtomicBool::new(true);
-
-        let status = client
-            .pump_until_turn_completed("th", "tu", &interrupt)
-            .unwrap();
-
-        assert_eq!(status, TurnStatus::Interrupted);
-        let request = parse(&String::from_utf8(client.writer.clone()).unwrap());
-        assert_eq!(request["method"], json!("turn/interrupt"));
-        assert_eq!(request["params"]["threadId"], json!("th"));
-        assert_eq!(request["params"]["turnId"], json!("tu"));
-    }
-
-    #[test]
-    fn pump_does_not_interrupt_when_flag_is_unset() {
-        let input = "{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"th\",\"turn\":{\"id\":\"tu\",\"status\":\"completed\"}}}\n";
-        let mut client = client_over(input);
-
-        let status = client
-            .pump_until_turn_completed("th", "tu", &AtomicBool::new(false))
-            .unwrap();
-
-        assert_eq!(status, TurnStatus::Completed);
-        assert!(client.writer.is_empty(), "no request should be written");
     }
 
     #[test]

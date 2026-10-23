@@ -1,13 +1,15 @@
 use std::env;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use reqwest::blocking::{Client, Response};
 use serde_json::{json, Value as JsonValue};
 
 use super::backend::{
     AbortContext, AgentSystemBackend, RunHandle, RunOutcome, StartContext, StartedRun,
+    SteeringError,
 };
 
 pub(super) struct OpencodeBackend {
@@ -41,7 +43,10 @@ impl AgentSystemBackend for OpencodeBackend {
 
         Ok(StartedRun {
             session_id: session_id.clone(),
-            handle: Box::new(OpencodeRun { events, session_id }),
+            handle: Box::new(OpencodeRun {
+                events: Mutex::new(Some(events)),
+                session_id,
+            }),
         })
     }
 
@@ -52,18 +57,24 @@ impl AgentSystemBackend for OpencodeBackend {
 }
 
 struct OpencodeRun {
-    events: Response,
+    events: Mutex<Option<Response>>,
     session_id: String,
 }
 
 impl RunHandle for OpencodeRun {
-    fn wait(self: Box<Self>) -> io::Result<RunOutcome> {
+    fn wait(&self) -> io::Result<RunOutcome> {
+        let events = self
+            .events
+            .lock()
+            .map_err(|_| io::Error::other("OpenCode event stream lock poisoned"))?
+            .take()
+            .ok_or_else(|| io::Error::other("OpenCode run already waited"))?;
         let stdout = io::stdout();
-        monitor_opencode_events(
-            BufReader::new(self.events),
-            &self.session_id,
-            &mut stdout.lock(),
-        )
+        monitor_opencode_events(BufReader::new(events), &self.session_id, &mut stdout.lock())
+    }
+
+    fn steer(&self, _prompt: &str, _deadline: Instant) -> Result<(), SteeringError> {
+        Err(SteeringError::not_implemented("opencode"))
     }
 }
 
@@ -656,6 +667,19 @@ mod tests {
             .unwrap();
 
         assert_eq!(started.session_id, "ses_123");
+        crate::agent::control::tests::assert_backend_socket_rejection(
+            |prompt, deadline| started.handle.steer(prompt, deadline),
+            "opencode",
+        );
+        let error = started
+            .handle
+            .steer("steer", std::time::Instant::now())
+            .unwrap_err();
+        assert_eq!(error, super::SteeringError::not_implemented("opencode"));
+        assert_eq!(
+            error.to_string(),
+            "steering not implemented for backend opencode"
+        );
         assert_eq!(started.handle.wait().unwrap(), RunOutcome::Completed);
         server.join().unwrap();
     }

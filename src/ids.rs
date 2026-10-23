@@ -1,6 +1,8 @@
 use std::io;
 use std::path::Path;
 
+pub(crate) const MAX_SLUG_LEN: usize = 53;
+
 pub(crate) fn random_hex_chars(hex_char_count: usize) -> io::Result<String> {
     let mut bytes = vec![0_u8; hex_char_count / 2];
     getrandom::getrandom(&mut bytes).map_err(|error| io::Error::other(error.to_string()))?;
@@ -68,7 +70,7 @@ fn slugify_name(name: &str) -> io::Result<String> {
         slug.push_str("ticket");
     }
 
-    if slug.len() > 63 {
+    if slug.len() > MAX_SLUG_LEN {
         slug = slug_with_hash_from_slug(&slug, &random_hex_chars(4)?);
     }
 
@@ -76,7 +78,7 @@ fn slugify_name(name: &str) -> io::Result<String> {
 }
 
 fn slug_with_hash_from_slug(slug: &str, hash: &str) -> String {
-    let prefix_len = slug.len().min(58);
+    let prefix_len = slug.len().min(MAX_SLUG_LEN - hash.len() - 1);
     let mut prefix = slug[..prefix_len].trim_end_matches('-').to_string();
     if prefix.is_empty() {
         prefix.push_str("ticket");
@@ -105,7 +107,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{available_record_id, is_record_id, slugify_name};
+    use super::{available_record_id, is_record_id, slugify_name, MAX_SLUG_LEN};
 
     #[test]
     fn slug_generation_matches_shared_rules() {
@@ -127,7 +129,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(slug.len() <= 63);
+        assert_eq!(slug.len(), MAX_SLUG_LEN);
         assert_eq!(slug.as_bytes()[slug.len() - 5], b'-');
         assert!(slug[slug.len() - 4..]
             .bytes()
@@ -143,6 +145,34 @@ mod tests {
 
         assert!(record_id.starts_with("tt-list-tickets-"));
         assert!(is_record_id(&record_id, "tt-"));
+    }
+
+    #[test]
+    fn generated_agent_and_ticket_boundaries_include_collision_suffixes() {
+        for prefix in ["aa-", "tt-"] {
+            let dir = tempdir().unwrap();
+            for length in [MAX_SLUG_LEN - 1, MAX_SLUG_LEN, MAX_SLUG_LEN + 1, 100] {
+                let name = "a".repeat(length);
+                let id = available_record_id(dir.path(), prefix, Some(&name)).unwrap();
+                assert_eq!(id.len(), prefix.len() + length.min(MAX_SLUG_LEN));
+                assert!(is_record_id(&id, prefix));
+                if length <= MAX_SLUG_LEN {
+                    assert_eq!(id, format!("{prefix}{name}"));
+                }
+                fs::create_dir(dir.path().join(&id)).unwrap();
+                let collision = available_record_id(dir.path(), prefix, Some(&name)).unwrap();
+                assert_ne!(collision, id);
+                assert_eq!(collision.len(), prefix.len() + MAX_SLUG_LEN);
+                assert!(is_record_id(&collision, prefix));
+                let suffix = &collision[collision.len() - 4..];
+                assert!(suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
+            }
+        }
+        assert!(is_record_id(&format!("aa-{}", "a".repeat(63)), "aa-"));
+        assert!(is_record_id(&format!("tt-{}", "a".repeat(63)), "tt-"));
+        assert!(!is_record_id(&format!("tt-{}", "a".repeat(64)), "tt-"));
     }
 
     #[test]
