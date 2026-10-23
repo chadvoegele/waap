@@ -519,38 +519,39 @@ fn native_failures_reach_cli_without_prompt_disclosure_retries_or_lifecycle_chan
 }
 
 #[test]
-fn concurrent_cli_call_is_rejected_while_run_output_continues_then_manual_retry_succeeds() {
+fn concurrent_cli_calls_wait_for_native_ack_while_run_output_continues() {
     let mut run = SteeringRun::start("steering-held");
     let before = run.snapshot();
     let mut first = RunningChild(Some(
         run.steer("first").stdout(Stdio::piped()).spawn().unwrap(),
     ));
     wait_until(|| run.steering_requests().len() == 1);
-    let second = run.steer("second").output().unwrap();
-    assert!(!second.status.success(), "{second:?}");
-    assert!(String::from_utf8_lossy(&second.stderr).contains("busy or unavailable"));
+    let mut second = RunningChild(Some(
+        run.steer("second").stdout(Stdio::piped()).spawn().unwrap(),
+    ));
     wait_until(|| {
         fs::read_to_string(run.repo.path().join("run.stdout"))
             .unwrap()
             .contains("waiting for acknowledgement")
     });
     assert!(first.0.as_mut().unwrap().try_wait().unwrap().is_none());
+    assert!(second.0.as_mut().unwrap().try_wait().unwrap().is_none());
     assert_eq!(
         run.steering_requests().len(),
         1,
-        "busy calls must not dispatch"
+        "only one native dispatch may be active"
     );
     assert_eq!(run.snapshot(), before);
     fs::write(run.repo.path().join("release-steer"), "acknowledge").unwrap();
-    wait_until(|| first.0.as_mut().unwrap().try_wait().unwrap().is_some());
-    let output = first.0.take().unwrap().wait_with_output().unwrap();
-    assert!(output.status.success(), "{output:?}");
-    assert_eq!(
-        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-        json!({"agent_id":run.agent_id, "accepted":true})
-    );
-    let retry = run.steer("second").output().unwrap();
-    assert!(retry.status.success(), "{retry:?}");
+    for child in [&mut first, &mut second] {
+        wait_until(|| child.0.as_mut().unwrap().try_wait().unwrap().is_some());
+        let output = child.0.take().unwrap().wait_with_output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+            json!({"agent_id":run.agent_id, "accepted":true})
+        );
+    }
     let requests = run.steering_requests();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0]["params"]["input"][0]["text"], "first");
@@ -568,8 +569,9 @@ fn completion_during_native_submission_reports_uncertainty_without_retry() {
         run.steer("active").stderr(Stdio::piped()).spawn().unwrap(),
     ));
     wait_until(|| run.steering_requests().len() == 1);
-    let busy = run.steer("busy").output().unwrap();
-    assert!(!busy.status.success(), "{busy:?}");
+    let mut pending = RunningChild(Some(
+        run.steer("pending").stderr(Stdio::piped()).spawn().unwrap(),
+    ));
     fs::write(
         run.repo.path().join("complete"),
         "exit before acknowledgement",
@@ -579,10 +581,13 @@ fn completion_during_native_submission_reports_uncertainty_without_retry() {
     let output = active.0.take().unwrap().wait_with_output().unwrap();
     assert!(!output.status.success(), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("acceptance is unknown"));
+    wait_until(|| pending.0.as_mut().unwrap().try_wait().unwrap().is_some());
+    let pending = pending.0.take().unwrap().wait_with_output().unwrap();
+    assert!(!pending.status.success(), "{pending:?}");
     assert_eq!(
         run.steering_requests().len(),
         1,
-        "busy calls must never dispatch"
+        "pending calls must not dispatch after completion"
     );
     run.finish("completed", true);
 }

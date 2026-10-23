@@ -1,6 +1,5 @@
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::Shutdown;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
@@ -48,65 +47,41 @@ impl ControlServer {
 
     pub(super) fn wait(mut self, handle: &dyn RunHandle) -> io::Result<RunOutcome> {
         let completed = AtomicBool::new(false);
-        thread::scope(|scope| {
-            let mut active: Option<(UnixStream, thread::ScopedJoinHandle<'_, ()>)> = None;
-            let outcome = super::run::wait_for_run(handle, &completed, |_| {
-                if active
-                    .as_ref()
-                    .is_some_and(|(_, worker)| worker.is_finished())
-                {
-                    let (_, worker) = active.take().unwrap();
-                    if worker.join().is_err() {
-                        log::error!("steering socket worker panicked");
+        let outcome = thread::scope(|scope| {
+            let worker = thread::Builder::new()
+                .name("waap-control".to_string())
+                .spawn_scoped(scope, || {
+                    let listener = self.listener.as_ref().unwrap();
+                    while !completed.load(Ordering::Acquire) {
+                        match listener.accept() {
+                            Ok((stream, _)) => {
+                                // One request at a time; socket/backend timeouts bound stalls.
+                                // Do not log transport errors that may contain peer data.
+                                let _ = serve_connection(stream, handle, &completed);
+                            }
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                thread::park_timeout(Duration::from_millis(10));
+                            }
+                            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                            Err(error) => {
+                                log::error!("control socket accept failed: {error}");
+                                break;
+                            }
+                        }
                     }
-                }
-                let stream = match self.listener.as_ref().unwrap().accept() {
-                    Ok((stream, _)) => stream,
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                        ) =>
-                    {
-                        return
-                    }
-                    Err(error) => {
-                        log::error!("control socket accept failed: {error}");
-                        return;
-                    }
-                };
-                // No queue: an additional caller must try again after the active call.
-                if active.is_some() {
-                    return;
-                }
-                let shutdown = match stream.try_clone() {
-                    Ok(stream) => stream,
-                    Err(error) => {
-                        log::error!("control socket clone failed: {error}");
-                        return;
-                    }
-                };
-                let completed = &completed;
-                match thread::Builder::new()
-                    .name("waap-steer".to_string())
-                    .spawn_scoped(scope, move || {
-                        // Transport errors can contain peer data; do not log prompts.
-                        let _ = serve_connection(stream, handle, completed);
-                    }) {
-                    Ok(worker) => active = Some((shutdown, worker)),
-                    Err(error) => log::error!("control socket worker failed: {error}"),
-                }
-            });
-            let cleanup = self.remove_socket();
-            if let Some((stream, worker)) = active {
-                // Wake a blocked reader/writer on exit; backend steering owns its deadline.
-                let _ = stream.shutdown(Shutdown::Both);
-                if worker.join().is_err() {
-                    log::error!("steering socket worker panicked");
-                }
+                })?;
+            // The backend runs on its owner thread, independently of control I/O.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle.wait()))
+                .unwrap_or_else(|_| Err(io::Error::other("agent wait panicked")));
+            completed.store(true, Ordering::Release);
+            worker.thread().unpark();
+            if worker.join().is_err() {
+                log::error!("control server panicked");
             }
-            collapse_errors(outcome, cleanup)
-        })
+            outcome
+        });
+        let cleanup = self.remove_socket();
+        collapse_errors(outcome, cleanup)
     }
 
     fn remove_socket(&mut self) -> io::Result<()> {
@@ -293,44 +268,35 @@ pub(in crate::agent) mod tests {
     }
 
     #[test]
-    fn busy_connection_is_closed_without_dispatch_and_next_call_can_succeed() {
+    fn control_calls_are_serial_and_a_client_timeout_does_not_cancel_delivery() {
         let fixture = Fixture::new();
         let path = fixture.server.path.clone();
         let (entered, dispatched) = mpsc::channel();
         let (release, resume) = mpsc::channel();
         let resume = Mutex::new(resume);
         let (complete, completion) = mpsc::channel();
+        let calls = Mutex::new(Vec::new());
         let client = thread::spawn(move || {
             let mut first = connect(&path);
             first.write_all(&frame("first")).unwrap();
             dispatched.recv_timeout(Duration::from_secs(3)).unwrap();
-            let mut busy = connect(&path);
-            let mut byte = [0];
-            assert_eq!(busy.read(&mut byte).unwrap(), 0);
+            let mut second = connect(&path);
+            second.write_all(&frame("second")).unwrap();
+            second
+                .set_read_timeout(Some(Duration::from_millis(20)))
+                .unwrap();
+            let error = read_frame(&mut second).unwrap_err();
+            assert!(matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ));
+            // Timing out does not cancel a request already sent to the socket.
+            second
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
             release.send(()).unwrap();
             assert_eq!(read_response(first)["accepted"], true);
-            // Receiving the response precedes worker exit; wait for a dispatch on retry.
-            let deadline = Instant::now() + Duration::from_secs(3);
-            loop {
-                assert!(Instant::now() < deadline, "worker did not become idle");
-                let mut retry = connect(&path);
-                let _ = retry.write_all(&frame("retry"));
-                match read_frame(&mut retry) {
-                    Ok(bytes) => {
-                        assert_eq!(
-                            serde_json::from_slice::<Value>(&bytes).unwrap()["accepted"],
-                            true
-                        );
-                        break;
-                    }
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset
-                        ) => {}
-                    Err(error) => panic!("{error}"),
-                }
-            }
+            assert_eq!(read_response(second)["accepted"], true);
             complete.send(()).unwrap();
         });
         fixture
@@ -338,6 +304,7 @@ pub(in crate::agent) mod tests {
             .wait(&Run {
                 completion: Mutex::new(completion),
                 steer: |prompt: &str, _| {
+                    calls.lock().unwrap().push(prompt.to_string());
                     if prompt == "first" {
                         entered.send(()).unwrap();
                         resume
@@ -346,10 +313,52 @@ pub(in crate::agent) mod tests {
                             .recv_timeout(Duration::from_secs(3))
                             .unwrap();
                     } else {
-                        assert_eq!(prompt, "retry");
+                        assert_eq!(prompt, "second");
                     }
                     Ok(())
                 },
+            })
+            .unwrap();
+        client.join().unwrap();
+        assert_eq!(*calls.lock().unwrap(), ["first", "second"]);
+    }
+
+    #[test]
+    fn backend_wait_stays_on_its_owner_thread_and_control_runs_in_background() {
+        struct OwnerRun {
+            owner: thread::ThreadId,
+            completion: Mutex<Receiver<()>>,
+        }
+        impl RunHandle for OwnerRun {
+            fn wait(&self) -> io::Result<RunOutcome> {
+                assert_eq!(thread::current().id(), self.owner);
+                self.completion
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(3))
+                    .unwrap();
+                Ok(RunOutcome::Completed)
+            }
+            fn steer(&self, _: &str, _: Instant) -> Result<(), SteeringError> {
+                assert_ne!(thread::current().id(), self.owner);
+                assert_eq!(thread::current().name(), Some("waap-control"));
+                Ok(())
+            }
+        }
+        let fixture = Fixture::new();
+        let path = fixture.server.path.clone();
+        let (complete, completion) = mpsc::channel();
+        let client = thread::spawn(move || {
+            let mut stream = connect(&path);
+            stream.write_all(&frame("steer")).unwrap();
+            assert_eq!(read_response(stream)["accepted"], true);
+            complete.send(()).unwrap();
+        });
+        fixture
+            .server
+            .wait(&OwnerRun {
+                owner: thread::current().id(),
+                completion: Mutex::new(completion),
             })
             .unwrap();
         client.join().unwrap();
@@ -448,12 +457,15 @@ pub(in crate::agent) mod tests {
     }
 
     #[test]
-    fn completion_wakes_an_idle_connection_and_removes_endpoint() {
+    fn completion_closes_an_idle_connection_and_removes_endpoint() {
         let fixture = Fixture::new();
         let path = fixture.server.path.clone();
         let (complete, completion) = mpsc::channel();
         let client = thread::spawn(move || {
             let mut stream = connect(&path);
+            stream
+                .set_read_timeout(Some(Duration::from_secs(6)))
+                .unwrap();
             complete.send(()).unwrap();
             match stream.read(&mut [0]) {
                 Ok(0) => {}

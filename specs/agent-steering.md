@@ -81,8 +81,8 @@ output must identify the agent and confirm acceptance; JSON output must identify
 `agent_id` and indicate `accepted: true`, following existing output conventions.
 
 The live run must continue processing Codex events while accepting control
-requests. Only one steering call is supported at a time per run. Responses must
-be correlated to their requests and must not interfere with run output.
+requests. Steering calls are handled one at a time per run. Responses must be
+correlated to their requests and must not interfere with run output.
 
 Missing control endpoints, startup before an active turn exists, exited runs,
 completed turns, transport errors, Codex rejection, and acknowledgement timeouts
@@ -167,24 +167,26 @@ include `invalid_request`, `unsupported_version`, `unknown_method`,
 `not_implemented`, `no_active_turn`, `agent_exited`, `backend_rejected`,
 `request_too_large`, `timeout`, and `unsupported_backend_version`.
 
-Shared orchestration handles one active connection at a time, from reading its
-request through writing its response. Additional accepted connections are closed
-without reading or dispatching their requests. There is no steering queue.
-A caller encountering a closed connection receives a busy-or-unavailable
-diagnostic; without a correlated response, acceptance is unknown. Users may retry
-manually, understanding that an uncertain submission may already have succeeded.
-No automatic retries are permitted.
+Shared orchestration handles one connection at a time, from reading its request
+through writing its response. There is no application steering queue or separate
+acceptor thread. Additional callers wait in the OS socket backlog and may time
+out; they are not explicitly rejected as busy.
+
+A timeout does not cancel a request already sent: it may still reach the backend
+later. Without a correlated response, acceptance is unknown. Users may retry
+manually, understanding that an uncertain submission may already have succeeded
+or may still succeed. No automatic retries are permitted.
 
 ### Resource limits and timeouts
 
-Use stdlib Unix sockets and blocking buffered I/O on a single socket worker,
-separate from the run lifecycle thread. No async runtime or custom readiness
-polling is needed.
+Use stdlib Unix sockets and blocking buffered I/O on one control-server thread.
+The main thread waits for the backend directly. No separate backend-wait worker,
+per-request worker, async runtime, or partial-I/O state machine is needed.
 
 | Resource | Limit | Required behavior |
 | --- | --- | --- |
 | Socket connection | OS-controlled | Use standard Unix socket connect; no application connect deadline |
-| Active control connections | 1 per agent | Close additional accepted connections without buffering requests |
+| Active control connections | 1 per agent | Accept the next connection only after finishing the current call |
 | Request frame | 64 KiB, including JSON overhead and terminating newline | Reject larger frames with `request_too_large` |
 | Socket read/write inactivity | 5 seconds | Fail stalled request reads and writes |
 | Backend steering acknowledgement | 30 seconds from dispatch | Report uncertainty after unconfirmed delivery |
@@ -199,10 +201,12 @@ The backend receives a monotonic acknowledgement deadline and must return within
 it. A timed-out dispatched operation must not cause concurrent backend dispatch
 or corrupt correlation when a late acknowledgement arrives.
 
-The run continues processing backend events and completion during steering.
-On completion, remove the endpoint and shut down any active control connection
-to wake blocked socket I/O. An in-progress backend call may take until its
-acknowledgement deadline to return. No requests survive the run.
+The backend continues processing events and completion independently of control
+I/O. On completion, stop accepting connections, finish the current operation, and
+remove the endpoint. Shutdown may wait for active socket I/O to finish or hit its
+inactivity timeout, or for a backend call to reach its acknowledgement deadline.
+As with message reads, a progressing peer may extend that wait. A request read
+after backend completion must not be dispatched. No requests survive the run.
 
 ### Interfaces and data model
 
@@ -247,13 +251,15 @@ including on delivery failure. No persistent state migration is required.
   acceptance/rejection, and response correlation amid unrelated notifications.
 - Local-control integration tests: deliver to an already-running fake Codex
   app server through the run owner, without starting another session or turn;
-  close concurrent calls without backend dispatch, permit a later manual retry,
-  preserve output while acknowledgement is pending, and handle exit during
-  submission; startup and completed-turn rejection; ambiguous acknowledgement
+  serialize concurrent calls while preserving output, and handle exit during
+  submission without dispatching pending calls; startup and completed-turn
+  rejection; ambiguous acknowledgement
   loss without retry; NDJSON framing, schema validation, and request correlation.
 - Resource tests: 64-KiB frame boundary including newline, bounded reads,
   inactivity timeouts, one active connection, and endpoint cleanup with an
-  incomplete request. Late acknowledgements must not corrupt later responses.
+  incomplete request. Verify that a client timeout does not cancel delivery and
+  that backend waiting stays on its owner thread while control runs separately.
+  Late acknowledgements must not corrupt later responses.
 - Codex compatibility tests: native `turn/steer` against the supported app-server
   version and missing-method rejection without restart or new-turn fallback.
 - Socket naming tests: deterministic SHA-256 over canonical OS path bytes,

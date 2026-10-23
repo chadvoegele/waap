@@ -1,12 +1,8 @@
 use std::io;
 use std::path::Path;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError};
-use std::thread;
-use std::time::Duration;
 
-use super::backend::{AgentSystemBackend, RunHandle, RunOutcome, StartContext};
+use super::backend::{AgentSystemBackend, RunOutcome, StartContext};
 use super::control::ControlServer;
 use super::worktree::{collapse_errors, AgentWorktree};
 use crate::agent::{
@@ -154,39 +150,6 @@ fn run_started_agent(
         });
     let cleanup_result = worktree.cleanup();
     collapse_errors(run_result, cleanup_result)
-}
-
-pub(super) fn wait_for_run(
-    handle: &dyn RunHandle,
-    completed: &AtomicBool,
-    mut service_control: impl FnMut(&dyn RunHandle),
-) -> io::Result<RunOutcome> {
-    thread::scope(|scope| {
-        let (finished, completion) = mpsc::channel();
-        let worker = thread::Builder::new()
-            .name("waap-run-wait".to_string())
-            .spawn_scoped(scope, move || {
-                let outcome =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle.wait()));
-                completed.store(true, Ordering::Release);
-                let _ = finished.send(());
-                outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-            })?;
-        loop {
-            match completion.try_recv() {
-                Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
-                Err(mpsc::TryRecvError::Empty) => {}
-            }
-            service_control(handle);
-            match completion.recv_timeout(Duration::from_millis(10)) {
-                Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
-                Err(RecvTimeoutError::Timeout) => {}
-            }
-        }
-        worker
-            .join()
-            .map_err(|_| io::Error::other("agent wait worker panicked"))?
-    })
 }
 
 fn build_agent_goal(waap_root: &Path, agent_id: &str) -> String {
@@ -470,83 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn active_run_services_steering_while_wait_and_output_progress() {
-        use std::sync::{mpsc, Arc, Mutex};
-        use std::time::{Duration, Instant};
-
-        use crate::agent::backend::{AgentSystemBackend, StartContext, SteeringError};
-
-        for steer_error in [
-            None,
-            Some(SteeringError::Rejected {
-                code: "backend_rejected",
-                message: "request rejected".to_string(),
-            }),
-            Some(SteeringError::AcceptanceUnknown {
-                message: "steering acceptance is unknown".to_string(),
-            }),
-        ] {
-            let (started_tx, started_rx) = mpsc::channel();
-            let (release_tx, release_rx) = mpsc::channel();
-            let (finished_tx, finished_rx) = mpsc::channel();
-            let output = Arc::new(Mutex::new(Vec::new()));
-            let wait_output = Arc::clone(&output);
-            let mut backend = FakeBackend {
-                steer_error: steer_error.clone(),
-                wait_action: Some(Box::new(move || {
-                    started_tx.send(()).unwrap();
-                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-                    wait_output.lock().unwrap().push("streamed output");
-                    finished_tx.send(()).unwrap();
-                    Ok(())
-                })),
-                ..FakeBackend::default()
-            };
-            let dir = tempdir().unwrap();
-            let started = backend
-                .start(StartContext {
-                    agent_id: "aa-00000001",
-                    prompt: "initial prompt",
-                    repository_root: dir.path(),
-                    worktree_dir: dir.path(),
-                })
-                .unwrap();
-            let prompt = "  steer\nUnicode: λ; quotes: '\"; $(data)  ";
-            let deadline = Instant::now() + Duration::from_secs(5);
-            let mut serviced = false;
-
-            let outcome = super::wait_for_run(
-                started.handle.as_ref(),
-                &super::AtomicBool::new(false),
-                |handle| {
-                    if serviced {
-                        return;
-                    }
-                    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-                    assert_eq!(
-                        handle.steer(prompt, deadline),
-                        steer_error.clone().map_or(Ok(()), Err)
-                    );
-                    release_tx.send(()).unwrap();
-                    finished_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-                    assert_eq!(*output.lock().unwrap(), ["streamed output"]);
-                    serviced = true;
-                },
-            )
-            .unwrap();
-
-            assert!(serviced);
-            assert_eq!(outcome, RunOutcome::Completed);
-            assert_eq!(backend.wait_calls.load(Ordering::SeqCst), 1);
-            assert_eq!(
-                *backend.steer_calls.lock().unwrap(),
-                [(prompt.to_string(), deadline)]
-            );
-        }
-    }
-
-    #[test]
-    fn wait_worker_panic_persists_failure_and_cleans_worktree() {
+    fn wait_panic_persists_failure_and_cleans_worktree() {
         let mut backend = FakeBackend {
             wait_action: Some(Box::new(|| panic!("wait failed"))),
             ..FakeBackend::default()
@@ -566,7 +453,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(error.to_string(), "agent wait worker panicked");
+        assert_eq!(error.to_string(), "agent wait panicked");
         assert_eq!(
             read_agent_record(dir.path(), agent_id).unwrap().0.status,
             "failed"
