@@ -38,6 +38,9 @@ This creates an agent at `${waap_data}/agents/<agent-id>/agent.md`. Agent IDs st
 
 Then run the agent with `waap agent run --agent-id aa-1234abcd`.
 
+Steer a running agent with `waap agent steer --agent-id aa-1234abcd --prompt "Focus on keyboard navigation"`.
+Steering currently supports Codex; Claude and OpenCode return an unsupported-backend error.
+
 ## State Model
 
 waap tracks `${waap_data}` on the dedicated `waap` branch.

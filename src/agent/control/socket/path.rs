@@ -7,10 +7,31 @@ use std::path::{Component, Path, PathBuf};
 use crate::ids::is_record_id;
 use crate::root::ControlRoot;
 
-pub(in crate::agent) fn socket_path(
-    control_root: &ControlRoot,
-    agent_id: &str,
-) -> io::Result<PathBuf> {
+#[derive(Debug)]
+pub(in crate::agent) struct SocketPath {
+    path: PathBuf,
+    runtime_dir: PathBuf,
+}
+
+impl SocketPath {
+    pub(in crate::agent) fn for_agent(root: &ControlRoot, agent_id: &str) -> io::Result<Self> {
+        Ok(Self {
+            path: socket_path(root, agent_id)?,
+            runtime_dir: root.runtime_dir().to_path_buf(),
+        })
+    }
+
+    pub(in crate::agent) fn as_path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(super) fn prepare_parent(&self) -> io::Result<()> {
+        require_private_directory(&self.runtime_dir)?;
+        prepare_parent(&self.path, &self.runtime_dir)
+    }
+}
+
+fn socket_path(control_root: &ControlRoot, agent_id: &str) -> io::Result<PathBuf> {
     if !is_record_id(agent_id, "aa-") {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -33,8 +54,7 @@ pub(in crate::agent) fn socket_path(
     Ok(path)
 }
 
-pub(super) fn prepare_parent(path: &Path, control_root: &ControlRoot) -> io::Result<()> {
-    let runtime_dir = control_root.runtime_dir();
+fn prepare_parent(path: &Path, runtime_dir: &Path) -> io::Result<()> {
     let mut directory = runtime_dir.to_path_buf();
     for component in path
         .parent()
@@ -176,14 +196,15 @@ mod tests {
                 if extra.is_empty() {
                     let path = socket_path(&root, &agent_id).unwrap();
                     assert_eq!(path.as_os_str().as_bytes().len(), limit);
-                    let server = super::super::ControlServer::bind(&root, &agent_id).unwrap();
+                    let server = super::super::SocketListener::bind(
+                        SocketPath::for_agent(&root, &agent_id).unwrap(),
+                    )
+                    .unwrap();
                     assert!(path.exists());
                     drop(server);
                     assert!(!path.exists());
                 } else {
-                    let error = super::super::ControlServer::bind(&root, &agent_id)
-                        .err()
-                        .unwrap();
+                    let error = SocketPath::for_agent(&root, &agent_id).unwrap_err();
                     assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
                     assert!(error.to_string().contains("platform limit"));
                     assert!(!runtime.join("waap").exists());

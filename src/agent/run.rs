@@ -2,8 +2,8 @@ use std::io;
 use std::path::Path;
 use std::process::ExitCode;
 
-use super::backend::{AgentSystemBackend, RunOutcome, StartContext};
-use super::control::ControlServer;
+use super::backend::{AgentSystemBackend, RunHandle, RunOutcome, StartContext};
+use super::control::{ControlServer, SocketListener, SocketPath, WaapHandler};
 use super::worktree::{collapse_errors, AgentWorktree};
 use crate::agent::{
     agent_report_json, load_agent_report, print_agent_report_human, read_agent_record,
@@ -128,7 +128,7 @@ fn run_started_agent(
 ) -> io::Result<RunOutcome> {
     let repository_root = repository_root.canonicalize()?;
     let control_root = control_root?;
-    super::control::socket_path(&control_root, agent_id)?;
+    let socket_path = SocketPath::for_agent(&control_root, agent_id)?;
     let mut worktree = AgentWorktree::create(&repository_root, agent_id)?;
     let prompt = build_agent_goal(waap_root, agent_id);
     let run_result = backend
@@ -146,10 +146,36 @@ fn run_started_agent(
                 &started.session_id,
                 system.clone(),
             )?;
-            ControlServer::bind(&control_root, agent_id)?.wait(started.handle.as_ref())
+            let listener = SocketListener::bind(socket_path)?;
+            wait_with_control(ControlServer::new(listener), started.handle.as_ref())
         });
     let cleanup_result = worktree.cleanup();
     collapse_errors(run_result, cleanup_result)
+}
+
+pub(super) fn wait_with_control(
+    mut server: ControlServer,
+    handle: &dyn RunHandle,
+) -> io::Result<RunOutcome> {
+    let outcome = std::thread::scope(|scope| {
+        let handler = WaapHandler::new(handle);
+        let server_ref = &server;
+        let worker = std::thread::Builder::new()
+            .name("waap-control".to_string())
+            .spawn_scoped(scope, move || {
+                server_ref.run(|connection, completed| handler.serve(connection, completed))
+            })?;
+        // Keep backend waiting on the owner thread while control I/O runs independently.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle.wait()))
+            .unwrap_or_else(|_| Err(io::Error::other("agent wait panicked")));
+        server.shutdown();
+        worker.thread().unpark();
+        if worker.join().is_err() {
+            log::error!("control server panicked");
+        }
+        outcome
+    });
+    collapse_errors(outcome, server.close())
 }
 
 fn build_agent_goal(waap_root: &Path, agent_id: &str) -> String {

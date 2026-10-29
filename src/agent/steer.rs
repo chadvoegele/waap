@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde_json::json;
 
-use super::control::{client, socket_path};
+use super::control::{client::ControlClient, SocketPath};
 use super::load_agent_content;
 use crate::cli::OutputFormat;
 use crate::root::ControlRoot;
@@ -30,8 +30,8 @@ pub(crate) fn steer_agent(
             ),
         ));
     }
-    let path = socket_path(&control_root?, agent_id)?;
-    client::submit(&path, prompt)
+    let path = SocketPath::for_agent(&control_root?, agent_id)?;
+    ControlClient::connect(path.as_path())?.steer(prompt)
 }
 
 pub(crate) fn print_steering_report(format: &OutputFormat, agent_id: &str) {

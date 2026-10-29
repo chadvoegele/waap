@@ -1,24 +1,28 @@
 use std::io;
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 use super::protocol::{Request, Response};
-use super::{ControlSocket, ACK_TIMEOUT, IO_TIMEOUT};
+use super::socket::SocketConnection;
+use super::{ACK_TIMEOUT, IO_TIMEOUT};
 
-pub(in crate::agent) fn submit(path: &Path, prompt: &str) -> io::Result<()> {
-    ControlSocket::connect(path)?.exchange(Request::steer(prompt))
+pub(in crate::agent) struct ControlClient {
+    connection: SocketConnection,
 }
 
-impl ControlSocket {
-    fn connect(path: &Path) -> io::Result<Self> {
-        let stream = UnixStream::connect(path).map_err(|error| {
-            io::Error::new(error.kind(), format!("cannot connect to control socket {}: {error}; agent may be starting, exited, or have a stale endpoint", path.display()))
-        })?;
-        Self::new(stream, IO_TIMEOUT, ACK_TIMEOUT + IO_TIMEOUT)
+impl ControlClient {
+    pub(in crate::agent) fn connect(path: &Path) -> io::Result<Self> {
+        let connection = SocketConnection::connect(path)?;
+        connection.set_timeouts(IO_TIMEOUT, ACK_TIMEOUT + IO_TIMEOUT)?;
+        Ok(Self { connection })
+    }
+
+    pub(in crate::agent) fn steer(&mut self, prompt: &str) -> io::Result<()> {
+        self.exchange(Request::steer(prompt))
     }
 
     fn exchange(&mut self, request: Request) -> io::Result<()> {
-        self.write_frame(&request).map_err(|error| {
+        let payload = serde_json::to_vec(&request)?;
+        self.connection.write_frame(&payload).map_err(|error| {
             if error.kind() == io::ErrorKind::InvalidInput {
                 error
             } else {
@@ -27,7 +31,7 @@ impl ControlSocket {
                 ))
             }
         })?;
-        let frame = self.read_frame().map_err(|error| {
+        let frame = self.connection.read_frame().map_err(|error| {
             unknown(&format!(
                 "acknowledgement failed (agent may be busy or unavailable): {error}"
             ))
@@ -65,24 +69,17 @@ fn unknown(reason: &str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::super::protocol::MAX_FRAME_BYTES;
+    use super::super::socket::MAX_FRAME_BYTES;
     use super::*;
     use serde_json::{json, Value};
     use std::io::{BufRead, BufReader, Read, Write};
-    use std::os::unix::net::UnixListener;
+    use std::os::unix::net::{UnixListener, UnixStream};
     use std::thread;
     use std::time::Duration;
     use uuid::Uuid;
 
-    #[test]
-    fn socket_sets_timeouts_on_creation() {
-        let (stream, _peer) = UnixStream::pair().unwrap();
-        let socket = ControlSocket::new(stream, IO_TIMEOUT, ACK_TIMEOUT + IO_TIMEOUT).unwrap();
-        assert_eq!(socket.stream.write_timeout().unwrap(), Some(IO_TIMEOUT));
-        assert_eq!(
-            socket.stream.read_timeout().unwrap(),
-            Some(ACK_TIMEOUT + IO_TIMEOUT)
-        );
+    fn submit(path: &Path, prompt: &str) -> io::Result<()> {
+        ControlClient::connect(path)?.steer(prompt)
     }
 
     #[test]
@@ -249,7 +246,13 @@ mod tests {
     #[test]
     fn missing_acknowledgement_times_out_without_retry() {
         let (client, _server) = UnixStream::pair().unwrap();
-        let mut socket = ControlSocket::new(client, IO_TIMEOUT, Duration::from_millis(20)).unwrap();
+        let mut socket = ControlClient {
+            connection: SocketConnection::new(client),
+        };
+        socket
+            .connection
+            .set_timeouts(IO_TIMEOUT, Duration::from_millis(20))
+            .unwrap();
         let error = socket.exchange(Request::steer("request")).unwrap_err();
         assert!(error.to_string().contains("acceptance is unknown"));
     }
@@ -263,7 +266,13 @@ mod tests {
             vec![b'x'; MAX_FRAME_BYTES + 1],
         ] {
             let (client, mut server) = UnixStream::pair().unwrap();
-            let mut socket = ControlSocket::new(client, IO_TIMEOUT, ACK_TIMEOUT).unwrap();
+            let mut socket = ControlClient {
+                connection: SocketConnection::new(client),
+            };
+            socket
+                .connection
+                .set_timeouts(IO_TIMEOUT, ACK_TIMEOUT)
+                .unwrap();
             thread::scope(|scope| {
                 scope.spawn(move || {
                     let mut request = String::new();

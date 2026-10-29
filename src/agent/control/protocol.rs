@@ -4,8 +4,6 @@ use uuid::Uuid;
 
 use super::super::backend::SteeringError;
 
-pub(super) const MAX_FRAME_BYTES: usize = 64 * 1024;
-
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Request {

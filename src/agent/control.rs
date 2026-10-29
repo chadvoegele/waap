@@ -1,211 +1,53 @@
-use std::fs;
-use std::io::{self, BufRead, BufReader, Read, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
-use std::time::{Duration, Instant};
-
-use serde::Serialize;
-
-use super::backend::{RunHandle, RunOutcome};
-use super::worktree::collapse_errors;
-use crate::root::ControlRoot;
+use std::time::Duration;
 
 pub(super) mod client;
-mod endpoint;
+mod handler;
 mod protocol;
+mod server;
+mod socket;
 
-use endpoint::prepare_parent;
-pub(super) use endpoint::socket_path;
-use protocol::{parse_request, rejection, response, MAX_FRAME_BYTES};
+pub(super) use handler::WaapHandler;
+pub(super) use server::ControlServer;
+#[cfg(test)]
+use socket::SocketConnection;
+pub(super) use socket::{SocketListener, SocketPath};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) const ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub(super) struct ControlServer {
-    listener: Option<UnixListener>,
-    path: PathBuf,
-}
-
-impl ControlServer {
-    pub(super) fn bind(control_root: &ControlRoot, agent_id: &str) -> io::Result<Self> {
-        let path = socket_path(control_root, agent_id)?;
-        prepare_parent(&path, control_root)?;
-        let listener = UnixListener::bind(&path).map_err(|error| {
-            io::Error::new(error.kind(), format!("failed to bind control socket {}: {error}; existing endpoints are not automatically removed", path.display()))
-        })?;
-        let server = Self {
-            listener: Some(listener),
-            path,
-        };
-        fs::set_permissions(&server.path, fs::Permissions::from_mode(0o600))?;
-        server.listener.as_ref().unwrap().set_nonblocking(true)?;
-        Ok(server)
-    }
-
-    pub(super) fn wait(mut self, handle: &dyn RunHandle) -> io::Result<RunOutcome> {
-        let completed = AtomicBool::new(false);
-        let outcome = thread::scope(|scope| {
-            let worker = thread::Builder::new()
-                .name("waap-control".to_string())
-                .spawn_scoped(scope, || {
-                    let listener = self.listener.as_ref().unwrap();
-                    while !completed.load(Ordering::Acquire) {
-                        match listener.accept() {
-                            Ok((stream, _)) => {
-                                // One request at a time; socket/backend timeouts bound stalls.
-                                // Do not log transport errors that may contain peer data.
-                                let _ = serve_connection(stream, handle, &completed);
-                            }
-                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                                thread::park_timeout(Duration::from_millis(10));
-                            }
-                            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                            Err(error) => {
-                                log::error!("control socket accept failed: {error}");
-                                break;
-                            }
-                        }
-                    }
-                })?;
-            // The backend runs on its owner thread, independently of control I/O.
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle.wait()))
-                .unwrap_or_else(|_| Err(io::Error::other("agent wait panicked")));
-            completed.store(true, Ordering::Release);
-            worker.thread().unpark();
-            if worker.join().is_err() {
-                log::error!("control server panicked");
-            }
-            outcome
-        });
-        let cleanup = self.remove_socket();
-        collapse_errors(outcome, cleanup)
-    }
-
-    fn remove_socket(&mut self) -> io::Result<()> {
-        self.listener.take();
-        fs::remove_file(&self.path)
-    }
-}
-
-impl Drop for ControlServer {
-    fn drop(&mut self) {
-        if self.listener.is_some() {
-            if let Err(error) = self.remove_socket() {
-                log::error!(
-                    "failed to remove control socket {}: {error}",
-                    self.path.display()
-                );
-            }
-        }
-    }
-}
-
-fn serve_connection(
-    stream: UnixStream,
-    handle: &dyn RunHandle,
-    completed: &AtomicBool,
-) -> io::Result<()> {
-    let mut socket = ControlSocket::new(stream, IO_TIMEOUT, IO_TIMEOUT)?;
-    let value = match socket.read_frame() {
-        Ok(frame) => match parse_request(&frame) {
-            Ok(request) => {
-                if completed.load(Ordering::Acquire) {
-                    rejection(
-                        Some(&request.request_id),
-                        "agent_exited",
-                        "Agent exited before steering dispatch.",
-                    )
-                } else {
-                    response(
-                        &request.request_id,
-                        handle.steer(&request.prompt, Instant::now() + ACK_TIMEOUT),
-                    )
-                }
-            }
-            Err(value) => value,
-        },
-        Err(error) if error.kind() == io::ErrorKind::InvalidData => rejection(
-            None,
-            "request_too_large",
-            "Request exceeds 64 KiB including newline.",
-        ),
-        Err(error) => return Err(error),
-    };
-    socket.write_frame(&value)
-}
-
-pub(super) struct ControlSocket {
-    stream: UnixStream,
-}
-
-impl ControlSocket {
-    fn new(
-        stream: UnixStream,
-        write_timeout: Duration,
-        read_timeout: Duration,
-    ) -> io::Result<Self> {
-        stream.set_write_timeout(Some(write_timeout))?;
-        stream.set_read_timeout(Some(read_timeout))?;
-        Ok(Self { stream })
-    }
-
-    fn read_frame(&mut self) -> io::Result<Vec<u8>> {
-        read_frame(&mut self.stream)
-    }
-
-    fn write_frame(&mut self, message: &impl Serialize) -> io::Result<()> {
-        let mut frame = serde_json::to_vec(message)?;
-        frame.push(b'\n');
-        if frame.len() > MAX_FRAME_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "request_too_large: control frame exceeds 64 KiB including JSON and newline",
-            ));
-        }
-        self.stream.write_all(&frame)
-    }
-}
-
-// Bound allocation before reading. A limit-sized frame must include its newline.
-fn read_frame(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
-    let mut frame = Vec::new();
-    BufReader::new(stream.take(MAX_FRAME_BYTES as u64)).read_until(b'\n', &mut frame)?;
-    if frame.last() != Some(&b'\n') {
-        let kind = if frame.len() == MAX_FRAME_BYTES {
-            io::ErrorKind::InvalidData
-        } else {
-            io::ErrorKind::UnexpectedEof
-        };
-        return Err(io::Error::new(
-            kind,
-            "expected a complete NDJSON frame within 64 KiB",
-        ));
-    }
-    Ok(frame)
-}
-
 #[cfg(test)]
 pub(in crate::agent) mod tests {
-    use super::super::backend::SteeringError;
+    use super::socket::MAX_FRAME_BYTES;
     use super::*;
-    use crate::root::find_control_root_in;
+    use crate::agent::backend::{RunHandle, RunOutcome, SteeringError};
+    use crate::root::{find_control_root_in, ControlRoot};
     use serde_json::{json, Value};
+    use std::fs;
+    use std::io::{self, Read, Write};
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixStream;
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
     use std::sync::{
         mpsc::{self, Receiver},
         Mutex,
     };
+    use std::thread;
+    use std::time::Instant;
     use tempfile::{tempdir, TempDir};
 
     struct Fixture {
         repo: TempDir,
         runtime: TempDir,
         server: ControlServer,
+        path: PathBuf,
     }
 
     impl Fixture {
+        fn wait(self, run: &dyn RunHandle) -> io::Result<RunOutcome> {
+            crate::agent::run::wait_with_control(self.server, run)
+        }
+
         fn new() -> Self {
             let repo = tempdir().unwrap();
             std::process::Command::new("git")
@@ -216,11 +58,16 @@ pub(in crate::agent) mod tests {
             let runtime = tempdir().unwrap();
             fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
             let root = find_control_root_in(repo.path(), Some(runtime.path().as_os_str())).unwrap();
-            let server = ControlServer::bind(&root, "aa-1").unwrap();
+            let path = SocketPath::for_agent(&root, "aa-1")
+                .unwrap()
+                .as_path()
+                .to_path_buf();
+            let server = bind_server(&root, "aa-1").unwrap();
             Self {
                 repo,
                 runtime,
                 server,
+                path,
             }
         }
     }
@@ -244,6 +91,24 @@ pub(in crate::agent) mod tests {
         }
     }
 
+    fn bind_server(root: &ControlRoot, agent_id: &str) -> io::Result<ControlServer> {
+        Ok(ControlServer::new(SocketListener::bind(
+            SocketPath::for_agent(root, agent_id)?,
+        )?))
+    }
+
+    fn read_frame(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
+        SocketConnection::new(stream.try_clone()?).read_frame()
+    }
+
+    fn serve_connection(
+        stream: UnixStream,
+        run: &dyn RunHandle,
+        completed: &AtomicBool,
+    ) -> io::Result<()> {
+        WaapHandler::new(run).serve(SocketConnection::new(stream), completed)
+    }
+
     fn frame(prompt: &str) -> Vec<u8> {
         let mut bytes = serde_json::to_vec(&json!({"version":1,"request_id":uuid::Uuid::nil().to_string(),"method":"steer","prompt":prompt})).unwrap();
         bytes.push(b'\n');
@@ -265,7 +130,7 @@ pub(in crate::agent) mod tests {
     #[test]
     fn socket_preserves_prompt_and_correlates_acknowledgement() {
         let fixture = Fixture::new();
-        let path = fixture.server.path.clone();
+        let path = fixture.path.clone();
         let (complete, completion) = mpsc::channel();
         let prompt = "  Unicode 雪\n\"quoted\" '$HOME' `echo data`  ";
         let client = thread::spawn(move || {
@@ -276,7 +141,6 @@ pub(in crate::agent) mod tests {
             result
         });
         fixture
-            .server
             .wait(&Run {
                 completion: Mutex::new(completion),
                 steer: |received: &str, deadline| {
@@ -295,7 +159,7 @@ pub(in crate::agent) mod tests {
     #[test]
     fn control_calls_are_serial_and_a_client_timeout_does_not_cancel_delivery() {
         let fixture = Fixture::new();
-        let path = fixture.server.path.clone();
+        let path = fixture.path.clone();
         let (entered, dispatched) = mpsc::channel();
         let (release, resume) = mpsc::channel();
         let resume = Mutex::new(resume);
@@ -325,7 +189,6 @@ pub(in crate::agent) mod tests {
             complete.send(()).unwrap();
         });
         fixture
-            .server
             .wait(&Run {
                 completion: Mutex::new(completion),
                 steer: |prompt: &str, _| {
@@ -371,7 +234,7 @@ pub(in crate::agent) mod tests {
             }
         }
         let fixture = Fixture::new();
-        let path = fixture.server.path.clone();
+        let path = fixture.path.clone();
         let (complete, completion) = mpsc::channel();
         let client = thread::spawn(move || {
             let mut stream = connect(&path);
@@ -380,7 +243,6 @@ pub(in crate::agent) mod tests {
             complete.send(()).unwrap();
         });
         fixture
-            .server
             .wait(&OwnerRun {
                 owner: thread::current().id(),
                 completion: Mutex::new(completion),
@@ -484,7 +346,7 @@ pub(in crate::agent) mod tests {
     #[test]
     fn completion_closes_an_idle_connection_and_removes_endpoint() {
         let fixture = Fixture::new();
-        let path = fixture.server.path.clone();
+        let path = fixture.path.clone();
         let (complete, completion) = mpsc::channel();
         let client = thread::spawn(move || {
             let mut stream = connect(&path);
@@ -498,9 +360,8 @@ pub(in crate::agent) mod tests {
                 result => panic!("expected closed connection, got {result:?}"),
             }
         });
-        let path = fixture.server.path.clone();
+        let path = fixture.path.clone();
         fixture
-            .server
             .wait(&Run {
                 completion: Mutex::new(completion),
                 steer: |_: &str, _| panic!("unexpected dispatch"),
@@ -514,11 +375,7 @@ pub(in crate::agent) mod tests {
     fn endpoint_is_private_and_stale_socket_is_not_replaced() {
         let fixture = Fixture::new();
         assert_eq!(
-            fs::metadata(&fixture.server.path)
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
+            fs::metadata(&fixture.path).unwrap().permissions().mode() & 0o777,
             0o600
         );
         let root = find_control_root_in(
@@ -526,24 +383,24 @@ pub(in crate::agent) mod tests {
             Some(fixture.runtime.path().as_os_str()),
         )
         .unwrap();
-        let error = ControlServer::bind(&root, "aa-1").err().unwrap();
+        let error = bind_server(&root, "aa-1").err().unwrap();
         assert!(error
             .to_string()
             .contains("existing endpoints are not automatically removed"));
-        assert!(fixture.server.path.exists());
+        assert!(fixture.path.exists());
     }
 
     #[test]
     fn bind_rejects_insecure_or_symlinked_runtime_descendants() {
         let fixture = Fixture::new();
-        let parent = fixture.server.path.parent().unwrap();
+        let parent = fixture.path.parent().unwrap();
         fs::set_permissions(parent, fs::Permissions::from_mode(0o755)).unwrap();
         let root = find_control_root_in(
             fixture.repo.path(),
             Some(fixture.runtime.path().as_os_str()),
         )
         .unwrap();
-        assert!(ControlServer::bind(&root, "aa-2").is_err());
+        assert!(bind_server(&root, "aa-2").is_err());
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).unwrap();
         let runtime = tempdir().unwrap();
         fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -554,7 +411,7 @@ pub(in crate::agent) mod tests {
         .unwrap();
         let root =
             find_control_root_in(fixture.repo.path(), Some(runtime.path().as_os_str())).unwrap();
-        assert!(ControlServer::bind(&root, "aa-2").is_err());
+        assert!(bind_server(&root, "aa-2").is_err());
     }
 
     pub(in crate::agent) fn assert_backend_socket_rejection(
@@ -562,7 +419,7 @@ pub(in crate::agent) mod tests {
         backend: &str,
     ) {
         let fixture = Fixture::new();
-        let path = fixture.server.path.clone();
+        let path = fixture.path.clone();
         let (complete, completion) = mpsc::channel();
         let client = thread::spawn(move || {
             let mut stream = connect(&path);
@@ -572,7 +429,6 @@ pub(in crate::agent) mod tests {
             result
         });
         fixture
-            .server
             .wait(&Run {
                 steer,
                 completion: Mutex::new(completion),
