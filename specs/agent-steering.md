@@ -1,7 +1,7 @@
 +++
 status = "draft"
 created = 2026-10-20
-last_update = 2026-10-22
+last_update = 2026-10-29
 +++
 
 # Agent steering
@@ -92,6 +92,27 @@ have occurred but cannot be confirmed, the diagnostic must say acceptance is
 unknown. There must be no
 automatic retry, fallback to `turn/start`, or delivery to a later run.
 
+### Codex driver message passing
+
+The control-server thread must submit steering through a bounded, one-slot
+in-process request channel to the Codex owner thread. Each request carries the
+prompt, acknowledgement deadline, and a reply channel. The receiver moves into
+the Codex driver during setup. Only that driver owns active-turn, write-progress,
+and acknowledgement-correlation state; steering must not use a shared active
+flag, delivery mutex, or caller-controlled cancellation flag.
+
+The owner loop must check requests while pumping Codex events. It rejects
+requests without an active turn or whose deadline has expired before writing.
+After a partial write, it must preserve framing and retain correlation until the
+acknowledgement arrives or the turn ends. Only one native steering request may
+await acknowledgement; later requests can be rejected as busy.
+
+The caller waits on the request's reply channel. If the wait times out or the
+channel closes without a reply, it must report acceptance unknown, even if the
+request was never written. It must not inspect delivery state or cancel the
+request through shared memory. A full or disconnected request channel can be
+rejected definitively because that submission was not enqueued.
+
 ### Control socket and lifecycle
 
 Shared `waap agent run` orchestration must open a Unix-domain stream socket for
@@ -164,13 +185,14 @@ delivery may have occurred without acknowledgement, the error response must use
 that uncertainty. If no trustworthy request ID can be parsed, a protocol-error
 response may use `request_id: null` before closing the connection. Other errors
 include `invalid_request`, `unsupported_version`, `unknown_method`,
-`not_implemented`, `no_active_turn`, `agent_exited`, `backend_rejected`,
+`not_implemented`, `no_active_turn`, `agent_exited`, `backend_rejected`, `busy`,
 `request_too_large`, `timeout`, and `unsupported_backend_version`.
 
 Shared orchestration handles one connection at a time, from reading its request
-through writing its response. There is no application steering queue or separate
-acceptor thread. Additional callers wait in the OS socket backlog and may time
-out; they are not explicitly rejected as busy.
+through writing its response. There is no socket-layer application queue or
+separate acceptor thread; Codex's internal request channel only bridges the
+control and owner threads. Additional callers wait in the OS socket backlog and
+may time out; the socket layer does not explicitly reject them as busy.
 
 A timeout does not cancel a request already sent: it may still reach the backend
 later. Without a correlated response, acceptance is unknown. Users may retry
@@ -260,6 +282,11 @@ including on delivery failure. No persistent state migration is required.
   incomplete request. Verify that a client timeout does not cancel delivery and
   that backend waiting stays on its owner thread while control runs separately.
   Late acknowledgements must not corrupt later responses.
+- Codex message-passing tests: owner-side startup rejection, expired queued
+  requests discarded before writing, full-channel rejection, caller timeout and
+  reply-channel closure reported as unknown, and receiver disconnection after
+  driver exit. Partial writes must finish without corrupting framing, and late
+  acknowledgements must remain correlated after the caller has timed out.
 - Codex compatibility tests: native `turn/steer` against the supported app-server
   version and missing-method rejection without restart or new-turn fallback.
 - Socket naming tests: deterministic SHA-256 over canonical OS path bytes,

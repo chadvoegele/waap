@@ -10,21 +10,12 @@ use super::*;
 type SteeringResult = Result<(), SteeringError>;
 
 pub(super) struct SteeringMailbox {
-    pub(super) active: AtomicBool,
     sender: SyncSender<SteerRequest>,
-    receiver: Mutex<Option<Receiver<SteerRequest>>>,
-}
-
-#[derive(Default)]
-struct Delivery {
-    dispatched: bool,
-    cancelled: bool,
 }
 
 pub(super) struct SteerRequest {
     prompt: String,
     deadline: Instant,
-    delivery: Arc<Mutex<Delivery>>,
     reply: Option<SyncSender<SteeringResult>>,
 }
 
@@ -44,42 +35,22 @@ fn unknown(reason: &str) -> SteeringError {
 }
 
 impl SteeringMailbox {
-    pub(super) fn new() -> Self {
+    pub(super) fn channel() -> (Self, Receiver<SteerRequest>) {
         let (sender, receiver) = mpsc::sync_channel(1);
-        Self {
-            active: AtomicBool::new(false),
-            sender,
-            receiver: Mutex::new(Some(receiver)),
-        }
-    }
-
-    pub(super) fn take_receiver(&self) -> io::Result<Receiver<SteerRequest>> {
-        self.receiver
-            .lock()
-            .map_err(|_| io::Error::other("Codex steering lock poisoned"))?
-            .take()
-            .ok_or_else(|| io::Error::other("Codex run already waited"))
+        (Self { sender }, receiver)
     }
 
     pub(super) fn steer(&self, prompt: &str, deadline: Instant) -> SteeringResult {
-        if !self.active.load(Ordering::Acquire) {
-            return Err(reject(
-                "no_active_turn",
-                "Codex has no active turn to steer",
-            ));
-        }
         if Instant::now() >= deadline {
             return Err(reject(
                 "timeout",
                 "Steering request expired before Codex dispatch",
             ));
         }
-        let delivery = Arc::new(Mutex::new(Delivery::default()));
         let (reply, replies) = mpsc::sync_channel(1);
         let request = SteerRequest {
             prompt: prompt.to_string(),
             deadline,
-            delivery: Arc::clone(&delivery),
             reply: Some(reply),
         };
         self.sender.try_send(request).map_err(|error| match error {
@@ -89,23 +60,13 @@ impl SteeringMailbox {
                 "Codex protocol owner exited before steering dispatch",
             ),
         })?;
-        match replies.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(result) => result,
-            Err(_) => {
-                let mut delivery = delivery.lock().unwrap();
-                delivery.cancelled = true;
-                if delivery.dispatched {
-                    Err(unknown(
-                        "acknowledgement was not received before the deadline",
-                    ))
-                } else {
-                    Err(reject(
-                        "timeout",
-                        "Steering request expired before Codex dispatch",
-                    ))
-                }
-            }
-        }
+        replies
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or_else(|_| {
+                Err(unknown(
+                    "no reply received before the deadline or driver exit",
+                ))
+            })
     }
 }
 
@@ -114,33 +75,6 @@ impl SteerRequest {
         if let Some(reply) = self.reply.take() {
             let _ = reply.send(result);
         }
-    }
-
-    fn expire(&mut self, now: Instant) {
-        if now < self.deadline || self.reply.is_none() {
-            return;
-        }
-        let dispatched = {
-            let mut delivery = self.delivery.lock().unwrap();
-            delivery.cancelled = true;
-            delivery.dispatched
-        };
-        self.respond(Err(if dispatched {
-            unknown("acknowledgement deadline expired")
-        } else {
-            reject("timeout", "Steering request expired before Codex dispatch")
-        }));
-    }
-}
-
-impl Drop for SteerRequest {
-    fn drop(&mut self) {
-        let dispatched = self.delivery.lock().unwrap().dispatched;
-        self.respond(Err(if dispatched {
-            unknown("the active turn or protocol connection ended before acknowledgement")
-        } else {
-            reject("agent_exited", "Codex exited before steering dispatch")
-        }));
     }
 }
 
@@ -163,11 +97,23 @@ struct PendingWrite {
 struct PendingSteer {
     id: i64,
     request: SteerRequest,
+    dispatched: bool,
+}
+
+impl PendingSteer {
+    fn expire(&mut self, now: Instant) {
+        if now >= self.request.deadline && self.request.reply.is_some() {
+            self.request.respond(Err(if self.dispatched {
+                unknown("acknowledgement deadline expired")
+            } else {
+                reject("timeout", "Steering request expired before Codex dispatch")
+            }));
+        }
+    }
 }
 
 struct LiveTurn<'a> {
     thread_id: &'a str,
-    active: &'a AtomicBool,
     start_id: i64,
     turn_id: Option<String>,
     early_completion: Option<(String, io::Result<TurnStatus>)>,
@@ -176,24 +122,16 @@ struct LiveTurn<'a> {
     interrupt_id: Option<i64>,
 }
 
-impl Drop for LiveTurn<'_> {
-    fn drop(&mut self) {
-        self.active.store(false, Ordering::Release);
-    }
-}
-
 impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
     pub(super) fn run_turn(
         &mut self,
         thread_id: &str,
         prompt: &str,
         interrupt: &AtomicBool,
-        active: &AtomicBool,
         commands: Receiver<SteerRequest>,
     ) -> io::Result<TurnStatus> {
         let mut turn = LiveTurn {
             thread_id,
-            active,
             start_id: self.next_id,
             turn_id: None,
             early_completion: None,
@@ -214,7 +152,7 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
         let mut buffer = Vec::new();
         loop {
             if let Some(pending) = &mut turn.pending {
-                pending.request.expire(Instant::now());
+                pending.expire(Instant::now());
             }
             if let Ok(request) = commands.try_recv() {
                 self.dispatch_steering(&mut turn, request);
@@ -276,8 +214,11 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
     }
 
     fn dispatch_steering(&mut self, turn: &mut LiveTurn<'_>, mut request: SteerRequest) {
-        request.expire(Instant::now());
-        if request.reply.is_none() {
+        if Instant::now() >= request.deadline {
+            request.respond(Err(reject(
+                "timeout",
+                "Steering request expired before Codex dispatch",
+            )));
             return;
         }
         let Some(turn_id) = turn.turn_id.as_deref() else {
@@ -300,7 +241,11 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
             "input": [{ "type": "text", "text": request.prompt }],
         });
         let id = self.enqueue(turn, METHOD_TURN_STEER, params);
-        turn.pending = Some(PendingSteer { id, request });
+        turn.pending = Some(PendingSteer {
+            id,
+            request,
+            dispatched: false,
+        });
     }
 
     fn enqueue(&mut self, turn: &mut LiveTurn<'_>, method: &str, params: JsonValue) -> i64 {
@@ -317,17 +262,18 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
     fn flush_requests(&mut self, turn: &mut LiveTurn<'_>) -> io::Result<()> {
         while !turn.writes.is_empty() {
             if let Some(pending) = &mut turn.pending {
-                pending.request.expire(Instant::now());
+                pending.expire(Instant::now());
             }
             let write = turn.writes.front_mut().unwrap();
-            let delivery = turn
+            let pending = turn
                 .pending
-                .as_ref()
-                .filter(|pending| pending.id == write.id)
-                .map(|pending| Arc::clone(&pending.request.delivery));
-            let mut delivery = delivery.as_ref().map(|delivery| delivery.lock().unwrap());
-            if write.offset == 0 && delivery.as_ref().is_some_and(|state| state.cancelled) {
-                drop(delivery);
+                .as_mut()
+                .filter(|pending| pending.id == write.id);
+            if write.offset == 0
+                && pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.request.reply.is_none())
+            {
                 turn.writes.pop_front();
                 turn.pending.take();
                 continue;
@@ -340,8 +286,8 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
                     ))
                 }
                 Ok(count) => {
-                    if let Some(delivery) = &mut delivery {
-                        delivery.dispatched = true;
+                    if let Some(pending) = pending {
+                        pending.dispatched = true;
                     }
                     write.offset += count;
                     if write.offset == write.bytes.len() {
@@ -376,7 +322,7 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
             .is_some_and(|pending| pending.id == id)
         {
             let mut pending = turn.pending.take().unwrap();
-            pending.request.expire(Instant::now());
+            pending.expire(Instant::now());
             pending
                 .request
                 .respond(steering_response(message, turn.turn_id.as_deref().unwrap()));
@@ -446,7 +392,6 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
                 return Ok(Some(status));
             }
         }
-        turn.active.store(true, Ordering::Release);
         Ok(None)
     }
 }
@@ -507,6 +452,18 @@ mod tests {
         }
     }
 
+    struct TestMailbox {
+        steering: SteeringMailbox,
+        finished: AtomicBool,
+        output: CapturedOutput,
+    }
+
+    impl TestMailbox {
+        fn steer(&self, prompt: &str, deadline: Instant) -> SteeringResult {
+            self.steering.steer(prompt, deadline)
+        }
+    }
+
     struct Server(BufReader<UnixStream>);
 
     impl Server {
@@ -520,12 +477,16 @@ mod tests {
             writeln!(self.0.get_mut(), "{message}").unwrap();
         }
 
-        fn start(&mut self, mailbox: &SteeringMailbox) {
+        fn start(&mut self, mailbox: &TestMailbox) {
             let request = self.read();
             assert_eq!(request["method"], METHOD_TURN_START);
             assert_eq!(request["params"]["input"][0]["text"], "initial");
             self.send(json!({"id":request["id"],"result":{"turn":{"id":"tu"}}}));
-            wait_until(|| mailbox.active.load(Ordering::Acquire));
+            // Synchronize the test through a normal output event, not production shared state.
+            self.send(json!({"method":METHOD_AGENT_MESSAGE_DELTA,"params":{
+                "threadId":"th","turnId":"tu","delta":"__ready__"}}));
+            wait_until(|| mailbox.output.0.lock().unwrap().ends_with(b"__ready__"));
+            mailbox.output.0.lock().unwrap().clear();
         }
 
         fn complete(&mut self, status: &str) {
@@ -547,7 +508,7 @@ mod tests {
     }
 
     fn with_run(
-        action: impl FnOnce(&mut Server, &SteeringMailbox, &AtomicBool, &CapturedOutput),
+        action: impl FnOnce(&mut Server, &TestMailbox, &AtomicBool, &CapturedOutput),
     ) -> (io::Result<TurnStatus>, String) {
         let (stream, server) = UnixStream::pair().unwrap();
         stream.set_nonblocking(true).unwrap();
@@ -563,21 +524,28 @@ mod tests {
             model: None,
             reasoning_effort: None,
         };
-        let mailbox = SteeringMailbox::new();
+        let (steering, commands) = SteeringMailbox::channel();
+        let mailbox = TestMailbox {
+            steering,
+            finished: AtomicBool::new(false),
+            output: output.clone(),
+        };
         let interrupt = AtomicBool::new(false);
         let result = thread::scope(|scope| {
-            let commands = mailbox.take_receiver().unwrap();
-            let worker = scope
-                .spawn(|| client.run_turn("th", "initial", &interrupt, &mailbox.active, commands));
+            let worker = scope.spawn(|| {
+                let result = client.run_turn("th", "initial", &interrupt, commands);
+                mailbox.finished.store(true, Ordering::Release);
+                result
+            });
             let mut server = Server(BufReader::new(server));
             action(&mut server, &mailbox, &interrupt, &output);
             drop(server);
             worker.join().unwrap()
         });
-        assert!(!mailbox.active.load(Ordering::Acquire));
+        assert!(mailbox.finished.load(Ordering::Acquire));
         assert_rejected(
             mailbox.steer("after completion", deadline()),
-            "no_active_turn",
+            "agent_exited",
         );
         let output = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
         (result, output)
@@ -637,7 +605,7 @@ mod tests {
                 assert_eq!(second.join().unwrap(), Ok(()));
             });
             server.complete("completed");
-            wait_until(|| !mailbox.active.load(Ordering::Acquire));
+            wait_until(|| mailbox.finished.load(Ordering::Acquire));
         });
         assert_eq!(status.unwrap(), TurnStatus::Completed);
         assert_eq!(output, "hello");
@@ -691,7 +659,7 @@ mod tests {
                     assert_eq!(next.join().unwrap(), Ok(()));
                 });
                 server.complete("completed");
-                wait_until(|| !mailbox.active.load(Ordering::Acquire));
+                wait_until(|| mailbox.finished.load(Ordering::Acquire));
             });
             assert_eq!(status.unwrap(), TurnStatus::Completed);
         }
@@ -739,7 +707,7 @@ mod tests {
                         server.complete("interrupted");
                     }
                 });
-                wait_until(|| !mailbox.active.load(Ordering::Acquire));
+                wait_until(|| mailbox.finished.load(Ordering::Acquire));
             });
             assert_eq!(status.unwrap(), TurnStatus::Interrupted);
         }
@@ -774,7 +742,7 @@ mod tests {
                 assert_eq!(next.join().unwrap(), Ok(()));
             });
             server.complete("completed");
-            wait_until(|| !mailbox.active.load(Ordering::Acquire));
+            wait_until(|| mailbox.finished.load(Ordering::Acquire));
         });
         assert_eq!(status.unwrap(), TurnStatus::Completed);
     }
@@ -816,7 +784,7 @@ mod tests {
                     ));
                 });
                 server.complete("completed");
-                wait_until(|| !mailbox.active.load(Ordering::Acquire));
+                wait_until(|| mailbox.finished.load(Ordering::Acquire));
             });
             assert_eq!(status.unwrap(), TurnStatus::Completed);
         }
@@ -855,7 +823,7 @@ mod tests {
                 assert_eq!(steering.join().unwrap(), Ok(()));
             });
             server.complete("completed");
-            wait_until(|| !mailbox.active.load(Ordering::Acquire));
+            wait_until(|| mailbox.finished.load(Ordering::Acquire));
         });
         assert_eq!(status.unwrap(), TurnStatus::Completed);
         assert_eq!(output, "λ");
@@ -874,7 +842,7 @@ mod tests {
             let (status, _) = with_run(|server, mailbox, _, _| {
                 server.start(mailbox);
                 server.complete(wire);
-                wait_until(|| !mailbox.active.load(Ordering::Acquire));
+                wait_until(|| mailbox.finished.load(Ordering::Acquire));
             });
             match expected {
                 Some(expected) => assert_eq!(status.unwrap(), expected),
@@ -926,14 +894,11 @@ mod tests {
     #[test]
     fn unsent_timeout_is_definite_and_partial_write_timeout_preserves_framing() {
         for allowance in [0, 7] {
-            let active = AtomicBool::new(true);
             let (reply, replies) = mpsc::sync_channel(1);
-            let delivery = Arc::new(Mutex::new(Delivery::default()));
             let expires = deadline();
             let request = SteerRequest {
                 prompt: "prompt".to_string(),
                 deadline: expires,
-                delivery: Arc::clone(&delivery),
                 reply: Some(reply),
             };
             let mut client = CodexClient {
@@ -949,7 +914,6 @@ mod tests {
             };
             let mut turn = LiveTurn {
                 thread_id: "th",
-                active: &active,
                 start_id: 0,
                 turn_id: Some("tu".to_string()),
                 early_completion: None,
@@ -958,10 +922,14 @@ mod tests {
                 interrupt_id: None,
             };
             let id = client.enqueue(&mut turn, METHOD_TURN_STEER, json!({"input":"prompt"}));
-            turn.pending = Some(PendingSteer { id, request });
+            turn.pending = Some(PendingSteer {
+                id,
+                request,
+                dispatched: false,
+            });
             client.flush_requests(&mut turn).unwrap();
-            assert_eq!(delivery.lock().unwrap().dispatched, allowance > 0);
-            turn.pending.as_mut().unwrap().request.expire(expires);
+            assert_eq!(turn.pending.as_ref().unwrap().dispatched, allowance > 0);
+            turn.pending.as_mut().unwrap().expire(expires);
             let result = replies.recv().unwrap();
             if allowance == 0 {
                 assert_rejected(result, "timeout");
@@ -989,18 +957,68 @@ mod tests {
     }
 
     #[test]
-    fn timed_out_mailbox_request_is_cancelled_before_owner_dispatch() {
-        let mailbox = SteeringMailbox::new();
-        mailbox.active.store(true, Ordering::Release);
-        let commands = mailbox.take_receiver().unwrap();
-        assert_rejected(
+    fn caller_timeout_is_unknown_and_owner_discards_expired_queued_request() {
+        let (mailbox, commands) = SteeringMailbox::channel();
+        assert!(matches!(
             mailbox.steer("queued", Instant::now() + Duration::from_millis(10)),
-            "timeout",
-        );
+            Err(SteeringError::AcceptanceUnknown { .. })
+        ));
         let request = commands.recv().unwrap();
-        let state = request.delivery.lock().unwrap();
-        assert!(state.cancelled);
-        assert!(!state.dispatched);
+        assert!(Instant::now() >= request.deadline);
+        let mut client = CodexClient {
+            reader: io::Cursor::new(Vec::<u8>::new()),
+            writer: Vec::new(),
+            out: Vec::new(),
+            next_id: 1,
+            model: None,
+            reasoning_effort: None,
+        };
+        let mut turn = LiveTurn {
+            thread_id: "th",
+            start_id: 0,
+            turn_id: Some("tu".to_string()),
+            early_completion: None,
+            pending: None,
+            writes: VecDeque::new(),
+            interrupt_id: None,
+        };
+        client.dispatch_steering(&mut turn, request);
+        client.flush_requests(&mut turn).unwrap();
+        assert!(client.writer.is_empty());
+        assert!(turn.pending.is_none());
+    }
+
+    #[test]
+    fn driver_exit_without_a_reply_is_unknown_and_later_calls_are_rejected() {
+        let (mailbox, commands) = SteeringMailbox::channel();
+        thread::scope(|scope| {
+            let caller = scope.spawn(|| mailbox.steer("queued", deadline()));
+            let request = commands.recv_timeout(Duration::from_secs(1)).unwrap();
+            drop(request);
+            assert!(matches!(
+                caller.join().unwrap(),
+                Err(SteeringError::AcceptanceUnknown { .. })
+            ));
+        });
+        drop(commands);
+        assert_rejected(mailbox.steer("after exit", deadline()), "agent_exited");
+    }
+
+    #[test]
+    fn full_mailbox_rejects_without_queueing_another_request() {
+        let (mailbox, commands) = SteeringMailbox::channel();
+        let (reply, _replies) = mpsc::sync_channel(1);
+        mailbox
+            .sender
+            .try_send(SteerRequest {
+                prompt: "first".to_string(),
+                deadline: deadline(),
+                reply: Some(reply),
+            })
+            .unwrap();
+        assert_rejected(mailbox.steer("second", deadline()), "busy");
+        assert_eq!(commands.recv().unwrap().prompt, "first");
+        assert!(commands.try_recv().is_err());
     }
 
     #[test]
@@ -1030,7 +1048,7 @@ mod tests {
                     assert!(!error.to_string().contains("secret prompt"));
                 });
                 server.complete("completed");
-                wait_until(|| !mailbox.active.load(Ordering::Acquire));
+                wait_until(|| mailbox.finished.load(Ordering::Acquire));
             });
             assert_eq!(status.unwrap(), TurnStatus::Completed);
         }

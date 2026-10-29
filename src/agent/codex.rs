@@ -3,11 +3,12 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{ChildStdin, ChildStdout, Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 mod live;
-use live::{set_nonblocking, SteeringMailbox};
+use live::{set_nonblocking, SteerRequest, SteeringMailbox};
 
 use serde_json::{json, Value as JsonValue};
 
@@ -37,12 +38,13 @@ impl AgentSystemBackend for CodexBackend {
         let mut server = spawn_codex_app_server(&self.config, context.worktree_dir)?;
         server.client.initialize()?;
         let thread_id = server.client.thread_start(context.worktree_dir)?;
+        let (steering, commands) = SteeringMailbox::channel();
         Ok(StartedRun {
             session_id: thread_id.clone(),
             handle: Box::new(CodexRun {
-                server: Mutex::new(Some(server)),
+                driver: Mutex::new(Some(CodexDriver { server, commands })),
                 interrupt,
-                steering: SteeringMailbox::new(),
+                steering,
                 thread_id,
                 prompt: context.prompt.to_string(),
             }),
@@ -81,8 +83,13 @@ impl Drop for InterruptHandler {
     }
 }
 
+struct CodexDriver {
+    server: CodexAppServer,
+    commands: Receiver<SteerRequest>,
+}
+
 struct CodexRun {
-    server: Mutex<Option<CodexAppServer>>,
+    driver: Mutex<Option<CodexDriver>>,
     interrupt: InterruptHandler,
     steering: SteeringMailbox,
     thread_id: String,
@@ -91,20 +98,21 @@ struct CodexRun {
 
 impl RunHandle for CodexRun {
     fn wait(&self) -> io::Result<RunOutcome> {
-        let mut server = self
-            .server
+        let CodexDriver {
+            mut server,
+            commands,
+        } = self
+            .driver
             .lock()
             .map_err(|_| io::Error::other("Codex app-server lock poisoned"))?
             .take()
             .ok_or_else(|| io::Error::other("Codex run already waited"))?;
         set_nonblocking(server.client.reader.get_ref())?;
         set_nonblocking(&server.client.writer)?;
-        let commands = self.steering.take_receiver()?;
         let status = server.client.run_turn(
             &self.thread_id,
             &self.prompt,
             &self.interrupt.flag,
-            &self.steering.active,
             commands,
         )?;
         if status.is_success() {
