@@ -44,7 +44,7 @@ impl AgentSystemBackend for CodexBackend {
         Ok(StartedRun {
             session_id: thread_id.clone(),
             handle: Box::new(CodexRun {
-                driver: Mutex::new(Some(CodexDriver {
+                state: Mutex::new(Some(CodexRunState {
                     server,
                     steering_receiver,
                 })),
@@ -88,13 +88,13 @@ impl Drop for InterruptHandler {
     }
 }
 
-struct CodexDriver {
+struct CodexRunState {
     server: CodexAppServer,
     steering_receiver: Receiver<SteerRequest>,
 }
 
 struct CodexRun {
-    driver: Mutex<Option<CodexDriver>>,
+    state: Mutex<Option<CodexRunState>>,
     interrupt: InterruptHandler,
     steering_sender: CodexSteering,
     thread_id: String,
@@ -103,11 +103,11 @@ struct CodexRun {
 
 impl RunHandle for CodexRun {
     fn wait(&self) -> io::Result<RunOutcome> {
-        let CodexDriver {
+        let CodexRunState {
             mut server,
             steering_receiver,
         } = self
-            .driver
+            .state
             .lock()
             .map_err(|_| io::Error::other("Codex app-server lock poisoned"))?
             .take()
@@ -464,7 +464,7 @@ type SteeringResult = Result<(), SteeringError>;
 type SteerRequest = request_reply::Call<String, SteeringResult>;
 
 struct CodexSteering {
-    channel: request_reply::Client<String, SteeringResult>,
+    sender: request_reply::Client<String, SteeringResult>,
 }
 
 fn reject(code: &'static str, message: &str) -> SteeringError {
@@ -474,7 +474,7 @@ fn reject(code: &'static str, message: &str) -> SteeringError {
     }
 }
 
-fn unknown(reason: &str) -> SteeringError {
+fn build_acceptance_unknown_error(reason: &str) -> SteeringError {
     SteeringError::AcceptanceUnknown {
         message: format!(
             "Codex steering acceptance is unknown: {reason}; do not retry automatically"
@@ -484,8 +484,8 @@ fn unknown(reason: &str) -> SteeringError {
 
 impl CodexSteering {
     fn channel() -> (Self, Receiver<SteerRequest>) {
-        let (channel, steering_receiver) = request_reply::channel(1);
-        (Self { channel }, steering_receiver)
+        let (sender, steering_receiver) = request_reply::channel(1);
+        (Self { sender }, steering_receiver)
     }
 
     fn steer(&self, prompt: &str, deadline: Instant) -> SteeringResult {
@@ -495,7 +495,7 @@ impl CodexSteering {
                 "Steering request expired before Codex dispatch",
             ));
         }
-        self.channel
+        self.sender
             .call(prompt.to_string(), deadline)
             .unwrap_or_else(|error| {
                 Err(match error {
@@ -507,7 +507,9 @@ impl CodexSteering {
                         "Codex protocol owner exited before steering dispatch",
                     ),
                     request_reply::CallError::Timeout | request_reply::CallError::ReplyClosed => {
-                        unknown("no reply received before the deadline or driver exit")
+                        build_acceptance_unknown_error(
+                            "no reply received before the deadline or driver exit",
+                        )
                     }
                 })
             })
@@ -533,14 +535,14 @@ struct PendingWrite {
 struct PendingSteer {
     id: i64,
     request: SteerRequest,
-    dispatched: bool,
+    write_started: bool,
 }
 
 impl PendingSteer {
     fn expire(&mut self, now: Instant) {
-        if now >= self.request.deadline && self.request.reply_pending() {
-            self.request.respond(Err(if self.dispatched {
-                unknown("acknowledgement deadline expired")
+        if now >= self.request.deadline && self.request.has_reply_sender() {
+            self.request.respond(Err(if self.write_started {
+                build_acceptance_unknown_error("acknowledgement deadline expired")
             } else {
                 reject("timeout", "Steering request expired before Codex dispatch")
             }));
@@ -548,14 +550,14 @@ impl PendingSteer {
     }
 }
 
-struct LiveTurn<'a> {
+struct TurnState<'a> {
     thread_id: &'a str,
-    start_id: i64,
+    start_request_id: i64,
     turn_id: Option<String>,
     early_completion: Option<(String, io::Result<TurnStatus>)>,
-    pending: Option<PendingSteer>,
-    writes: VecDeque<PendingWrite>,
-    interrupt_id: Option<i64>,
+    pending_steer: Option<PendingSteer>,
+    pending_writes: VecDeque<PendingWrite>,
+    interrupt_request_id: Option<i64>,
 }
 
 impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
@@ -566,16 +568,16 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
         interrupt: &AtomicBool,
         steering_receiver: Receiver<SteerRequest>,
     ) -> io::Result<TurnStatus> {
-        let mut turn = LiveTurn {
+        let mut turn = TurnState {
             thread_id,
-            start_id: self.next_id,
+            start_request_id: self.next_id,
             turn_id: None,
             early_completion: None,
-            pending: None,
-            writes: VecDeque::new(),
-            interrupt_id: None,
+            pending_steer: None,
+            pending_writes: VecDeque::new(),
+            interrupt_request_id: None,
         };
-        self.enqueue(
+        self.enqueue_request(
             &mut turn,
             METHOD_TURN_START,
             turn_start_params(
@@ -587,17 +589,17 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
         );
         let mut buffer = Vec::new();
         loop {
-            if let Some(pending) = &mut turn.pending {
-                pending.expire(Instant::now());
+            if let Some(pending_steer) = &mut turn.pending_steer {
+                pending_steer.expire(Instant::now());
             }
             if let Ok(request) = steering_receiver.try_recv() {
                 self.dispatch_steering(&mut turn, request);
             }
-            if turn.interrupt_id.is_none() && interrupt.load(Ordering::SeqCst) {
+            if turn.interrupt_request_id.is_none() && interrupt.load(Ordering::SeqCst) {
                 if let Some(turn_id) = &turn.turn_id {
                     let params = json!({ "threadId": thread_id, "turnId": turn_id });
-                    turn.interrupt_id =
-                        Some(self.enqueue(&mut turn, METHOD_TURN_INTERRUPT, params));
+                    turn.interrupt_request_id =
+                        Some(self.enqueue_request(&mut turn, METHOD_TURN_INTERRUPT, params));
                 }
             }
             self.flush_requests(&mut turn)?;
@@ -624,7 +626,7 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
 
     fn process_frames(
         &mut self,
-        turn: &mut LiveTurn<'_>,
+        turn: &mut TurnState<'_>,
         buffer: &mut Vec<u8>,
     ) -> io::Result<Option<io::Result<TurnStatus>>> {
         let mut consumed = 0;
@@ -649,7 +651,7 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
         Ok(None)
     }
 
-    fn dispatch_steering(&mut self, turn: &mut LiveTurn<'_>, mut request: SteerRequest) {
+    fn dispatch_steering(&mut self, turn: &mut TurnState<'_>, mut request: SteerRequest) {
         if Instant::now() >= request.deadline {
             request.respond(Err(reject(
                 "timeout",
@@ -664,7 +666,7 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
             )));
             return;
         };
-        if turn.pending.is_some() {
+        if turn.pending_steer.is_some() {
             request.respond(Err(reject(
                 "busy",
                 "Codex is still awaiting an earlier steering acknowledgement",
@@ -676,18 +678,23 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
             "expectedTurnId": turn_id,
             "input": [{ "type": "text", "text": request.message }],
         });
-        let id = self.enqueue(turn, METHOD_TURN_STEER, params);
-        turn.pending = Some(PendingSteer {
+        let id = self.enqueue_request(turn, METHOD_TURN_STEER, params);
+        turn.pending_steer = Some(PendingSteer {
             id,
             request,
-            dispatched: false,
+            write_started: false,
         });
     }
 
-    fn enqueue(&mut self, turn: &mut LiveTurn<'_>, method: &str, params: JsonValue) -> i64 {
+    fn enqueue_request(
+        &mut self,
+        turn: &mut TurnState<'_>,
+        method: &str,
+        params: JsonValue,
+    ) -> i64 {
         let id = self.next_id;
         self.next_id += 1;
-        turn.writes.push_back(PendingWrite {
+        turn.pending_writes.push_back(PendingWrite {
             id,
             bytes: request_line(id, method, params).into_bytes(),
             offset: 0,
@@ -695,23 +702,23 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
         id
     }
 
-    fn flush_requests(&mut self, turn: &mut LiveTurn<'_>) -> io::Result<()> {
-        while !turn.writes.is_empty() {
-            if let Some(pending) = &mut turn.pending {
-                pending.expire(Instant::now());
+    fn flush_requests(&mut self, turn: &mut TurnState<'_>) -> io::Result<()> {
+        while !turn.pending_writes.is_empty() {
+            if let Some(pending_steer) = &mut turn.pending_steer {
+                pending_steer.expire(Instant::now());
             }
-            let write = turn.writes.front_mut().unwrap();
-            let pending = turn
-                .pending
+            let write = turn.pending_writes.front_mut().unwrap();
+            let pending_steer = turn
+                .pending_steer
                 .as_mut()
-                .filter(|pending| pending.id == write.id);
+                .filter(|pending_steer| pending_steer.id == write.id);
             if write.offset == 0
-                && pending
+                && pending_steer
                     .as_ref()
-                    .is_some_and(|pending| !pending.request.reply_pending())
+                    .is_some_and(|pending_steer| !pending_steer.request.has_reply_sender())
             {
-                turn.writes.pop_front();
-                turn.pending.take();
+                turn.pending_writes.pop_front();
+                turn.pending_steer.take();
                 continue;
             }
             match self.writer.write(&write.bytes[write.offset..]) {
@@ -722,12 +729,12 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
                     ))
                 }
                 Ok(count) => {
-                    if let Some(pending) = pending {
-                        pending.dispatched = true;
+                    if let Some(pending_steer) = pending_steer {
+                        pending_steer.write_started = true;
                     }
                     write.offset += count;
                     if write.offset == write.bytes.len() {
-                        turn.writes.pop_front();
+                        turn.pending_writes.pop_front();
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
@@ -740,7 +747,7 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
 
     fn process_message(
         &mut self,
-        turn: &mut LiveTurn<'_>,
+        turn: &mut TurnState<'_>,
         message: &JsonValue,
     ) -> io::Result<Option<io::Result<TurnStatus>>> {
         if message.get("method").is_some() {
@@ -749,20 +756,21 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
         let Some(id) = message.get("id").and_then(JsonValue::as_i64) else {
             return Ok(None);
         };
-        if id == turn.start_id {
+        if id == turn.start_request_id {
             return self.accept_started_turn(turn, message);
         }
         if turn
-            .pending
+            .pending_steer
             .as_ref()
-            .is_some_and(|pending| pending.id == id)
+            .is_some_and(|pending_steer| pending_steer.id == id)
         {
-            let mut pending = turn.pending.take().unwrap();
-            pending.expire(Instant::now());
-            pending
-                .request
-                .respond(steering_response(message, turn.turn_id.as_deref().unwrap()));
-        } else if Some(id) == turn.interrupt_id && message.get("error").is_some() {
+            let mut pending_steer = turn.pending_steer.take().unwrap();
+            pending_steer.expire(Instant::now());
+            pending_steer.request.respond(parse_steering_response(
+                message,
+                turn.turn_id.as_deref().unwrap(),
+            ));
+        } else if Some(id) == turn.interrupt_request_id && message.get("error").is_some() {
             return Err(io::Error::other("codex turn/interrupt rejected"));
         }
         Ok(None)
@@ -770,7 +778,7 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
 
     fn process_notification(
         &mut self,
-        turn: &mut LiveTurn<'_>,
+        turn: &mut TurnState<'_>,
         message: &JsonValue,
     ) -> io::Result<Option<io::Result<TurnStatus>>> {
         if message.get("id").is_some() {
@@ -804,7 +812,7 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
 
     fn accept_started_turn(
         &self,
-        turn: &mut LiveTurn<'_>,
+        turn: &mut TurnState<'_>,
         message: &JsonValue,
     ) -> io::Result<Option<io::Result<TurnStatus>>> {
         if let Some(error) = message.get("error") {
@@ -832,16 +840,20 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
     }
 }
 
-fn steering_response(message: &JsonValue, expected_turn: &str) -> SteeringResult {
+fn parse_steering_response(message: &JsonValue, expected_turn: &str) -> SteeringResult {
     if let Some(error) = message.get("error") {
         let (Some(code), Some(diagnostic)) = (
             error.get("code").and_then(JsonValue::as_i64),
             error.get("message").and_then(JsonValue::as_str),
         ) else {
-            return Err(unknown("the server returned an invalid turn/steer error"));
+            return Err(build_acceptance_unknown_error(
+                "the server returned an invalid turn/steer error",
+            ));
         };
         if message.get("result").is_some() {
-            return Err(unknown("the server returned both a result and an error"));
+            return Err(build_acceptance_unknown_error(
+                "the server returned both a result and an error",
+            ));
         }
         let missing = code == -32601
             || (code == -32600
@@ -859,7 +871,7 @@ fn steering_response(message: &JsonValue, expected_turn: &str) -> SteeringResult
         .and_then(JsonValue::as_str)
         != Some(expected_turn)
     {
-        return Err(unknown(
+        return Err(build_acceptance_unknown_error(
             "the server returned an invalid turn/steer acknowledgement",
         ));
     }
@@ -1342,24 +1354,28 @@ mod steering_tests {
                 model: None,
                 reasoning_effort: None,
             };
-            let mut turn = LiveTurn {
+            let mut turn = TurnState {
                 thread_id: "th",
-                start_id: 0,
+                start_request_id: 0,
                 turn_id: Some("tu".to_string()),
                 early_completion: None,
-                pending: None,
-                writes: VecDeque::new(),
-                interrupt_id: None,
+                pending_steer: None,
+                pending_writes: VecDeque::new(),
+                interrupt_request_id: None,
             };
-            let id = client.enqueue(&mut turn, METHOD_TURN_STEER, json!({"input":"prompt"}));
-            turn.pending = Some(PendingSteer {
+            let id =
+                client.enqueue_request(&mut turn, METHOD_TURN_STEER, json!({"input":"prompt"}));
+            turn.pending_steer = Some(PendingSteer {
                 id,
                 request,
-                dispatched: false,
+                write_started: false,
             });
             client.flush_requests(&mut turn).unwrap();
-            assert_eq!(turn.pending.as_ref().unwrap().dispatched, allowance > 0);
-            turn.pending.as_mut().unwrap().expire(expires);
+            assert_eq!(
+                turn.pending_steer.as_ref().unwrap().write_started,
+                allowance > 0
+            );
+            turn.pending_steer.as_mut().unwrap().expire(expires);
             let result = replies.recv().unwrap();
             if allowance == 0 {
                 assert_rejected(result, "timeout");
@@ -1373,16 +1389,16 @@ mod steering_tests {
             client.flush_requests(&mut turn).unwrap();
             if allowance == 0 {
                 assert!(client.writer.bytes.is_empty());
-                assert!(turn.pending.is_none());
+                assert!(turn.pending_steer.is_none());
             } else {
                 let wire: JsonValue = serde_json::from_slice(&client.writer.bytes).unwrap();
                 assert_eq!(wire["method"], METHOD_TURN_STEER);
                 assert!(
-                    turn.pending.is_some(),
+                    turn.pending_steer.is_some(),
                     "keep the correlation until a late acknowledgement"
                 );
             }
-            assert!(turn.writes.is_empty());
+            assert!(turn.pending_writes.is_empty());
         }
     }
 
@@ -1403,19 +1419,19 @@ mod steering_tests {
             model: None,
             reasoning_effort: None,
         };
-        let mut turn = LiveTurn {
+        let mut turn = TurnState {
             thread_id: "th",
-            start_id: 0,
+            start_request_id: 0,
             turn_id: Some("tu".to_string()),
             early_completion: None,
-            pending: None,
-            writes: VecDeque::new(),
-            interrupt_id: None,
+            pending_steer: None,
+            pending_writes: VecDeque::new(),
+            interrupt_request_id: None,
         };
         client.dispatch_steering(&mut turn, request);
         client.flush_requests(&mut turn).unwrap();
         assert!(client.writer.is_empty());
-        assert!(turn.pending.is_none());
+        assert!(turn.pending_steer.is_none());
     }
 
     #[test]

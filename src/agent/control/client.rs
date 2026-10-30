@@ -26,13 +26,13 @@ impl ControlClient {
             if error.kind() == io::ErrorKind::InvalidInput {
                 error
             } else {
-                unknown(&format!(
+                build_acceptance_unknown_error(&format!(
                     "request write failed (agent may be busy or unavailable): {error}"
                 ))
             }
         })?;
         let frame = self.connection.read_frame().map_err(|error| {
-            unknown(&format!(
+            build_acceptance_unknown_error(&format!(
                 "acknowledgement failed (agent may be busy or unavailable): {error}"
             ))
         })?;
@@ -41,7 +41,7 @@ impl ControlClient {
 }
 
 fn validate_response(frame: &[u8], request_id: &str) -> io::Result<()> {
-    let invalid = || unknown("invalid or uncorrelated control response");
+    let invalid = || build_acceptance_unknown_error("invalid or uncorrelated control response");
     let response: Response = serde_json::from_slice(frame).map_err(|_| invalid())?;
     if response.version != 1 || response.request_id.as_deref() != Some(request_id) {
         return Err(invalid());
@@ -53,7 +53,7 @@ fn validate_response(frame: &[u8], request_id: &str) -> io::Result<()> {
                 (Some(false), code) if code != "acceptance_unknown" => {
                     Err(io::Error::other(format!("{code}: {}", error.message)))
                 }
-                (None, "acceptance_unknown") => Err(unknown(&error.message)),
+                (None, "acceptance_unknown") => Err(build_acceptance_unknown_error(&error.message)),
                 _ => Err(invalid()),
             }
         }
@@ -61,7 +61,7 @@ fn validate_response(frame: &[u8], request_id: &str) -> io::Result<()> {
     }
 }
 
-fn unknown(reason: &str) -> io::Error {
+fn build_acceptance_unknown_error(reason: &str) -> io::Error {
     io::Error::other(format!(
         "acceptance is unknown: {reason}; no automatic retry was attempted"
     ))

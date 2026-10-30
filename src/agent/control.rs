@@ -6,14 +6,14 @@ mod protocol;
 mod server;
 mod socket;
 
-pub(super) use handler::WaapHandler;
+pub(super) use handler::ControlRequestHandler;
 pub(super) use server::ControlServer;
 #[cfg(test)]
 use socket::SocketConnection;
 pub(super) use socket::{SocketListener, SocketPath};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
-pub(super) const ACK_TIMEOUT: Duration = Duration::from_secs(30);
+const ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 pub(in crate::agent) mod tests {
@@ -106,7 +106,7 @@ pub(in crate::agent) mod tests {
         run: &dyn RunHandle,
         completed: &AtomicBool,
     ) -> io::Result<()> {
-        WaapHandler::new(run).serve(SocketConnection::new(stream), completed)
+        ControlRequestHandler::new(run).serve(SocketConnection::new(stream), completed)
     }
 
     fn frame(prompt: &str) -> Vec<u8> {

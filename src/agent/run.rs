@@ -3,7 +3,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use super::backend::{AgentSystemBackend, RunHandle, RunOutcome, StartContext};
-use super::control::{ControlServer, SocketListener, SocketPath, WaapHandler};
+use super::control::{ControlRequestHandler, ControlServer, SocketListener, SocketPath};
 use super::worktree::{collapse_errors, AgentWorktree};
 use crate::agent::{
     agent_report_json, load_agent_report, print_agent_report_human, read_agent_record,
@@ -158,7 +158,7 @@ pub(super) fn wait_with_control(
     handle: &dyn RunHandle,
 ) -> io::Result<RunOutcome> {
     let outcome = std::thread::scope(|scope| {
-        let handler = WaapHandler::new(handle);
+        let handler = ControlRequestHandler::new(handle);
         let server_ref = &server;
         let worker = std::thread::Builder::new()
             .name("waap-control".to_string())

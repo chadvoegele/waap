@@ -56,8 +56,7 @@ impl<T, R> Call<T, R> {
         )
     }
 
-    // This tracks whether a response was attempted, not whether the caller is still waiting.
-    pub(super) fn reply_pending(&self) -> bool {
+    pub(super) fn has_reply_sender(&self) -> bool {
         self.reply.is_some()
     }
 
@@ -102,7 +101,7 @@ mod tests {
         let mut call = requests.recv().unwrap();
         assert_eq!(call.message, "queued");
         call.respond(());
-        assert!(!call.reply_pending());
+        assert!(!call.has_reply_sender());
     }
 
     #[test]
@@ -130,10 +129,10 @@ mod tests {
     #[test]
     fn responds_at_most_once() {
         let (mut call, replies) = Call::<(), usize>::new((), deadline());
-        assert!(call.reply_pending());
+        assert!(call.has_reply_sender());
         call.respond(1);
         call.respond(2);
-        assert!(!call.reply_pending());
+        assert!(!call.has_reply_sender());
         assert_eq!(replies.recv().unwrap(), 1);
         assert_eq!(replies.try_recv(), Err(mpsc::TryRecvError::Disconnected));
     }
