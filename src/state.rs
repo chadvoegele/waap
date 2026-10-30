@@ -6,7 +6,7 @@ use crate::git::run_git;
 
 /// Serializes a state read/modify/commit transaction across waap processes.
 pub(crate) struct StateLock {
-    _file: File,
+    file: File,
 }
 
 impl StateLock {
@@ -41,7 +41,15 @@ impl StateLock {
                 format!("failed to lock {}: {error}", path.display()),
             )
         })?;
-        Ok(Self { _file: file })
+        Ok(Self { file })
+    }
+}
+
+impl Drop for StateLock {
+    fn drop(&mut self) {
+        if let Err(error) = self.file.unlock() {
+            log::error!("failed to unlock waap state: {error}");
+        }
     }
 }
 
@@ -96,6 +104,26 @@ mod tests {
         ));
         drop(lock);
         contender.try_lock().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn state_lock_drop_unlocks_while_a_duplicate_descriptor_remains_open() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let lock = StateLock::acquire(dir.path()).unwrap();
+        let duplicated_file = lock.file.try_clone().unwrap();
+        let contender = OpenOptions::new()
+            .write(true)
+            .open(dir.path().join(".git/waap-state.lock"))
+            .unwrap();
+        assert!(matches!(
+            contender.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(lock);
+        contender.try_lock().unwrap();
+        drop(duplicated_file);
     }
 
     #[test]
