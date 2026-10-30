@@ -101,7 +101,7 @@ mod tests {
         );
         let mut call = requests.recv().unwrap();
         assert_eq!(call.message, "queued");
-        call.respond(()); // A departed caller does not prevent owner-side handling.
+        call.respond(());
         assert!(!call.reply_pending());
     }
 

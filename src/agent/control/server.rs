@@ -25,7 +25,7 @@ impl ControlServer {
         while !self.shutdown.load(Ordering::Acquire) {
             match self.listener.accept() {
                 Ok(connection) => {
-                    // One request at a time. Never log peer-controlled transport errors.
+                    // Never log peer-controlled transport errors.
                     let _ = handler(connection, &self.shutdown);
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {

@@ -40,13 +40,16 @@ impl AgentSystemBackend for CodexBackend {
         let mut server = spawn_codex_app_server(&self.config, context.worktree_dir)?;
         server.client.initialize()?;
         let thread_id = server.client.thread_start(context.worktree_dir)?;
-        let (steering, commands) = CodexSteering::channel();
+        let (steering_sender, steering_receiver) = CodexSteering::channel();
         Ok(StartedRun {
             session_id: thread_id.clone(),
             handle: Box::new(CodexRun {
-                driver: Mutex::new(Some(CodexDriver { server, commands })),
+                driver: Mutex::new(Some(CodexDriver {
+                    server,
+                    steering_receiver,
+                })),
                 interrupt,
-                steering,
+                steering_sender,
                 thread_id,
                 prompt: context.prompt.to_string(),
             }),
@@ -87,13 +90,13 @@ impl Drop for InterruptHandler {
 
 struct CodexDriver {
     server: CodexAppServer,
-    commands: Receiver<SteerRequest>,
+    steering_receiver: Receiver<SteerRequest>,
 }
 
 struct CodexRun {
     driver: Mutex<Option<CodexDriver>>,
     interrupt: InterruptHandler,
-    steering: CodexSteering,
+    steering_sender: CodexSteering,
     thread_id: String,
     prompt: String,
 }
@@ -102,7 +105,7 @@ impl RunHandle for CodexRun {
     fn wait(&self) -> io::Result<RunOutcome> {
         let CodexDriver {
             mut server,
-            commands,
+            steering_receiver,
         } = self
             .driver
             .lock()
@@ -115,7 +118,7 @@ impl RunHandle for CodexRun {
             &self.thread_id,
             &self.prompt,
             &self.interrupt.flag,
-            commands,
+            steering_receiver,
         )?;
         if status.is_success() {
             Ok(RunOutcome::Completed)
@@ -125,7 +128,7 @@ impl RunHandle for CodexRun {
     }
 
     fn steer(&self, prompt: &str, deadline: Instant) -> Result<(), SteeringError> {
-        self.steering.steer(prompt, deadline)
+        self.steering_sender.steer(prompt, deadline)
     }
 }
 
@@ -481,8 +484,8 @@ fn unknown(reason: &str) -> SteeringError {
 
 impl CodexSteering {
     fn channel() -> (Self, Receiver<SteerRequest>) {
-        let (channel, receiver) = request_reply::channel(1);
-        (Self { channel }, receiver)
+        let (channel, steering_receiver) = request_reply::channel(1);
+        (Self { channel }, steering_receiver)
     }
 
     fn steer(&self, prompt: &str, deadline: Instant) -> SteeringResult {
@@ -561,7 +564,7 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
         thread_id: &str,
         prompt: &str,
         interrupt: &AtomicBool,
-        commands: Receiver<SteerRequest>,
+        steering_receiver: Receiver<SteerRequest>,
     ) -> io::Result<TurnStatus> {
         let mut turn = LiveTurn {
             thread_id,
@@ -587,7 +590,7 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
             if let Some(pending) = &mut turn.pending {
                 pending.expire(Instant::now());
             }
-            if let Ok(request) = commands.try_recv() {
+            if let Ok(request) = steering_receiver.try_recv() {
                 self.dispatch_steering(&mut turn, request);
             }
             if turn.interrupt_id.is_none() && interrupt.load(Ordering::SeqCst) {
@@ -886,14 +889,14 @@ mod steering_tests {
     }
 
     struct TestMailbox {
-        steering: CodexSteering,
+        steering_sender: CodexSteering,
         finished: AtomicBool,
         output: CapturedOutput,
     }
 
     impl TestMailbox {
         fn steer(&self, prompt: &str, deadline: Instant) -> SteeringResult {
-            self.steering.steer(prompt, deadline)
+            self.steering_sender.steer(prompt, deadline)
         }
     }
 
@@ -915,7 +918,6 @@ mod steering_tests {
             assert_eq!(request["method"], METHOD_TURN_START);
             assert_eq!(request["params"]["input"][0]["text"], "initial");
             self.send(json!({"id":request["id"],"result":{"turn":{"id":"tu"}}}));
-            // Synchronize the test through a normal output event, not production shared state.
             self.send(json!({"method":METHOD_AGENT_MESSAGE_DELTA,"params":{
                 "threadId":"th","turnId":"tu","delta":"__ready__"}}));
             wait_until(|| mailbox.output.0.lock().unwrap().ends_with(b"__ready__"));
@@ -957,16 +959,16 @@ mod steering_tests {
             model: None,
             reasoning_effort: None,
         };
-        let (steering, commands) = CodexSteering::channel();
+        let (steering_sender, steering_receiver) = CodexSteering::channel();
         let mailbox = TestMailbox {
-            steering,
+            steering_sender,
             finished: AtomicBool::new(false),
             output: output.clone(),
         };
         let interrupt = AtomicBool::new(false);
         let result = thread::scope(|scope| {
             let worker = scope.spawn(|| {
-                let result = client.run_turn("th", "initial", &interrupt, commands);
+                let result = client.run_turn("th", "initial", &interrupt, steering_receiver);
                 mailbox.finished.store(true, Ordering::Release);
                 result
             });
@@ -1386,12 +1388,12 @@ mod steering_tests {
 
     #[test]
     fn caller_timeout_is_unknown_and_owner_discards_expired_queued_request() {
-        let (mailbox, commands) = CodexSteering::channel();
+        let (steering_sender, steering_receiver) = CodexSteering::channel();
         assert!(matches!(
-            mailbox.steer("queued", Instant::now() + Duration::from_millis(10)),
+            steering_sender.steer("queued", Instant::now() + Duration::from_millis(10)),
             Err(SteeringError::AcceptanceUnknown { .. })
         ));
-        let request = commands.recv().unwrap();
+        let request = steering_receiver.recv().unwrap();
         assert!(Instant::now() >= request.deadline);
         let mut client = CodexClient {
             reader: io::Cursor::new(Vec::<u8>::new()),
@@ -1418,18 +1420,23 @@ mod steering_tests {
 
     #[test]
     fn driver_exit_without_a_reply_is_unknown_and_later_calls_are_rejected() {
-        let (mailbox, commands) = CodexSteering::channel();
+        let (steering_sender, steering_receiver) = CodexSteering::channel();
         thread::scope(|scope| {
-            let caller = scope.spawn(|| mailbox.steer("queued", deadline()));
-            let request = commands.recv_timeout(Duration::from_secs(1)).unwrap();
+            let caller = scope.spawn(|| steering_sender.steer("queued", deadline()));
+            let request = steering_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap();
             drop(request);
             assert!(matches!(
                 caller.join().unwrap(),
                 Err(SteeringError::AcceptanceUnknown { .. })
             ));
         });
-        drop(commands);
-        assert_rejected(mailbox.steer("after exit", deadline()), "agent_exited");
+        drop(steering_receiver);
+        assert_rejected(
+            steering_sender.steer("after exit", deadline()),
+            "agent_exited",
+        );
     }
 
     #[test]

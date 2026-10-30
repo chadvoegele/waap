@@ -26,7 +26,6 @@ impl SocketConnection {
     }
 
     pub(in crate::agent) fn read_frame(&mut self) -> io::Result<Vec<u8>> {
-        // Each connection carries one exchange; bound allocation before reading.
         let mut frame = Vec::new();
         BufReader::new((&mut self.stream).take(MAX_FRAME_BYTES as u64))
             .read_until(b'\n', &mut frame)?;

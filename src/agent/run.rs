@@ -165,7 +165,6 @@ pub(super) fn wait_with_control(
             .spawn_scoped(scope, move || {
                 server_ref.run(|connection, completed| handler.serve(connection, completed))
             })?;
-        // Keep backend waiting on the owner thread while control I/O runs independently.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle.wait()))
             .unwrap_or_else(|_| Err(io::Error::other("agent wait panicked")));
         server.shutdown();

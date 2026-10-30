@@ -46,7 +46,6 @@ pub(super) struct ResponseError {
 pub(super) fn parse_request(frame: &[u8]) -> Result<Request, Response> {
     let value: Value = serde_json::from_slice(frame)
         .map_err(|_| rejection(None, "invalid_request", "Expected a UTF-8 JSON request."))?;
-    // Preserve a trustworthy ID in schema-error replies, even if other fields fail.
     let id = value
         .get("request_id")
         .and_then(Value::as_str)
