@@ -129,8 +129,11 @@ fn run_started_agent(
     let repository_root = repository_root.canonicalize()?;
     let control_root = control_root?;
     let socket_path = SocketPath::for_agent(&control_root, agent_id)?;
+    let runtime = super::runtime::new()?;
     let mut worktree = AgentWorktree::create(&repository_root, agent_id)?;
     let prompt = build_agent_goal(waap_root, agent_id);
+    // Register process/signal I/O against this runtime during backend startup.
+    let _entered = runtime.enter();
     let run_result = backend
         .start(StartContext {
             agent_id,
@@ -147,32 +150,40 @@ fn run_started_agent(
                 system.clone(),
             )?;
             let listener = SocketListener::bind(socket_path)?;
-            wait_with_control(ControlServer::new(listener)?, started.handle.as_ref())
+            runtime.block_on(wait_with_control_async(
+                ControlServer::new(listener),
+                started.handle.as_ref(),
+            ))
         });
     let cleanup_result = worktree.cleanup();
     collapse_errors(run_result, cleanup_result)
 }
 
+#[cfg(test)]
 pub(super) fn wait_with_control(
+    server: ControlServer,
+    handle: &dyn RunHandle,
+) -> io::Result<RunOutcome> {
+    super::runtime::new()?.block_on(wait_with_control_async(server, handle))
+}
+
+async fn wait_with_control_async(
     mut server: ControlServer,
     handle: &dyn RunHandle,
 ) -> io::Result<RunOutcome> {
-    let outcome = std::thread::scope(|scope| {
-        let handler = ControlRequestHandler::new(handle);
-        let server_ref = &server;
-        let worker = std::thread::Builder::new()
-            .name("waap-control".to_string())
-            .spawn_scoped(scope, move || {
-                server_ref.run(|connection, completed| handler.serve(connection, completed))
-            })?;
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle.wait()))
-            .unwrap_or_else(|_| Err(io::Error::other("agent wait panicked")));
-        server.shutdown();
-        if worker.join().is_err() {
-            log::error!("control server panicked");
-        }
-        outcome
-    });
+    use futures_util::FutureExt;
+    let handler = ControlRequestHandler::new(handle);
+    let (outcome, ()) = tokio::join!(
+        async {
+            let outcome = std::panic::AssertUnwindSafe(async { handle.wait().await })
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| Err(io::Error::other("agent wait panicked")));
+            server.shutdown();
+            outcome
+        },
+        server.run(|connection| handler.serve(connection))
+    );
     collapse_errors(outcome, server.close())
 }
 

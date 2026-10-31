@@ -3,7 +3,7 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 
-use super::{SocketConnection, SocketPath};
+use super::SocketPath;
 
 pub(in crate::agent) struct SocketListener {
     listener: Option<UnixListener>,
@@ -11,9 +11,8 @@ pub(in crate::agent) struct SocketListener {
 }
 
 impl SocketListener {
-    pub(in crate::agent) fn fd(&self) -> std::os::fd::RawFd {
-        use std::os::fd::AsRawFd;
-        self.listener.as_ref().unwrap().as_raw_fd()
+    pub(in crate::agent) fn async_listener(&self) -> io::Result<tokio::net::UnixListener> {
+        tokio::net::UnixListener::from_std(self.listener.as_ref().unwrap().try_clone()?)
     }
 
     pub(in crate::agent) fn bind(path: SocketPath) -> io::Result<Self> {
@@ -28,11 +27,6 @@ impl SocketListener {
         fs::set_permissions(listener.path.as_path(), fs::Permissions::from_mode(0o600))?;
         listener.listener.as_ref().unwrap().set_nonblocking(true)?;
         Ok(listener)
-    }
-
-    pub(in crate::agent) fn accept(&self) -> io::Result<SocketConnection> {
-        let (stream, _) = self.listener.as_ref().unwrap().accept()?;
-        Ok(SocketConnection::new(stream))
     }
 
     pub(in crate::agent) fn close(&mut self) -> io::Result<()> {

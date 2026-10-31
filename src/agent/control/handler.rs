@@ -1,11 +1,10 @@
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use super::super::backend::RunHandle;
 use super::protocol::{build_rejection, build_response, parse_request, Request, Response};
-use super::socket::SocketConnection;
-use super::{ACK_TIMEOUT, IO_TIMEOUT};
+use super::socket::AsyncSocketConnection;
+use super::ACK_TIMEOUT;
 
 pub(in crate::agent) struct ControlRequestHandler<'a> {
     run: &'a dyn RunHandle,
@@ -16,31 +15,22 @@ impl<'a> ControlRequestHandler<'a> {
         Self { run }
     }
 
-    fn handle(&self, request: Request, completed: bool) -> Response {
-        if completed {
-            build_rejection(
-                Some(&request.request_id),
-                "agent_exited",
-                "Agent exited before steering dispatch.",
-            )
-        } else {
-            build_response(
-                &request.request_id,
-                self.run
-                    .steer(&request.prompt, Instant::now() + ACK_TIMEOUT),
-            )
-        }
+    async fn handle(&self, request: Request) -> Response {
+        build_response(
+            &request.request_id,
+            self.run
+                .steer(&request.prompt, Instant::now() + ACK_TIMEOUT)
+                .await,
+        )
     }
 
-    pub(in crate::agent) fn serve(
+    pub(in crate::agent) async fn serve(
         &self,
-        mut connection: SocketConnection,
-        completed: &AtomicBool,
+        mut connection: AsyncSocketConnection,
     ) -> io::Result<()> {
-        connection.set_timeouts(IO_TIMEOUT, IO_TIMEOUT)?;
-        let response = match connection.read_frame() {
+        let response = match connection.read_frame().await {
             Ok(frame) => match parse_request(&frame) {
-                Ok(request) => self.handle(request, completed.load(Ordering::Acquire)),
+                Ok(request) => self.handle(request).await,
                 Err(response) => response,
             },
             Err(error) if error.kind() == io::ErrorKind::InvalidData => build_rejection(
@@ -50,7 +40,9 @@ impl<'a> ControlRequestHandler<'a> {
             ),
             Err(error) => return Err(error),
         };
-        connection.write_frame(&serde_json::to_vec(&response)?)
+        connection
+            .write_frame(&serde_json::to_vec(&response)?)
+            .await
     }
 }
 
@@ -59,25 +51,36 @@ mod tests {
     use super::*;
     use crate::agent::backend::{RunOutcome, SteeringError};
 
-    struct ExitedRun;
+    struct RejectingRun;
 
-    impl RunHandle for ExitedRun {
-        fn wait(&self) -> io::Result<RunOutcome> {
+    impl RunHandle for RejectingRun {
+        fn wait(&self) -> crate::agent::backend::BackendFuture<'_, io::Result<RunOutcome>> {
             panic!("handler must not wait for the backend")
         }
 
-        fn steer(&self, _: &str, _: Instant) -> Result<(), SteeringError> {
-            panic!("handler must not steer an exited backend")
+        fn steer<'a>(
+            &'a self,
+            _: &'a str,
+            _: Instant,
+        ) -> crate::agent::backend::BackendFuture<'a, Result<(), SteeringError>> {
+            Box::pin(async {
+                Err(SteeringError::Rejected {
+                    code: "no_active_turn",
+                    message: "No active turn".to_string(),
+                })
+            })
         }
     }
 
     #[test]
-    fn completed_run_is_rejected_without_backend_dispatch() {
-        let request = Request::steer("do not dispatch");
+    fn backend_rejection_is_forwarded_without_waiting_for_run_completion() {
+        let request = Request::steer("steer");
         let id = request.request_id.clone();
-        let response = ControlRequestHandler::new(&ExitedRun).handle(request, true);
+        let response = crate::agent::runtime::block_on(
+            ControlRequestHandler::new(&RejectingRun).handle(request),
+        );
         assert_eq!(response.request_id.as_deref(), Some(id.as_str()));
         assert_eq!(response.accepted, Some(false));
-        assert_eq!(response.error.unwrap().code, "agent_exited");
+        assert_eq!(response.error.unwrap().code, "no_active_turn");
     }
 }

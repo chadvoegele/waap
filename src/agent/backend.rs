@@ -31,10 +31,18 @@ pub(super) struct StartedRun {
     pub(super) handle: Box<dyn RunHandle>,
 }
 
-pub(super) trait RunHandle: Sync {
-    fn wait(&self) -> io::Result<RunOutcome>;
+pub(super) type BackendFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + 'a>>;
 
-    fn steer(&self, prompt: &str, deadline: Instant) -> Result<(), SteeringError>;
+// Futures stay on the runner's current-thread runtime. Blocking backends must
+// offload their waits rather than block the shared I/O executor.
+pub(super) trait RunHandle: Sync {
+    fn wait(&self) -> BackendFuture<'_, io::Result<RunOutcome>>;
+
+    fn steer<'a>(
+        &'a self,
+        prompt: &'a str,
+        deadline: Instant,
+    ) -> BackendFuture<'a, Result<(), SteeringError>>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,28 +159,45 @@ pub(super) mod fake {
     }
 
     impl RunHandle for FakeRun {
-        fn wait(&self) -> io::Result<RunOutcome> {
-            self.wait_calls.fetch_add(1, Ordering::SeqCst);
-            let state = self.state.lock().unwrap().take().unwrap();
-            if let Some(action) = state.action {
-                action()?;
-            }
-            if let Some(error) = state.error {
-                Err(io::Error::other(error))
-            } else {
-                Ok(state.outcome)
-            }
+        fn wait(&self) -> BackendFuture<'_, io::Result<RunOutcome>> {
+            Box::pin(async move {
+                self.wait_calls.fetch_add(1, Ordering::SeqCst);
+                let state = self.state.lock().unwrap().take().unwrap();
+                tokio::task::spawn_blocking(move || {
+                    if let Some(action) = state.action {
+                        action()?;
+                    }
+                    if let Some(error) = state.error {
+                        Err(io::Error::other(error))
+                    } else {
+                        Ok(state.outcome)
+                    }
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    if error.is_panic() {
+                        std::panic::resume_unwind(error.into_panic());
+                    }
+                    Err(io::Error::other(error))
+                })
+            })
         }
 
-        fn steer(&self, prompt: &str, deadline: Instant) -> Result<(), SteeringError> {
-            self.steer_calls
-                .lock()
-                .unwrap()
-                .push((prompt.to_string(), deadline));
-            match &self.steer_error {
-                Some(error) => Err(error.clone()),
-                None => Ok(()),
-            }
+        fn steer<'a>(
+            &'a self,
+            prompt: &'a str,
+            deadline: Instant,
+        ) -> BackendFuture<'a, Result<(), SteeringError>> {
+            Box::pin(async move {
+                self.steer_calls
+                    .lock()
+                    .unwrap()
+                    .push((prompt.to_string(), deadline));
+                match &self.steer_error {
+                    Some(error) => Err(error.clone()),
+                    None => Ok(()),
+                }
+            })
         }
     }
 

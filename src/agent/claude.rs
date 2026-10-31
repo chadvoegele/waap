@@ -9,8 +9,8 @@ use super::process::AgentProcess;
 use uuid::Uuid;
 
 use super::backend::{
-    AbortContext, AgentSystemBackend, RunHandle, RunOutcome, StartContext, StartedRun,
-    SteeringError,
+    AbortContext, AgentSystemBackend, BackendFuture, RunHandle, RunOutcome, StartContext,
+    StartedRun, SteeringError,
 };
 
 pub(super) struct ClaudeBackend {
@@ -38,7 +38,7 @@ impl AgentSystemBackend for ClaudeBackend {
         Ok(StartedRun {
             session_id,
             handle: Box::new(ClaudeRun {
-                child: Mutex::new(spawn_claude_attached(&command)?),
+                child: Mutex::new(Some(spawn_claude_attached(&command)?)),
             }),
         })
     }
@@ -49,20 +49,31 @@ impl AgentSystemBackend for ClaudeBackend {
 }
 
 struct ClaudeRun {
-    child: Mutex<AgentProcess>,
+    child: Mutex<Option<AgentProcess>>,
 }
 
 impl RunHandle for ClaudeRun {
-    fn wait(&self) -> io::Result<RunOutcome> {
-        let mut child = self
-            .child
-            .lock()
-            .map_err(|_| io::Error::other("Claude process lock poisoned"))?;
-        Ok(RunOutcome::from_exit_status(child.wait()?))
+    fn wait(&self) -> BackendFuture<'_, io::Result<RunOutcome>> {
+        Box::pin(async move {
+            let mut child = self
+                .child
+                .lock()
+                .map_err(|_| io::Error::other("Claude process lock poisoned"))?
+                .take()
+                .ok_or_else(|| io::Error::other("Claude run already waited"))?;
+            // Attached process waiting is blocking; never block the async I/O loop.
+            tokio::task::spawn_blocking(move || Ok(RunOutcome::from_exit_status(child.wait()?)))
+                .await
+                .map_err(io::Error::other)?
+        })
     }
 
-    fn steer(&self, _prompt: &str, _deadline: Instant) -> Result<(), SteeringError> {
-        Err(SteeringError::not_implemented("claude"))
+    fn steer<'a>(
+        &'a self,
+        _prompt: &'a str,
+        _deadline: Instant,
+    ) -> BackendFuture<'a, Result<(), SteeringError>> {
+        Box::pin(async { Err(SteeringError::not_implemented("claude")) })
     }
 }
 
@@ -171,21 +182,22 @@ mod tests {
             working_dir: std::env::temp_dir(),
         };
         let run = ClaudeRun {
-            child: Mutex::new(spawn_claude_attached(&command).unwrap()),
+            child: Mutex::new(Some(spawn_claude_attached(&command).unwrap())),
         };
         let wait_lock = run.child.lock().unwrap();
-        crate::agent::control::tests::assert_backend_socket_rejection(
-            |prompt, deadline| run.steer(prompt, deadline),
-            "claude",
-        );
-        let error = run.steer("steer", Instant::now()).unwrap_err();
+        crate::agent::control::tests::assert_backend_socket_rejection(&run, "claude");
+        let error =
+            crate::agent::runtime::block_on(run.steer("steer", Instant::now())).unwrap_err();
         assert_eq!(error, SteeringError::not_implemented("claude"));
         assert_eq!(
             error.to_string(),
             "steering not implemented for backend claude"
         );
         drop(wait_lock);
-        assert_eq!(run.wait().unwrap(), super::RunOutcome::Completed);
+        assert_eq!(
+            crate::agent::runtime::block_on(run.wait()).unwrap(),
+            super::RunOutcome::Completed
+        );
     }
 
     #[test]

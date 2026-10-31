@@ -17,9 +17,10 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 pub(in crate::agent) mod tests {
+    use super::socket::AsyncSocketConnection;
     use super::socket::MAX_FRAME_BYTES;
     use super::*;
-    use crate::agent::backend::{RunHandle, RunOutcome, SteeringError};
+    use crate::agent::backend::{BackendFuture, RunHandle, RunOutcome, SteeringError};
     use crate::root::{find_control_root_in, ControlRoot};
     use serde_json::{json, Value};
     use std::fs;
@@ -30,7 +31,7 @@ pub(in crate::agent) mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::{
         mpsc::{self, Receiver},
-        Mutex,
+        Arc, Mutex,
     };
     use std::thread;
     use std::time::Instant;
@@ -74,27 +75,38 @@ pub(in crate::agent) mod tests {
 
     struct Run<F> {
         steer: F,
-        completion: Mutex<Receiver<()>>,
+        completion: Arc<Mutex<Receiver<()>>>,
     }
 
     impl<F: Fn(&str, Instant) -> Result<(), SteeringError> + Sync> RunHandle for Run<F> {
-        fn wait(&self) -> io::Result<RunOutcome> {
-            self.completion
-                .lock()
-                .unwrap()
-                .recv_timeout(Duration::from_secs(10))
-                .unwrap();
-            Ok(RunOutcome::Completed)
+        fn wait(&self) -> BackendFuture<'_, io::Result<RunOutcome>> {
+            let completion = Arc::clone(&self.completion);
+            Box::pin(async move {
+                tokio::task::spawn_blocking(move || {
+                    completion
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(10))
+                        .unwrap();
+                    Ok(RunOutcome::Completed)
+                })
+                .await
+                .map_err(io::Error::other)?
+            })
         }
-        fn steer(&self, prompt: &str, deadline: Instant) -> Result<(), SteeringError> {
-            (self.steer)(prompt, deadline)
+        fn steer<'a>(
+            &'a self,
+            prompt: &'a str,
+            deadline: Instant,
+        ) -> BackendFuture<'a, Result<(), SteeringError>> {
+            Box::pin(async move { (self.steer)(prompt, deadline) })
         }
     }
 
     fn bind_server(root: &ControlRoot, agent_id: &str) -> io::Result<ControlServer> {
-        ControlServer::new(SocketListener::bind(SocketPath::for_agent(
-            root, agent_id,
-        )?)?)
+        Ok(ControlServer::new(SocketListener::bind(
+            SocketPath::for_agent(root, agent_id)?,
+        )?))
     }
 
     fn read_frame(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
@@ -104,9 +116,16 @@ pub(in crate::agent) mod tests {
     fn serve_connection(
         stream: UnixStream,
         run: &dyn RunHandle,
-        completed: &AtomicBool,
+        _completed: &AtomicBool,
     ) -> io::Result<()> {
-        ControlRequestHandler::new(run).serve(SocketConnection::new(stream), completed)
+        stream.set_nonblocking(true)?;
+        crate::agent::runtime::block_on(async {
+            ControlRequestHandler::new(run)
+                .serve(AsyncSocketConnection::new(
+                    tokio::net::UnixStream::from_std(stream)?,
+                ))
+                .await
+        })
     }
 
     fn frame(prompt: &str) -> Vec<u8> {
@@ -142,7 +161,7 @@ pub(in crate::agent) mod tests {
         });
         fixture
             .wait(&Run {
-                completion: Mutex::new(completion),
+                completion: Arc::new(Mutex::new(completion)),
                 steer: |received: &str, deadline| {
                     assert_eq!(received, prompt);
                     assert!(deadline > Instant::now());
@@ -156,70 +175,115 @@ pub(in crate::agent) mod tests {
         );
     }
 
-    #[test]
-    fn delayed_acknowledgement_does_not_serialize_other_handlers() {
-        let fixture = Fixture::new();
-        let path = fixture.path.clone();
-        let (entered, dispatched) = mpsc::channel();
-        let (release, resume) = mpsc::channel();
-        let resume = Mutex::new(resume);
-        let (complete, completion) = mpsc::channel();
-        let calls = Mutex::new(Vec::new());
-        let client = thread::spawn(move || {
-            let mut first = connect(&path);
-            first.write_all(&frame("first")).unwrap();
-            dispatched.recv_timeout(Duration::from_secs(3)).unwrap();
-            let mut second = connect(&path);
-            second.write_all(&frame("second")).unwrap();
-            // The second response arrives while the first backend call is blocked.
-            assert_eq!(read_response(second)["accepted"], true);
-            release.send(()).unwrap();
-            assert_eq!(read_response(first)["accepted"], true);
-            complete.send(()).unwrap();
-        });
-        fixture
-            .wait(&Run {
-                completion: Mutex::new(completion),
-                steer: |prompt: &str, _| {
-                    calls.lock().unwrap().push(prompt.to_string());
+    #[tokio::test(flavor = "current_thread")]
+    async fn delayed_ack_does_not_serialize_handlers_and_shutdown_cancels_reply_wait() {
+        struct HeldRun {
+            entered: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+        impl RunHandle for HeldRun {
+            fn wait(&self) -> BackendFuture<'_, io::Result<RunOutcome>> {
+                Box::pin(std::future::pending())
+            }
+            fn steer<'a>(
+                &'a self,
+                prompt: &'a str,
+                _: Instant,
+            ) -> BackendFuture<'a, Result<(), SteeringError>> {
+                Box::pin(async move {
                     if prompt == "first" {
-                        entered.send(()).unwrap();
-                        resume
+                        self.entered.notify_one();
+                        self.release.notified().await;
+                    }
+                    Ok(())
+                })
+            }
+        }
+        let mut fixture = Fixture::new();
+        let run = HeldRun {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        };
+        let handler = ControlRequestHandler::new(&run);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(
+                fixture.server.run(|connection| handler.serve(connection)),
+                async {
+                    let mut first = AsyncSocketConnection::new(
+                        tokio::net::UnixStream::connect(&fixture.path)
+                            .await
+                            .unwrap(),
+                    );
+                    let bytes = frame("first");
+                    first.write_frame(&bytes[..bytes.len() - 1]).await.unwrap();
+                    run.entered.notified().await;
+                    let mut second = AsyncSocketConnection::new(
+                        tokio::net::UnixStream::connect(&fixture.path)
+                            .await
+                            .unwrap(),
+                    );
+                    let bytes = frame("second");
+                    second.write_frame(&bytes[..bytes.len() - 1]).await.unwrap();
+                    let reply: Value =
+                        serde_json::from_slice(&second.read_frame().await.unwrap()).unwrap();
+                    assert_eq!(reply["accepted"], true);
+                    run.release.notify_one();
+                    let reply: Value =
+                        serde_json::from_slice(&first.read_frame().await.unwrap()).unwrap();
+                    assert_eq!(reply["accepted"], true);
+                    let mut held = AsyncSocketConnection::new(
+                        tokio::net::UnixStream::connect(&fixture.path)
+                            .await
+                            .unwrap(),
+                    );
+                    let bytes = frame("first");
+                    held.write_frame(&bytes[..bytes.len() - 1]).await.unwrap();
+                    run.entered.notified().await;
+                    fixture.server.shutdown();
+                    assert_eq!(
+                        held.read_frame().await.unwrap_err().kind(),
+                        io::ErrorKind::UnexpectedEof
+                    );
+                }
+            );
+        })
+        .await
+        .unwrap();
+        fixture.server.close().unwrap();
+    }
+
+    #[test]
+    fn backend_and_control_futures_are_polled_on_the_owner_thread() {
+        struct OwnerRun {
+            owner: thread::ThreadId,
+            completion: Arc<Mutex<Receiver<()>>>,
+        }
+        impl RunHandle for OwnerRun {
+            fn wait(&self) -> BackendFuture<'_, io::Result<RunOutcome>> {
+                let completion = Arc::clone(&self.completion);
+                Box::pin(async move {
+                    assert_eq!(thread::current().id(), self.owner);
+                    tokio::task::spawn_blocking(move || {
+                        completion
                             .lock()
                             .unwrap()
                             .recv_timeout(Duration::from_secs(3))
                             .unwrap();
-                    } else {
-                        assert_eq!(prompt, "second");
-                    }
-                    Ok(())
-                },
-            })
-            .unwrap();
-        client.join().unwrap();
-        assert_eq!(*calls.lock().unwrap(), ["first", "second"]);
-    }
-
-    #[test]
-    fn backend_wait_stays_on_its_owner_thread_and_control_runs_in_background() {
-        struct OwnerRun {
-            owner: thread::ThreadId,
-            completion: Mutex<Receiver<()>>,
-        }
-        impl RunHandle for OwnerRun {
-            fn wait(&self) -> io::Result<RunOutcome> {
-                assert_eq!(thread::current().id(), self.owner);
-                self.completion
-                    .lock()
-                    .unwrap()
-                    .recv_timeout(Duration::from_secs(3))
+                    })
+                    .await
                     .unwrap();
-                Ok(RunOutcome::Completed)
+                    Ok(RunOutcome::Completed)
+                })
             }
-            fn steer(&self, _: &str, _: Instant) -> Result<(), SteeringError> {
-                assert_ne!(thread::current().id(), self.owner);
-                assert_eq!(thread::current().name(), Some("waap-control-request"));
-                Ok(())
+            fn steer<'a>(
+                &'a self,
+                _: &'a str,
+                _: Instant,
+            ) -> BackendFuture<'a, Result<(), SteeringError>> {
+                Box::pin(async move {
+                    assert_eq!(thread::current().id(), self.owner);
+                    Ok(())
+                })
             }
         }
         let fixture = Fixture::new();
@@ -234,7 +298,7 @@ pub(in crate::agent) mod tests {
         fixture
             .wait(&OwnerRun {
                 owner: thread::current().id(),
-                completion: Mutex::new(completion),
+                completion: Arc::new(Mutex::new(completion)),
             })
             .unwrap();
         client.join().unwrap();
@@ -278,7 +342,7 @@ pub(in crate::agent) mod tests {
             let (mut client, server) = UnixStream::pair().unwrap();
             let (_complete, completion) = mpsc::channel();
             let run = Run {
-                completion: Mutex::new(completion),
+                completion: Arc::new(Mutex::new(completion)),
                 steer: |_: &str, _| panic!("invalid request dispatched"),
             };
             thread::scope(|scope| {
@@ -352,7 +416,7 @@ pub(in crate::agent) mod tests {
         let path = fixture.path.clone();
         fixture
             .wait(&Run {
-                completion: Mutex::new(completion),
+                completion: Arc::new(Mutex::new(completion)),
                 steer: |_: &str, _| panic!("unexpected dispatch"),
             })
             .unwrap();
@@ -403,10 +467,35 @@ pub(in crate::agent) mod tests {
         assert!(bind_server(&root, "aa-2").is_err());
     }
 
-    pub(in crate::agent) fn assert_backend_socket_rejection(
-        steer: impl Fn(&str, Instant) -> Result<(), SteeringError> + Sync,
-        backend: &str,
-    ) {
+    pub(in crate::agent) fn assert_backend_socket_rejection(target: &dyn RunHandle, backend: &str) {
+        struct Proxy<'a> {
+            target: &'a dyn RunHandle,
+            completion: Arc<Mutex<Receiver<()>>>,
+        }
+        impl RunHandle for Proxy<'_> {
+            fn wait(&self) -> BackendFuture<'_, io::Result<RunOutcome>> {
+                let completion = Arc::clone(&self.completion);
+                Box::pin(async move {
+                    tokio::task::spawn_blocking(move || {
+                        completion
+                            .lock()
+                            .unwrap()
+                            .recv_timeout(Duration::from_secs(3))
+                            .unwrap();
+                        Ok(RunOutcome::Completed)
+                    })
+                    .await
+                    .map_err(io::Error::other)?
+                })
+            }
+            fn steer<'a>(
+                &'a self,
+                prompt: &'a str,
+                deadline: Instant,
+            ) -> BackendFuture<'a, Result<(), SteeringError>> {
+                self.target.steer(prompt, deadline)
+            }
+        }
         let fixture = Fixture::new();
         let path = fixture.path.clone();
         let (complete, completion) = mpsc::channel();
@@ -418,9 +507,9 @@ pub(in crate::agent) mod tests {
             result
         });
         fixture
-            .wait(&Run {
-                steer,
-                completion: Mutex::new(completion),
+            .wait(&Proxy {
+                target,
+                completion: Arc::new(Mutex::new(completion)),
             })
             .unwrap();
         let value = client.join().unwrap();

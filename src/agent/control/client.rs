@@ -237,10 +237,8 @@ mod tests {
             .to_string()
             .contains("cannot connect"));
         drop(UnixListener::bind(&path).unwrap());
-        assert!(submit(&path, "data")
-            .unwrap_err()
-            .to_string()
-            .contains("stale endpoint"));
+        let error = submit(&path, "data").unwrap_err();
+        assert!(error.to_string().contains("stale endpoint"), "{error}");
     }
 
     #[test]

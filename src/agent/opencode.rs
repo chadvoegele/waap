@@ -8,8 +8,8 @@ use reqwest::blocking::{Client, Response};
 use serde_json::{json, Value as JsonValue};
 
 use super::backend::{
-    AbortContext, AgentSystemBackend, RunHandle, RunOutcome, StartContext, StartedRun,
-    SteeringError,
+    AbortContext, AgentSystemBackend, BackendFuture, RunHandle, RunOutcome, StartContext,
+    StartedRun, SteeringError,
 };
 
 pub(super) struct OpencodeBackend {
@@ -62,19 +62,31 @@ struct OpencodeRun {
 }
 
 impl RunHandle for OpencodeRun {
-    fn wait(&self) -> io::Result<RunOutcome> {
-        let events = self
-            .events
-            .lock()
-            .map_err(|_| io::Error::other("OpenCode event stream lock poisoned"))?
-            .take()
-            .ok_or_else(|| io::Error::other("OpenCode run already waited"))?;
-        let stdout = io::stdout();
-        monitor_opencode_events(BufReader::new(events), &self.session_id, &mut stdout.lock())
+    fn wait(&self) -> BackendFuture<'_, io::Result<RunOutcome>> {
+        Box::pin(async move {
+            let events = self
+                .events
+                .lock()
+                .map_err(|_| io::Error::other("OpenCode event stream lock poisoned"))?
+                .take()
+                .ok_or_else(|| io::Error::other("OpenCode run already waited"))?;
+            let session_id = self.session_id.clone();
+            // The existing HTTP/SSE backend remains blocking, isolated from async I/O.
+            tokio::task::spawn_blocking(move || {
+                let stdout = io::stdout();
+                monitor_opencode_events(BufReader::new(events), &session_id, &mut stdout.lock())
+            })
+            .await
+            .map_err(io::Error::other)?
+        })
     }
 
-    fn steer(&self, _prompt: &str, _deadline: Instant) -> Result<(), SteeringError> {
-        Err(SteeringError::not_implemented("opencode"))
+    fn steer<'a>(
+        &'a self,
+        _prompt: &'a str,
+        _deadline: Instant,
+    ) -> BackendFuture<'a, Result<(), SteeringError>> {
+        Box::pin(async { Err(SteeringError::not_implemented("opencode")) })
     }
 }
 
@@ -668,19 +680,22 @@ mod tests {
 
         assert_eq!(started.session_id, "ses_123");
         crate::agent::control::tests::assert_backend_socket_rejection(
-            |prompt, deadline| started.handle.steer(prompt, deadline),
+            started.handle.as_ref(),
             "opencode",
         );
-        let error = started
-            .handle
-            .steer("steer", std::time::Instant::now())
-            .unwrap_err();
+        let error = crate::agent::runtime::block_on(
+            started.handle.steer("steer", std::time::Instant::now()),
+        )
+        .unwrap_err();
         assert_eq!(error, super::SteeringError::not_implemented("opencode"));
         assert_eq!(
             error.to_string(),
             "steering not implemented for backend opencode"
         );
-        assert_eq!(started.handle.wait().unwrap(), RunOutcome::Completed);
+        assert_eq!(
+            crate::agent::runtime::block_on(started.handle.wait()).unwrap(),
+            RunOutcome::Completed
+        );
         server.join().unwrap();
     }
 
