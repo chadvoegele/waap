@@ -40,7 +40,7 @@ impl AgentSystemBackend for CodexBackend {
         let mut server = spawn_codex_app_server(&self.config, context.worktree_dir)?;
         server.client.initialize()?;
         let thread_id = server.client.thread_start(context.worktree_dir)?;
-        let (steering_sender, steering_receiver) = CodexSteering::channel();
+        let (steering_sender, steering_receiver) = request_reply::channel(1);
         Ok(StartedRun {
             session_id: thread_id.clone(),
             handle: Box::new(CodexRun {
@@ -96,7 +96,7 @@ struct CodexRunState {
 struct CodexRun {
     state: Mutex<Option<CodexRunState>>,
     interrupt: InterruptHandler,
-    steering_sender: CodexSteering,
+    steering_sender: request_reply::Client<String, SteeringResult>,
     thread_id: String,
     prompt: String,
 }
@@ -127,8 +127,31 @@ impl RunHandle for CodexRun {
         }
     }
 
-    fn steer(&self, prompt: &str, deadline: Instant) -> Result<(), SteeringError> {
-        self.steering_sender.steer(prompt, deadline)
+    fn steer(&self, prompt: &str, deadline: Instant) -> SteeringResult {
+        if Instant::now() >= deadline {
+            return Err(reject(
+                "timeout",
+                "Steering request expired before Codex dispatch",
+            ));
+        }
+        self.steering_sender
+            .call(prompt.to_string(), deadline)
+            .unwrap_or_else(|error| {
+                Err(match error {
+                    request_reply::CallError::QueueFull => {
+                        reject("busy", "Codex steering dispatch is busy")
+                    }
+                    request_reply::CallError::ReceiverClosed => reject(
+                        "agent_exited",
+                        "Codex protocol owner exited before steering dispatch",
+                    ),
+                    request_reply::CallError::Timeout | request_reply::CallError::ReplyClosed => {
+                        build_acceptance_unknown_error(
+                            "no reply received before the deadline or driver exit",
+                        )
+                    }
+                })
+            })
     }
 }
 
@@ -463,10 +486,6 @@ type SteeringResult = Result<(), SteeringError>;
 
 type SteerRequest = request_reply::Call<String, SteeringResult>;
 
-struct CodexSteering {
-    sender: request_reply::Client<String, SteeringResult>,
-}
-
 fn reject(code: &'static str, message: &str) -> SteeringError {
     SteeringError::Rejected {
         code,
@@ -479,40 +498,6 @@ fn build_acceptance_unknown_error(reason: &str) -> SteeringError {
         message: format!(
             "Codex steering acceptance is unknown: {reason}; do not retry automatically"
         ),
-    }
-}
-
-impl CodexSteering {
-    fn channel() -> (Self, Receiver<SteerRequest>) {
-        let (sender, steering_receiver) = request_reply::channel(1);
-        (Self { sender }, steering_receiver)
-    }
-
-    fn steer(&self, prompt: &str, deadline: Instant) -> SteeringResult {
-        if Instant::now() >= deadline {
-            return Err(reject(
-                "timeout",
-                "Steering request expired before Codex dispatch",
-            ));
-        }
-        self.sender
-            .call(prompt.to_string(), deadline)
-            .unwrap_or_else(|error| {
-                Err(match error {
-                    request_reply::CallError::QueueFull => {
-                        reject("busy", "Codex steering dispatch is busy")
-                    }
-                    request_reply::CallError::ReceiverClosed => reject(
-                        "agent_exited",
-                        "Codex protocol owner exited before steering dispatch",
-                    ),
-                    request_reply::CallError::Timeout | request_reply::CallError::ReplyClosed => {
-                        build_acceptance_unknown_error(
-                            "no reply received before the deadline or driver exit",
-                        )
-                    }
-                })
-            })
     }
 }
 
@@ -900,15 +885,29 @@ mod steering_tests {
         }
     }
 
+    fn create_test_run() -> (CodexRun, Receiver<SteerRequest>) {
+        let (steering_sender, steering_receiver) = request_reply::channel(1);
+        (
+            CodexRun {
+                state: Mutex::new(None),
+                interrupt: InterruptHandler::register().unwrap(),
+                steering_sender,
+                thread_id: "th".to_string(),
+                prompt: "initial".to_string(),
+            },
+            steering_receiver,
+        )
+    }
+
     struct TestMailbox {
-        steering_sender: CodexSteering,
+        run: CodexRun,
         finished: AtomicBool,
         output: CapturedOutput,
     }
 
     impl TestMailbox {
         fn steer(&self, prompt: &str, deadline: Instant) -> SteeringResult {
-            self.steering_sender.steer(prompt, deadline)
+            self.run.steer(prompt, deadline)
         }
     }
 
@@ -971,9 +970,9 @@ mod steering_tests {
             model: None,
             reasoning_effort: None,
         };
-        let (steering_sender, steering_receiver) = CodexSteering::channel();
+        let (run, steering_receiver) = create_test_run();
         let mailbox = TestMailbox {
-            steering_sender,
+            run,
             finished: AtomicBool::new(false),
             output: output.clone(),
         };
@@ -1404,9 +1403,9 @@ mod steering_tests {
 
     #[test]
     fn caller_timeout_is_unknown_and_owner_discards_expired_queued_request() {
-        let (steering_sender, steering_receiver) = CodexSteering::channel();
+        let (run, steering_receiver) = create_test_run();
         assert!(matches!(
-            steering_sender.steer("queued", Instant::now() + Duration::from_millis(10)),
+            run.steer("queued", Instant::now() + Duration::from_millis(10)),
             Err(SteeringError::AcceptanceUnknown { .. })
         ));
         let request = steering_receiver.recv().unwrap();
@@ -1436,9 +1435,9 @@ mod steering_tests {
 
     #[test]
     fn driver_exit_without_a_reply_is_unknown_and_later_calls_are_rejected() {
-        let (steering_sender, steering_receiver) = CodexSteering::channel();
+        let (run, steering_receiver) = create_test_run();
         thread::scope(|scope| {
-            let caller = scope.spawn(|| steering_sender.steer("queued", deadline()));
+            let caller = scope.spawn(|| run.steer("queued", deadline()));
             let request = steering_receiver
                 .recv_timeout(Duration::from_secs(1))
                 .unwrap();
@@ -1449,10 +1448,7 @@ mod steering_tests {
             ));
         });
         drop(steering_receiver);
-        assert_rejected(
-            steering_sender.steer("after exit", deadline()),
-            "agent_exited",
-        );
+        assert_rejected(run.steer("after exit", deadline()), "agent_exited");
     }
 
     #[test]
