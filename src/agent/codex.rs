@@ -847,7 +847,6 @@ fn parse_steering_response(message: &JsonValue, expected_turn: &str) -> Steering
         return Err(if missing {
             reject("unsupported_backend_version", "Codex app-server does not support turn/steer; upgrade Codex to a version with native turn/steer support")
         } else {
-            // The server's message can echo submitted input; keep routine diagnostics prompt-free.
             reject("backend_rejected", &format!("Codex rejected turn/steer (RPC error code {code}); verify that the turn is still active"))
         });
     }

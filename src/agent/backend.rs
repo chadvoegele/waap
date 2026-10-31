@@ -32,10 +32,8 @@ pub(super) struct StartedRun {
 }
 
 pub(super) trait RunHandle: Sync {
-    /// Called once by the run owner; steering may run concurrently.
     fn wait(&self) -> io::Result<RunOutcome>;
 
-    /// Returns only after acknowledgement or failure, within the caller's deadline.
     fn steer(&self, prompt: &str, deadline: Instant) -> Result<(), SteeringError>;
 }
 
