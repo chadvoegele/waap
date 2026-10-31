@@ -7,9 +7,13 @@ use std::process::{ChildStdin, ChildStdout, Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
+#[cfg(test)]
 use std::thread;
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
+use super::readiness::{self, Wakeup};
 use super::request_reply;
 
 use serde_json::{json, Value as JsonValue};
@@ -48,8 +52,8 @@ impl AgentSystemBackend for CodexBackend {
                     server,
                     steering_receiver,
                 })),
+                steering_sender: steering_sender.with_wakeup(Arc::clone(&interrupt.wakeup)),
                 interrupt,
-                steering_sender,
                 thread_id,
                 prompt: context.prompt.to_string(),
             }),
@@ -69,22 +73,40 @@ struct CodexAppServer {
 struct InterruptHandler {
     flag: Arc<AtomicBool>,
     registration: signal_hook::SigId,
+    wake_registration: signal_hook::SigId,
+    wakeup: Arc<Wakeup>,
 }
 
 impl InterruptHandler {
     fn register() -> io::Result<Self> {
+        let wakeup = Arc::new(Wakeup::new()?);
+        let writer = wakeup.signal_writer()?;
         let flag = Arc::new(AtomicBool::new(false));
         let registration =
             signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&flag)).map_err(
                 |error| io::Error::other(format!("failed to install SIGTERM handler: {error}")),
             )?;
-        Ok(Self { flag, registration })
+        let wake_registration =
+            match signal_hook::low_level::pipe::register(signal_hook::consts::SIGTERM, writer) {
+                Ok(registration) => registration,
+                Err(error) => {
+                    signal_hook::low_level::unregister(registration);
+                    return Err(error);
+                }
+            };
+        Ok(Self {
+            flag,
+            registration,
+            wake_registration,
+            wakeup,
+        })
     }
 }
 
 impl Drop for InterruptHandler {
     fn drop(&mut self) {
         signal_hook::low_level::unregister(self.registration);
+        signal_hook::low_level::unregister(self.wake_registration);
     }
 }
 
@@ -119,6 +141,11 @@ impl RunHandle for CodexRun {
             &self.prompt,
             &self.interrupt.flag,
             steering_receiver,
+            TurnIo {
+                read: server.client.reader.get_ref().as_raw_fd(),
+                write: server.client.writer.as_raw_fd(),
+                wakeup: &self.interrupt.wakeup,
+            },
         )?;
         if status.is_success() {
             Ok(RunOutcome::Completed)
@@ -545,6 +572,12 @@ struct TurnState<'a> {
     interrupt_request_id: Option<i64>,
 }
 
+struct TurnIo<'a> {
+    read: std::os::fd::RawFd,
+    write: std::os::fd::RawFd,
+    wakeup: &'a Wakeup,
+}
+
 impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
     fn run_turn(
         &mut self,
@@ -552,6 +585,7 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
         prompt: &str,
         interrupt: &AtomicBool,
         steering_receiver: Receiver<SteerRequest>,
+        io: TurnIo<'_>,
     ) -> io::Result<TurnStatus> {
         let mut turn = TurnState {
             thread_id,
@@ -574,10 +608,13 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
         );
         let mut buffer = Vec::new();
         loop {
+            // Drain notifications before the channel: a producer enqueues before
+            // signalling, so a racing enqueue is either observed or wakes poll.
+            io.wakeup.drain()?;
             if let Some(pending_steer) = &mut turn.pending_steer {
                 pending_steer.expire(Instant::now());
             }
-            if let Ok(request) = steering_receiver.try_recv() {
+            while let Ok(request) = steering_receiver.try_recv() {
                 self.dispatch_steering(&mut turn, request);
             }
             if turn.interrupt_request_id.is_none() && interrupt.load(Ordering::SeqCst) {
@@ -598,7 +635,24 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
                 }
                 Ok(count) => buffer.extend_from_slice(&chunk[..count]),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(2));
+                    let deadline = turn
+                        .pending_steer
+                        .as_ref()
+                        .filter(|pending| pending.request.has_reply_sender())
+                        .map(|pending| pending.request.deadline);
+                    let mut fds = [
+                        readiness::interest(io.read, libc::POLLIN),
+                        readiness::interest(
+                            if turn.pending_writes.is_empty() {
+                                -1
+                            } else {
+                                io.write
+                            },
+                            libc::POLLOUT,
+                        ),
+                        readiness::interest(io.wakeup.fd(), libc::POLLIN),
+                    ];
+                    readiness::wait(&mut fds, deadline)?;
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) => return Err(error),
@@ -885,11 +939,13 @@ mod steering_tests {
     }
 
     fn create_test_run() -> (CodexRun, Receiver<SteerRequest>) {
+        let interrupt = InterruptHandler::register().unwrap();
         let (steering_sender, steering_receiver) = request_reply::channel(1);
+        let steering_sender = steering_sender.with_wakeup(Arc::clone(&interrupt.wakeup));
         (
             CodexRun {
                 state: Mutex::new(None),
-                interrupt: InterruptHandler::register().unwrap(),
+                interrupt,
                 steering_sender,
                 thread_id: "th".to_string(),
                 prompt: "initial".to_string(),
@@ -978,7 +1034,12 @@ mod steering_tests {
         let interrupt = AtomicBool::new(false);
         let result = thread::scope(|scope| {
             let worker = scope.spawn(|| {
-                let result = client.run_turn("th", "initial", &interrupt, steering_receiver);
+                let io = TurnIo {
+                    read: client.reader.get_ref().as_raw_fd(),
+                    write: client.writer.as_raw_fd(),
+                    wakeup: &mailbox.run.interrupt.wakeup,
+                };
+                let result = client.run_turn("th", "initial", &interrupt, steering_receiver, io);
                 mailbox.finished.store(true, Ordering::Release);
                 result
             });
@@ -1005,6 +1066,94 @@ mod steering_tests {
             matches!(&result, Err(SteeringError::Rejected { code: actual, .. }) if *actual == code),
             "{result:?}"
         );
+    }
+
+    #[test]
+    fn acknowledgement_deadline_expires_without_output_or_client_timeout() {
+        let (stream, server) = UnixStream::pair().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let output = CapturedOutput::default();
+        let mut client = TestClient {
+            reader: BufReader::new(stream.try_clone().unwrap()),
+            writer: stream,
+            out: output.clone(),
+            next_id: 0,
+            model: None,
+            reasoning_effort: None,
+        };
+        let wakeup = Wakeup::new().unwrap();
+        let interrupt = AtomicBool::new(false);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let io = TurnIo {
+                    read: client.reader.get_ref().as_raw_fd(),
+                    write: client.writer.as_raw_fd(),
+                    wakeup: &wakeup,
+                };
+                client.run_turn("th", "initial", &interrupt, receiver, io)
+            });
+            let mut server = Server(BufReader::new(server));
+            let start = server.read();
+            server.send(json!({"id":start["id"],"result":{"turn":{"id":"tu"}}}));
+            server.send(json!({"method":METHOD_AGENT_MESSAGE_DELTA,"params":{"threadId":"th","turnId":"tu","delta":"ready"}}));
+            wait_until(|| !output.0.lock().unwrap().is_empty());
+            let (request, replies) = SteerRequest::new(
+                "expires".to_string(),
+                Instant::now() + Duration::from_millis(100),
+            );
+            sender.send(request).unwrap();
+            wakeup.signal();
+            let request = server.read();
+            assert_eq!(request["method"], METHOD_TURN_STEER);
+            assert!(matches!(
+                replies.recv_timeout(Duration::from_secs(2)).unwrap(),
+                Err(SteeringError::AcceptanceUnknown { .. })
+            ));
+            server.complete("completed");
+            assert_eq!(worker.join().unwrap().unwrap(), TurnStatus::Completed);
+        });
+    }
+
+    #[test]
+    fn backpressured_writes_resume_on_writability_without_server_output() {
+        let prompt = "x".repeat(2 * 1024 * 1024);
+        with_run(|server, mailbox, _, _| {
+            server.start(mailbox);
+            thread::scope(|scope| {
+                let steering = scope.spawn(|| mailbox.steer(&prompt, deadline()));
+                let request = server.read();
+                assert_eq!(request["params"]["input"][0]["text"], prompt);
+                server.accept(&request["id"]);
+                assert_eq!(steering.join().unwrap(), Ok(()));
+            });
+            server.complete("completed");
+        })
+        .0
+        .unwrap();
+    }
+
+    #[test]
+    fn competing_steering_is_busy_without_waiting_for_acknowledgement() {
+        with_run(|server, mailbox, _, _| {
+            server.start(mailbox);
+            thread::scope(|scope| {
+                let first = scope.spawn(|| mailbox.steer("first", deadline()));
+                let request = server.read();
+                assert_eq!(request["method"], METHOD_TURN_STEER);
+                // No server output/acknowledgement is sent during this call.
+                assert_rejected(mailbox.steer("second", deadline()), "busy");
+                assert!(!first.is_finished());
+                server.accept(&request["id"]);
+                assert_eq!(first.join().unwrap(), Ok(()));
+            });
+            server.complete("completed");
+        })
+        .0
+        .unwrap();
     }
 
     #[test]
@@ -1134,6 +1283,7 @@ mod steering_tests {
                     let steering = scope.spawn(|| mailbox.steer("steer", deadline()));
                     let request = server.read();
                     interrupt.store(true, Ordering::SeqCst);
+                    mailbox.run.interrupt.wakeup.signal();
                     let stop = server.read();
                     assert_eq!(stop["method"], METHOD_TURN_INTERRUPT);
                     assert_eq!(stop["params"], json!({"threadId":"th","turnId":"tu"}));

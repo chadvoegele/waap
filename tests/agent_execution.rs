@@ -519,7 +519,7 @@ fn native_failures_reach_cli_without_prompt_disclosure_retries_or_lifecycle_chan
 }
 
 #[test]
-fn concurrent_cli_calls_wait_for_native_ack_while_run_output_continues() {
+fn concurrent_cli_call_is_busy_while_native_ack_and_run_output_continue() {
     let mut run = SteeringRun::start("steering-held");
     let before = run.snapshot();
     let mut first = RunningChild(Some(
@@ -527,7 +527,11 @@ fn concurrent_cli_calls_wait_for_native_ack_while_run_output_continues() {
     ));
     wait_until(|| run.steering_requests().len() == 1);
     let mut second = RunningChild(Some(
-        run.steer("second").stdout(Stdio::piped()).spawn().unwrap(),
+        run.steer("second")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
     ));
     wait_until(|| {
         fs::read_to_string(run.repo.path().join("run.stdout"))
@@ -535,7 +539,11 @@ fn concurrent_cli_calls_wait_for_native_ack_while_run_output_continues() {
             .contains("waiting for acknowledgement")
     });
     assert!(first.0.as_mut().unwrap().try_wait().unwrap().is_none());
-    assert!(second.0.as_mut().unwrap().try_wait().unwrap().is_none());
+    wait_until(|| second.0.as_mut().unwrap().try_wait().unwrap().is_some());
+    let rejected = second.0.take().unwrap().wait_with_output().unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("busy"));
+    assert!(first.0.as_mut().unwrap().try_wait().unwrap().is_none());
     assert_eq!(
         run.steering_requests().len(),
         1,
@@ -543,19 +551,22 @@ fn concurrent_cli_calls_wait_for_native_ack_while_run_output_continues() {
     );
     assert_eq!(run.snapshot(), before);
     fs::write(run.repo.path().join("release-steer"), "acknowledge").unwrap();
-    for child in [&mut first, &mut second] {
-        wait_until(|| child.0.as_mut().unwrap().try_wait().unwrap().is_some());
-        let output = child.0.take().unwrap().wait_with_output().unwrap();
-        assert!(output.status.success(), "{output:?}");
-        assert_eq!(
-            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-            json!({"agent_id":run.agent_id, "accepted":true})
-        );
-    }
+    wait_until(|| first.0.as_mut().unwrap().try_wait().unwrap().is_some());
+    let output = first.0.take().unwrap().wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"agent_id":run.agent_id, "accepted":true})
+    );
+    let next = run.steer("after acknowledgement").output().unwrap();
+    assert!(next.status.success(), "{next:?}");
     let requests = run.steering_requests();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0]["params"]["input"][0]["text"], "first");
-    assert_eq!(requests[1]["params"]["input"][0]["text"], "second");
+    assert_eq!(
+        requests[1]["params"]["input"][0]["text"],
+        "after acknowledgement"
+    );
     assert_ne!(requests[0]["id"], requests[1]["id"]);
     assert_eq!(run.snapshot(), before);
     fs::write(run.repo.path().join("release"), "complete").unwrap();

@@ -26,6 +26,7 @@ mod list;
 mod new;
 mod opencode;
 mod process;
+mod readiness;
 mod request_reply;
 mod run;
 mod steer;

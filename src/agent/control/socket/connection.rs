@@ -10,6 +10,10 @@ pub(in crate::agent) struct SocketConnection {
 }
 
 impl SocketConnection {
+    pub(in crate::agent) fn shutdown_handle(&self) -> io::Result<UnixStream> {
+        self.stream.try_clone()
+    }
+
     pub(in crate::agent) fn new(stream: UnixStream) -> Self {
         Self { stream }
     }

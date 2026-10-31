@@ -11,6 +11,11 @@ pub(in crate::agent) struct SocketListener {
 }
 
 impl SocketListener {
+    pub(in crate::agent) fn fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+        self.listener.as_ref().unwrap().as_raw_fd()
+    }
+
     pub(in crate::agent) fn bind(path: SocketPath) -> io::Result<Self> {
         path.prepare_parent()?;
         let listener = UnixListener::bind(path.as_path()).map_err(|error| {

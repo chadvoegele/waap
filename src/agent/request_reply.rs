@@ -6,6 +6,7 @@ use std::time::Instant;
 
 pub(super) struct Client<T, R> {
     sender: SyncSender<Call<T, R>>,
+    wakeup: Option<std::sync::Arc<super::readiness::Wakeup>>,
 }
 
 pub(super) struct Call<T, R> {
@@ -24,16 +25,30 @@ pub(super) enum CallError {
 
 pub(super) fn channel<T, R>(capacity: usize) -> (Client<T, R>, Receiver<Call<T, R>>) {
     let (sender, receiver) = mpsc::sync_channel(capacity);
-    (Client { sender }, receiver)
+    (
+        Client {
+            sender,
+            wakeup: None,
+        },
+        receiver,
+    )
 }
 
 impl<T, R> Client<T, R> {
+    pub(super) fn with_wakeup(mut self, wakeup: std::sync::Arc<super::readiness::Wakeup>) -> Self {
+        self.wakeup = Some(wakeup);
+        self
+    }
+
     pub(super) fn call(&self, message: T, deadline: Instant) -> Result<R, CallError> {
         let (call, replies) = Call::new(message, deadline);
         self.sender.try_send(call).map_err(|error| match error {
             mpsc::TrySendError::Full(_) => CallError::QueueFull,
             mpsc::TrySendError::Disconnected(_) => CallError::ReceiverClosed,
         })?;
+        if let Some(wakeup) = &self.wakeup {
+            wakeup.signal();
+        }
         replies
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .map_err(|error| match error {

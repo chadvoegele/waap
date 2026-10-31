@@ -92,9 +92,9 @@ pub(in crate::agent) mod tests {
     }
 
     fn bind_server(root: &ControlRoot, agent_id: &str) -> io::Result<ControlServer> {
-        Ok(ControlServer::new(SocketListener::bind(
-            SocketPath::for_agent(root, agent_id)?,
-        )?))
+        ControlServer::new(SocketListener::bind(SocketPath::for_agent(
+            root, agent_id,
+        )?)?)
     }
 
     fn read_frame(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
@@ -157,7 +157,7 @@ pub(in crate::agent) mod tests {
     }
 
     #[test]
-    fn control_calls_are_serial_and_a_client_timeout_does_not_cancel_delivery() {
+    fn delayed_acknowledgement_does_not_serialize_other_handlers() {
         let fixture = Fixture::new();
         let path = fixture.path.clone();
         let (entered, dispatched) = mpsc::channel();
@@ -171,21 +171,10 @@ pub(in crate::agent) mod tests {
             dispatched.recv_timeout(Duration::from_secs(3)).unwrap();
             let mut second = connect(&path);
             second.write_all(&frame("second")).unwrap();
-            second
-                .set_read_timeout(Some(Duration::from_millis(20)))
-                .unwrap();
-            let error = read_frame(&mut second).unwrap_err();
-            assert!(matches!(
-                error.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-            ));
-            // Timing out does not cancel a request already sent to the socket.
-            second
-                .set_read_timeout(Some(Duration::from_secs(3)))
-                .unwrap();
+            // The second response arrives while the first backend call is blocked.
+            assert_eq!(read_response(second)["accepted"], true);
             release.send(()).unwrap();
             assert_eq!(read_response(first)["accepted"], true);
-            assert_eq!(read_response(second)["accepted"], true);
             complete.send(()).unwrap();
         });
         fixture
@@ -229,7 +218,7 @@ pub(in crate::agent) mod tests {
             }
             fn steer(&self, _: &str, _: Instant) -> Result<(), SteeringError> {
                 assert_ne!(thread::current().id(), self.owner);
-                assert_eq!(thread::current().name(), Some("waap-control"));
+                assert_eq!(thread::current().name(), Some("waap-control-request"));
                 Ok(())
             }
         }

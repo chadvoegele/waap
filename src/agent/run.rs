@@ -147,7 +147,7 @@ fn run_started_agent(
                 system.clone(),
             )?;
             let listener = SocketListener::bind(socket_path)?;
-            wait_with_control(ControlServer::new(listener), started.handle.as_ref())
+            wait_with_control(ControlServer::new(listener)?, started.handle.as_ref())
         });
     let cleanup_result = worktree.cleanup();
     collapse_errors(run_result, cleanup_result)
@@ -168,7 +168,6 @@ pub(super) fn wait_with_control(
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle.wait()))
             .unwrap_or_else(|_| Err(io::Error::other("agent wait panicked")));
         server.shutdown();
-        worker.thread().unpark();
         if worker.join().is_err() {
             log::error!("control server panicked");
         }
