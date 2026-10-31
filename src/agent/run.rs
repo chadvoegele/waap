@@ -2,7 +2,8 @@ use std::io;
 use std::path::Path;
 use std::process::ExitCode;
 
-use super::backend::{AgentSystemBackend, RunOutcome, StartContext};
+use super::backend::{AgentSystemBackend, RunHandle, RunOutcome, StartContext};
+use super::control::{ControlRequestHandler, ControlServer, SocketListener, SocketPath};
 use super::worktree::{collapse_errors, AgentWorktree};
 use crate::agent::{
     agent_report_json, load_agent_report, print_agent_report_human, read_agent_record,
@@ -11,6 +12,7 @@ use crate::agent::{
 };
 use crate::cli::OutputFormat;
 use crate::git::commit_paths;
+use crate::root::ControlRoot;
 
 fn print_run_agent_report(
     output_format: &OutputFormat,
@@ -34,6 +36,7 @@ fn print_run_agent_report(
 pub(crate) fn run_agent(
     repository_root: &Path,
     waap_root: &Path,
+    control_root: io::Result<ControlRoot>,
     output_format: &OutputFormat,
     agent_id: &str,
     system: &AgentSystem,
@@ -44,6 +47,7 @@ pub(crate) fn run_agent(
     run_agent_with_backend(
         repository_root,
         waap_root,
+        control_root,
         output_format,
         agent_id,
         system,
@@ -54,6 +58,7 @@ pub(crate) fn run_agent(
 fn run_agent_with_backend(
     repository_root: &Path,
     waap_root: &Path,
+    control_root: io::Result<ControlRoot>,
     output_format: &OutputFormat,
     agent_id: &str,
     system: &AgentSystem,
@@ -80,6 +85,7 @@ fn run_agent_with_backend(
     let result = run_started_agent(
         repository_root,
         waap_root,
+        control_root,
         output_format,
         agent_id,
         system,
@@ -114,12 +120,15 @@ fn run_agent_with_backend(
 fn run_started_agent(
     repository_root: &Path,
     waap_root: &Path,
+    control_root: io::Result<ControlRoot>,
     output_format: &OutputFormat,
     agent_id: &str,
     system: &AgentSystem,
     backend: &mut dyn AgentSystemBackend,
 ) -> io::Result<RunOutcome> {
     let repository_root = repository_root.canonicalize()?;
+    let control_root = control_root?;
+    let socket_path = SocketPath::for_agent(&control_root, agent_id)?;
     let mut worktree = AgentWorktree::create(&repository_root, agent_id)?;
     let prompt = build_agent_goal(waap_root, agent_id);
     let run_result = backend
@@ -137,10 +146,35 @@ fn run_started_agent(
                 &started.session_id,
                 system.clone(),
             )?;
-            started.handle.wait()
+            let listener = SocketListener::bind(socket_path)?;
+            wait_with_control(ControlServer::new(listener), started.handle.as_ref())
         });
     let cleanup_result = worktree.cleanup();
     collapse_errors(run_result, cleanup_result)
+}
+
+pub(super) fn wait_with_control(
+    mut server: ControlServer,
+    handle: &dyn RunHandle,
+) -> io::Result<RunOutcome> {
+    let outcome = std::thread::scope(|scope| {
+        let handler = ControlRequestHandler::new(handle);
+        let server_ref = &server;
+        let worker = std::thread::Builder::new()
+            .name("waap-control".to_string())
+            .spawn_scoped(scope, move || {
+                server_ref.run(|connection, completed| handler.serve(connection, completed))
+            })?;
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle.wait()))
+            .unwrap_or_else(|_| Err(io::Error::other("agent wait panicked")));
+        server.shutdown();
+        worker.thread().unpark();
+        if worker.join().is_err() {
+            log::error!("control server panicked");
+        }
+        outcome
+    });
+    collapse_errors(outcome, server.close())
 }
 
 fn build_agent_goal(waap_root: &Path, agent_id: &str) -> String {
@@ -309,14 +343,15 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::ExitCode;
+    use std::sync::atomic::Ordering;
 
     use serde_json::json;
     use tempfile::tempdir;
 
     use super::{
         build_agent_goal, collapse_errors, mark_completed, mark_failed, mark_running,
-        persist_failed_after_error, require_ready_agent, run_agent, run_agent_with_backend,
-        transition_and_commit_status, update_agent_session, AgentWorktree,
+        persist_failed_after_error, require_ready_agent, run_agent, transition_and_commit_status,
+        update_agent_session, AgentWorktree,
     };
     use crate::agent::backend::{fake::FakeBackend, RunOutcome};
     use crate::agent::worktree::agent_worktree_dir;
@@ -328,6 +363,128 @@ mod tests {
     use crate::cli::OutputFormat;
     use crate::git::{create_worktree, remove_worktree};
     use crate::test_git::{init_repo_with_commit, run as git};
+
+    fn run_agent_with_backend(
+        repository_root: &Path,
+        waap_root: &Path,
+        output_format: &OutputFormat,
+        agent_id: &str,
+        system: &AgentSystem,
+        backend: &mut dyn crate::agent::backend::AgentSystemBackend,
+    ) -> std::io::Result<ExitCode> {
+        let runtime = tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        super::run_agent_with_backend(
+            repository_root,
+            waap_root,
+            crate::root::find_control_root_in(repository_root, Some(runtime.path().as_os_str())),
+            output_format,
+            agent_id,
+            system,
+            backend,
+        )
+    }
+
+    #[test]
+    fn socket_runs_without_state_lock_or_steering_metadata_changes() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+
+        let repository = tempdir().unwrap();
+        init_repo_with_commit(repository.path());
+        let agent_id = "aa-1";
+        let record = seed_agent_record(repository.path(), agent_id, "ready");
+        let runtime = tempdir().unwrap();
+        fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let path =
+            crate::root::find_control_root_in(repository.path(), Some(runtime.path().as_os_str()))
+                .unwrap()
+                .path()
+                .join("aa-1.sock");
+        let endpoint = path.clone();
+        let root = repository.path().to_path_buf();
+        let prompt = "  λ\n'\" $() `prompt`  ";
+        let mut backend = FakeBackend {
+            wait_action: Some(Box::new(move || {
+                let _lock = crate::state::StateLock::acquire(&root)?;
+                let record = root.join("agents/aa-1/agent.md");
+                let before = fs::read(&record)?;
+                let head = git(&root, &["rev-parse", "HEAD"]);
+                let mut socket = UnixStream::connect(&path)?;
+                socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+                writeln!(
+                    socket,
+                    "{}",
+                    json!({"version":1,"request_id":uuid::Uuid::from_u128(1).to_string(),"method":"steer","prompt":prompt})
+                )?;
+                let mut line = String::new();
+                BufReader::new(socket).read_line(&mut line)?;
+                let response: serde_json::Value = serde_json::from_str(&line)?;
+                assert_eq!(response["accepted"], true);
+                assert_eq!(fs::read(&record)?, before);
+                assert_eq!(git(&root, &["rev-parse", "HEAD"]), head);
+                fs::write(root.join("output"), "backend output continued")?;
+                Ok(())
+            })),
+            ..FakeBackend::default()
+        };
+        let result = super::run_agent_with_backend(
+            repository.path(),
+            repository.path(),
+            crate::root::find_control_root_in(repository.path(), Some(runtime.path().as_os_str())),
+            &OutputFormat::Json,
+            agent_id,
+            &AgentSystem::Codex,
+            &mut backend,
+        )
+        .unwrap();
+        assert_eq!(result, ExitCode::SUCCESS);
+        assert_eq!(backend.steer_calls.lock().unwrap()[0].0, prompt);
+        assert_eq!(
+            fs::read_to_string(repository.path().join("output")).unwrap(),
+            "backend output continued"
+        );
+        assert!(fs::read_to_string(record)
+            .unwrap()
+            .contains("status = \"completed\""));
+        assert!(!endpoint.exists());
+        assert!(!repository
+            .path()
+            .join(agent_worktree_dir(agent_id))
+            .exists());
+    }
+
+    #[test]
+    fn wait_panic_persists_failure_and_cleans_worktree() {
+        let mut backend = FakeBackend {
+            wait_action: Some(Box::new(|| panic!("wait failed"))),
+            ..FakeBackend::default()
+        };
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+        let agent_id = "aa-00000001";
+        seed_agent_record(dir.path(), agent_id, "ready");
+
+        let error = run_agent_with_backend(
+            dir.path(),
+            dir.path(),
+            &OutputFormat::Json,
+            agent_id,
+            &AgentSystem::Codex,
+            &mut backend,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "agent wait panicked");
+        assert_eq!(
+            read_agent_record(dir.path(), agent_id).unwrap().0.status,
+            "failed"
+        );
+        assert!(!dir.path().join(agent_worktree_dir(agent_id)).exists());
+    }
 
     #[test]
     fn agent_worktree_creates_and_explicitly_removes_agent_directory() {
@@ -606,6 +763,7 @@ mod tests {
         let error = run_agent(
             dir.path(),
             dir.path(),
+            Err(std::io::Error::other("injected control-root failure")),
             &OutputFormat::Json,
             agent_id,
             &AgentSystem::Opencode,
@@ -642,6 +800,7 @@ mod tests {
         let error = run_agent(
             dir.path(),
             dir.path(),
+            Err(std::io::Error::other("injected control-root failure")),
             &OutputFormat::Json,
             agent_id,
             &AgentSystem::Opencode,
@@ -685,6 +844,7 @@ mod tests {
                 let error = run_agent(
                     dir.path(),
                     dir.path(),
+                    Err(std::io::Error::other("injected control-root failure")),
                     &OutputFormat::Json,
                     agent_id,
                     &system,
@@ -718,6 +878,7 @@ mod tests {
         let error = run_agent(
             dir.path(),
             dir.path(),
+            Err(std::io::Error::other("injected control-root failure")),
             &OutputFormat::Json,
             agent_id,
             &AgentSystem::Codex,
@@ -767,7 +928,7 @@ mod tests {
 
             assert_eq!(code, ExitCode::SUCCESS);
             assert_eq!(backend.start_calls.len(), 1);
-            assert_eq!(backend.wait_calls.get(), 1);
+            assert_eq!(backend.wait_calls.load(Ordering::SeqCst), 1);
             let call = &backend.start_calls[0];
             assert_eq!(call.agent_id, agent_id);
             assert_eq!(call.prompt, build_agent_goal(dir.path(), agent_id));
@@ -821,7 +982,7 @@ mod tests {
 
         assert_eq!(code, ExitCode::SUCCESS);
         assert_eq!(backend.start_calls.len(), 1);
-        assert_eq!(backend.wait_calls.get(), 1);
+        assert_eq!(backend.wait_calls.load(Ordering::SeqCst), 1);
         let (metadata, _) = read_agent_record(dir.path(), agent_id).unwrap();
         assert_eq!(metadata.session_id.as_deref(), Some("th_authentic"));
         let running_record = git(dir.path(), &["show", "HEAD~2:agents/aa-00000001/agent.md"]);
@@ -864,7 +1025,7 @@ mod tests {
         let metadata = read_agent_record(dir.path(), agent_id).unwrap().0;
         assert_eq!(metadata.status, "failed");
         assert_eq!(metadata.session_id.as_deref(), Some("claude-session"));
-        assert_eq!(backend.wait_calls.get(), 1);
+        assert_eq!(backend.wait_calls.load(Ordering::SeqCst), 1);
         assert!(!dir.path().join(agent_worktree_dir(agent_id)).exists());
         assert_eq!(
             git(dir.path(), &["log", "-1", "--format=%s"]),
@@ -944,6 +1105,53 @@ mod tests {
     }
 
     #[test]
+    fn long_socket_path_fails_before_worktree_socket_or_backend_creation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repository = tempdir().unwrap();
+        init_repo_with_commit(repository.path());
+        let agent_id = "aa-long-path";
+        seed_agent_record(repository.path(), agent_id, "ready");
+        let runtime_base = tempdir().unwrap();
+        let runtime = runtime_base.path().join("x".repeat(100));
+        fs::create_dir(&runtime).unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        let worktrees = git(repository.path(), &["worktree", "list", "--porcelain"])
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let branches = git(repository.path(), &["branch", "--list"]);
+        let mut backend = FakeBackend::default();
+        let error = super::run_agent_with_backend(
+            repository.path(),
+            repository.path(),
+            crate::root::find_control_root_in(repository.path(), Some(runtime.as_os_str())),
+            &OutputFormat::Json,
+            agent_id,
+            &AgentSystem::Codex,
+            &mut backend,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("platform limit"));
+        assert!(error.to_string().contains("shorten XDG_RUNTIME_DIR"));
+        assert!(backend.start_calls.is_empty());
+        assert_eq!(backend.wait_calls.load(Ordering::SeqCst), 0);
+        assert!(!runtime.join("waap").exists());
+        assert!(!repository.path().join("worktrees").exists());
+        assert_eq!(
+            git(repository.path(), &["worktree", "list", "--porcelain"])
+                .lines()
+                .filter(|line| line.starts_with("worktree "))
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+            worktrees
+        );
+        assert_eq!(git(repository.path(), &["branch", "--list"]), branches);
+    }
+
+    #[test]
     fn run_agent_backend_error_cleans_worktree_and_propagates() {
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path());
@@ -966,7 +1174,7 @@ mod tests {
 
         assert_eq!(error.to_string(), "launch failed");
         assert_eq!(backend.start_calls.len(), 1);
-        assert_eq!(backend.wait_calls.get(), 0);
+        assert_eq!(backend.wait_calls.load(Ordering::SeqCst), 0);
         assert!(!dir.path().join(agent_worktree_dir(agent_id)).exists());
         assert_eq!(
             read_agent_record(dir.path(), agent_id).unwrap().0.status,
@@ -1030,7 +1238,7 @@ mod tests {
         let metadata = read_agent_record(dir.path(), agent_id).unwrap().0;
         assert_eq!(metadata.status, "failed");
         assert_eq!(metadata.session_id.as_deref(), Some("ses_existing"));
-        assert_eq!(backend.wait_calls.get(), 0);
+        assert_eq!(backend.wait_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -1088,7 +1296,7 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.to_string(), "wait failed");
-        assert_eq!(backend.wait_calls.get(), 1);
+        assert_eq!(backend.wait_calls.load(Ordering::SeqCst), 1);
         let metadata = read_agent_record(dir.path(), agent_id).unwrap().0;
         assert_eq!(metadata.status, "failed");
         assert_eq!(metadata.session_id.as_deref(), Some("ses_started"));

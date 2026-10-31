@@ -8,14 +8,15 @@ use log::LevelFilter;
 
 use crate::agent::{
     create_agent, list_agents, load_agent_content, print_agent_content_report, print_agent_list,
-    print_agent_stop_report, print_created_agent_report, print_updated_agent_report, run_agent,
-    stop_agents_with_systems, update_agent, AgentRunOptions,
+    print_agent_stop_report, print_created_agent_report, print_steering_report,
+    print_updated_agent_report, run_agent, steer_agent, stop_agents_with_systems, update_agent,
+    AgentRunOptions,
 };
 use crate::check::{check_waap, print_check_result};
 use crate::cli::{AgentCommand, Cli, Command, TicketCommand};
 use crate::init::{init_project, print_init_report};
 use crate::repair::{print_repair_report, repair_project};
-use crate::root::{find_git_root, find_waap_root};
+use crate::root::{find_control_root, find_git_root, find_waap_root};
 use crate::ticket::{
     create_ticket, get_ticket, list_tickets, print_ticket_get_report, print_ticket_list,
     print_ticket_report, print_updated_ticket_report, update_ticket,
@@ -121,6 +122,7 @@ pub(crate) fn run() -> ExitCode {
                 match run_agent(
                     repository_root,
                     waap_root,
+                    find_control_root(repository_root),
                     &cli.output_format,
                     &agent_id,
                     &system,
@@ -143,6 +145,20 @@ pub(crate) fn run() -> ExitCode {
                     ExitCode::from(1)
                 }
             },
+            AgentCommand::Steer { agent_id, prompt } => {
+                match steer_agent(
+                    waap_root,
+                    find_control_root(repository_root),
+                    &agent_id,
+                    &prompt,
+                ) {
+                    Ok(()) => {
+                        print_steering_report(&cli.output_format, &agent_id);
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => command_error("failed to steer agent", error),
+                }
+            }
             AgentCommand::Stop { agent_id } => {
                 match stop_agents_with_systems(waap_root, agent_id.as_deref()) {
                     Ok(report) => {

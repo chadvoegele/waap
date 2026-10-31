@@ -20,12 +20,15 @@ use crate::toml::{datetime_string, toml_string};
 mod backend;
 mod claude;
 mod codex;
+mod control;
 mod get;
 mod list;
 mod new;
 mod opencode;
 mod process;
+mod request_reply;
 mod run;
+mod steer;
 mod stop;
 mod update;
 mod worktree;
@@ -39,6 +42,7 @@ pub(crate) use get::{load_agent_content, load_agent_report, print_agent_content_
 pub(crate) use list::{list_agents, print_agent_list};
 pub(crate) use new::{create_agent, print_created_agent_report};
 pub(crate) use run::run_agent;
+pub(crate) use steer::{print_steering_report, steer_agent};
 pub(crate) use stop::{print_agent_stop_report, stop_agents_with_systems};
 pub(crate) use update::{print_updated_agent_report, update_agent};
 

@@ -79,6 +79,14 @@ pub(crate) enum AgentCommand {
         #[arg(long)]
         agent_id: String,
     },
+    /// Submit a prompt to a running agent's current turn.
+    Steer {
+        #[arg(long)]
+        agent_id: String,
+
+        #[arg(long)]
+        prompt: String,
+    },
     /// Stop running agents, aborting OpenCode sessions when session_id is present.
     Stop {
         #[arg(long)]
@@ -691,6 +699,34 @@ mod tests {
             error.kind(),
             clap::error::ErrorKind::MissingRequiredArgument
         );
+    }
+
+    #[test]
+    fn agent_steer_requires_both_flags_and_preserves_prompt() {
+        for arguments in [
+            vec!["waap", "agent", "steer"],
+            vec!["waap", "agent", "steer", "--agent-id", "aa-test"],
+            vec!["waap", "agent", "steer", "--prompt", "text"],
+        ] {
+            assert_eq!(
+                Cli::try_parse_from(arguments).unwrap_err().kind(),
+                clap::error::ErrorKind::MissingRequiredArgument
+            );
+        }
+        let prompt = "  雪\n\"quoted\" '$HOME' `echo data`  ";
+        let cli = Cli::try_parse_from([
+            "waap",
+            "agent",
+            "steer",
+            "--agent-id",
+            "aa-test",
+            "--prompt",
+            prompt,
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Command::Agent {
+            command: AgentCommand::Steer { agent_id, prompt: parsed }
+        } if agent_id == "aa-test" && parsed == prompt));
     }
 
     #[test]

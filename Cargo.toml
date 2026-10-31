@@ -10,7 +10,10 @@ clap = { version = "4.5", features = ["derive"] }
 getrandom = "0.2"
 env_logger = "0.11"
 log = "0.4"
+libc = "0.2"
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
+ring = "0.17"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
 signal-hook = "0.4.4"
 toml = "0.8"
