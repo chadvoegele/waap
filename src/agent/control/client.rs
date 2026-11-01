@@ -307,6 +307,8 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn failed_write_reports_uncertainty_without_retry() {
         let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let server = server.into_std().unwrap();
+        server.shutdown(std::net::Shutdown::Both).unwrap();
         drop(server);
         let mut client = ControlClient {
             connection: SocketConnection::new(client),

@@ -1,6 +1,7 @@
+use super::super::commands::CommandHandle;
+use super::handler::ControlRequestHandler;
 use super::socket::{SocketConnection, SocketListener};
 use futures_util::{stream::FuturesUnordered, FutureExt, StreamExt};
-use std::future::Future;
 use std::io;
 
 const MAX_HANDLERS: usize = 8;
@@ -14,10 +15,8 @@ impl ControlServer {
         Self { listener }
     }
 
-    pub(in crate::agent) async fn run<F: Future<Output = io::Result<()>>>(
-        &self,
-        handler: impl Fn(SocketConnection) -> F,
-    ) -> io::Result<()> {
+    pub(in crate::agent) async fn run(&self, handle: &CommandHandle) -> io::Result<()> {
+        let handler = ControlRequestHandler::new(handle);
         let listener = self.listener.async_listener()?;
         let mut handlers = FuturesUnordered::new();
         loop {
@@ -29,10 +28,9 @@ impl ControlServer {
                 connection = listener.accept() => {
                     match connection {
                         Ok((stream, _)) if handlers.len() < MAX_HANDLERS => {
-                            let handler = &handler;
-                            handlers.push(std::panic::AssertUnwindSafe(async move {
-                                handler(SocketConnection::new(stream)).await
-                            }).catch_unwind());
+                            handlers.push(std::panic::AssertUnwindSafe(
+                                handler.serve(SocketConnection::new(stream))
+                            ).catch_unwind());
                         }
                         Ok((stream, _)) => drop(stream),
                         Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
@@ -50,15 +48,18 @@ impl ControlServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::backend::SteeringError;
+    use crate::agent::commands::Command;
+    use crate::agent::control::protocol::{Request, Response};
     use crate::agent::control::socket::SocketPath;
     use crate::agent::control::IO_TIMEOUT;
     use crate::root::find_control_root_in;
     use crate::test_git::init_repo_with_commit;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
-    use tokio::sync::mpsc;
 
     fn fixture() -> (
         tempfile::TempDir,
@@ -77,11 +78,26 @@ mod tests {
         (repo, runtime, server, path)
     }
 
+    async fn send_request(path: &Path, prompt: &str) -> (Request, SocketConnection) {
+        let request = Request::steer(prompt);
+        let mut client = SocketConnection::new(UnixStream::connect(path).await.unwrap());
+        client
+            .write_frame(&serde_json::to_vec(&request).unwrap())
+            .await
+            .unwrap();
+        (request, client)
+    }
+
+    async fn read_response(client: &mut SocketConnection) -> Response {
+        serde_json::from_slice(&client.read_frame(IO_TIMEOUT).await.unwrap()).unwrap()
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn cancellation_of_idle_or_unpolled_server_needs_no_notification() {
         for polled in [false, true] {
             let (_repo, _runtime, mut server, path) = fixture();
-            let future = server.run(|_| async { panic!("unexpected connection") });
+            let handle = CommandHandle::Unsupported("test");
+            let future = server.run(&handle);
             if polled {
                 assert!(future.now_or_never().is_none());
             } else {
@@ -94,67 +110,131 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn slow_clients_are_concurrent_overload_closes_and_cancellation_drops_handlers() {
-        let (_repo, _runtime, server, path) = fixture();
-        let (entered, mut entries) = mpsc::unbounded_channel();
-        let (finished, mut finishes) = mpsc::unbounded_channel();
+        let (_repo, _runtime, mut server, path) = fixture();
+        let (handle, mut commands) = CommandHandle::channel();
+        let mut clients = Vec::new();
+        let mut pending = Vec::new();
         tokio::time::timeout(Duration::from_secs(2), async {
             tokio::select! {
-                result = server.run(|mut connection| {
-                    let entered = &entered;
-                    let finished = finished.clone();
-                    async move {
-                        struct Cleanup(mpsc::UnboundedSender<()>);
-                        impl Drop for Cleanup { fn drop(&mut self) { self.0.send(()).unwrap(); } }
-                        let _cleanup = Cleanup(finished);
-                        entered.send(std::thread::current().id()).unwrap();
-                        let frame = connection.read_frame(IO_TIMEOUT).await?;
-                        connection.write_frame(&frame[..frame.len() - 1]).await?;
-                        connection.read_frame(IO_TIMEOUT).await?;
-                        Ok(())
-                    }
-                }) => panic!("server exited: {result:?}"),
+                result = server.run(&handle) => panic!("server exited: {result:?}"),
                 _ = async {
-                    let owner = std::thread::current().id();
-                    let _slow = UnixStream::connect(&path).await.unwrap();
-                    assert_eq!(entries.recv().await.unwrap(), owner);
-                    let mut fast = UnixStream::connect(&path).await.unwrap();
-                    assert_eq!(entries.recv().await.unwrap(), owner);
-                    fast.write_all(b"fast\n").await.unwrap();
-                    let mut response = [0; 5]; fast.read_exact(&mut response).await.unwrap();
-                    assert_eq!(&response, b"fast\n");
-                    let mut slow = Vec::new();
-                    for _ in 2..MAX_HANDLERS {
-                        slow.push(UnixStream::connect(&path).await.unwrap());
-                        assert_eq!(entries.recv().await.unwrap(), owner);
+                    let mut slow = UnixStream::connect(&path).await.unwrap();
+                    slow.write_all(b"{").await.unwrap();
+                    clients.push(SocketConnection::new(slow));
+                    let (request, mut fast) = send_request(&path, "fast").await;
+                    let Command::Steer(mut command) = commands.recv().await.unwrap();
+                    assert_eq!(command.message, request.prompt);
+                    command.respond(Ok(()));
+                    let response = read_response(&mut fast).await;
+                    assert_eq!(response.request_id, Some(request.request_id));
+                    assert_eq!(response.accepted, Some(true));
+                    for index in 1..MAX_HANDLERS {
+                        let (request, client) = send_request(&path, &format!("held {index}")).await;
+                        let Command::Steer(command) = commands.recv().await.unwrap();
+                        assert_eq!(command.message, request.prompt);
+                        pending.push(command);
+                        clients.push(client);
                     }
                     let mut excess = UnixStream::connect(&path).await.unwrap();
                     assert_eq!(excess.read(&mut [0]).await.unwrap(), 0);
+                    assert!(commands.try_recv().is_err());
                 } => {}
             }
         })
         .await
         .unwrap();
-        for _ in 0..MAX_HANDLERS {
-            finishes.try_recv().unwrap();
+        for command in &mut pending {
+            command.respond(Ok(()));
         }
-        assert!(finishes.try_recv().is_err());
+        for mut client in clients {
+            assert_eq!(
+                client.read_frame(IO_TIMEOUT).await.unwrap_err().kind(),
+                io::ErrorKind::UnexpectedEof
+            );
+        }
+        server.close().unwrap();
+        assert!(!path.exists());
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn serves_raw_frames_and_reclaims_completed_slots() {
+    async fn completed_handlers_are_reaped_before_admitting_backlogged_connections() {
         let (_repo, _runtime, mut server, path) = fixture();
+        let (handle, mut commands) = CommandHandle::channel();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let future = server.run(&handle);
+            tokio::pin!(future);
+            let mut clients = Vec::new();
+            let mut pending = Vec::new();
+            tokio::select! {
+                result = &mut future => panic!("server exited: {result:?}"),
+                _ = async {
+                    for _ in 0..MAX_HANDLERS {
+                        let (_, client) = send_request(&path, "held").await;
+                        let Command::Steer(command) = commands.recv().await.unwrap();
+                        clients.push(client);
+                        pending.push(command);
+                    }
+                } => {}
+            }
+            let (request, mut backlogged) = send_request(&path, "backlogged").await;
+            pending[0].respond(Ok(()));
+            tokio::select! {
+                result = &mut future => panic!("server exited: {result:?}"),
+                _ = async {
+                    let Command::Steer(mut command) = commands.recv().await.unwrap();
+                    assert_eq!(command.message, request.prompt);
+                    command.respond(Ok(()));
+                    let response = read_response(&mut backlogged).await;
+                    assert_eq!(response.request_id, Some(request.request_id));
+                    assert_eq!(response.accepted, Some(true));
+                } => {}
+            }
+        })
+        .await
+        .unwrap();
+        server.close().unwrap();
+        assert!(!path.exists());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn serves_one_protocol_request_and_reclaims_completed_slots() {
+        let (_repo, _runtime, mut server, path) = fixture();
+        let (handle, mut commands) = CommandHandle::channel();
         tokio::time::timeout(Duration::from_secs(2), async {
             tokio::select! {
-                result = server.run(|mut connection| async move {
-                    assert_eq!(connection.read_frame(IO_TIMEOUT).await?, b"\xffraw\n");
-                    connection.write_frame(b"\xfereply").await
-                }) => panic!("server exited: {result:?}"),
+                result = server.run(&handle) => panic!("server exited: {result:?}"),
                 _ = async {
-                    for _ in 0..MAX_HANDLERS * 2 {
-                        let stream = UnixStream::connect(&path).await.unwrap();
-                        let mut client = SocketConnection::new(stream);
-                        client.write_frame(b"\xffraw").await.unwrap();
-                        assert_eq!(client.read_frame(IO_TIMEOUT).await.unwrap(), b"\xfereply\n");
+                    for index in 0..MAX_HANDLERS * 2 {
+                        let (request, mut client) = send_request(&path, &format!("request {index}")).await;
+                        let Command::Steer(mut command) = commands.recv().await.unwrap();
+                        assert_eq!(command.message, request.prompt);
+                        let (reply, accepted, code) = match index % 3 {
+                            0 => (Ok(()), Some(true), None),
+                            1 => (
+                                Err(SteeringError::Rejected {
+                                    code: "busy",
+                                    message: "pending acknowledgement".into(),
+                                }),
+                                Some(false),
+                                Some("busy"),
+                            ),
+                            _ => (
+                                Err(SteeringError::acceptance_unknown("lost acknowledgement")),
+                                None,
+                                Some("acceptance_unknown"),
+                            ),
+                        };
+                        command.respond(reply);
+                        let response = read_response(&mut client).await;
+                        assert_eq!(response.version, 1);
+                        assert_eq!(response.request_id, Some(request.request_id));
+                        assert_eq!(response.accepted, accepted);
+                        assert_eq!(response.error.as_ref().map(|error| error.code.as_str()), code);
+                        assert_eq!(
+                            client.read_frame(IO_TIMEOUT).await.unwrap_err().kind(),
+                            io::ErrorKind::UnexpectedEof
+                        );
+                        assert!(commands.try_recv().is_err());
                     }
                 } => {}
             }

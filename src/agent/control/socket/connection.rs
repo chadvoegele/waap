@@ -7,7 +7,7 @@ use tokio::net::UnixStream;
 use super::MAX_FRAME_BYTES;
 use crate::agent::control::IO_TIMEOUT;
 
-pub(in crate::agent) struct SocketConnection {
+pub(in crate::agent::control) struct SocketConnection {
     stream: UnixStream,
 }
 
@@ -70,6 +70,23 @@ impl SocketConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exchanges_raw_frames_without_utf8_conversion() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let mut client = SocketConnection::new(client);
+        let mut server = SocketConnection::new(server);
+        let ((), ()) = tokio::join!(
+            async {
+                client.write_frame(b"\xffraw").await.unwrap();
+                assert_eq!(client.read_frame(IO_TIMEOUT).await.unwrap(), b"\xfereply\n");
+            },
+            async {
+                assert_eq!(server.read_frame(IO_TIMEOUT).await.unwrap(), b"\xffraw\n");
+                server.write_frame(b"\xfereply").await.unwrap();
+            }
+        );
+    }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn frame_deadline_is_not_extended_by_slow_drip_activity() {

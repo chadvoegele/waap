@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use super::backend::{AgentSystemBackend, RunOutcome, StartContext};
 use super::commands::CommandHandle;
-use super::control::{ControlRequestHandler, ControlServer, SocketListener, SocketPath};
+use super::control::{ControlServer, SocketListener, SocketPath};
 use super::worktree::{collapse_errors, AgentWorktree};
 use crate::agent::{
     agent_report_json, load_agent_report, print_agent_report_human, read_agent_record,
@@ -172,12 +172,11 @@ pub(super) async fn wait_with_control_async(
 ) -> io::Result<RunOutcome> {
     use futures_util::FutureExt;
     let outcome = {
-        let handler = ControlRequestHandler::new(handle);
         let wait = std::panic::AssertUnwindSafe(wait).catch_unwind();
         tokio::pin!(wait);
         let result = tokio::select! {
             result = &mut wait => result,
-            control = server.run(|connection| handler.serve(connection)) => {
+            control = server.run(handle) => {
                 if let Err(error) = control { log::error!("control server failed: {error}"); }
                 wait.await
             }

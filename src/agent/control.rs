@@ -6,7 +6,6 @@ mod protocol;
 mod server;
 mod socket;
 
-pub(super) use handler::ControlRequestHandler;
 pub(super) use server::ControlServer;
 #[cfg(test)]
 use socket::SocketConnection;
@@ -17,6 +16,7 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 pub(in crate::agent) mod tests {
+    use super::handler::ControlRequestHandler;
     use super::socket::MAX_FRAME_BYTES;
     use super::*;
     use crate::agent::backend::{RunOutcome, SteeringError};

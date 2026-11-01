@@ -6,12 +6,12 @@ use super::protocol::{build_rejection, build_response, parse_request, Request, R
 use super::socket::SocketConnection;
 use super::{ACK_TIMEOUT, IO_TIMEOUT};
 
-pub(in crate::agent) struct ControlRequestHandler<'a> {
+pub(super) struct ControlRequestHandler<'a> {
     run: &'a CommandHandle,
 }
 
 impl<'a> ControlRequestHandler<'a> {
-    pub(in crate::agent) fn new(run: &'a CommandHandle) -> Self {
+    pub(super) fn new(run: &'a CommandHandle) -> Self {
         Self { run }
     }
 
@@ -24,7 +24,7 @@ impl<'a> ControlRequestHandler<'a> {
         )
     }
 
-    pub(in crate::agent) async fn serve(&self, mut connection: SocketConnection) -> io::Result<()> {
+    pub(super) async fn serve(&self, mut connection: SocketConnection) -> io::Result<()> {
         let response = match connection.read_frame(IO_TIMEOUT).await {
             Ok(frame) => match parse_request(&frame) {
                 Ok(request) => self.handle(request).await,
