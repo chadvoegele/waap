@@ -119,7 +119,7 @@ fn stop_agent_if_running(waap_root: &Path, agent_id: &str) -> io::Result<Option<
     if report.metadata.session_id.is_some() {
         let system = report.metadata.system.clone().unwrap_or_default();
         let mut backend = system.backend(None)?;
-        return stop_agent_with_backend(waap_root, agent_id, backend.as_mut());
+        return stop_agent_with_backend(waap_root, agent_id, &mut backend);
     }
 
     mark_agent_aborted(waap_root, agent_id)
@@ -128,7 +128,7 @@ fn stop_agent_if_running(waap_root: &Path, agent_id: &str) -> io::Result<Option<
 fn stop_agent_with_backend(
     waap_root: &Path,
     agent_id: &str,
-    backend: &mut dyn AgentSystemBackend,
+    backend: &mut impl AgentSystemBackend,
 ) -> io::Result<Option<AgentReport>> {
     let report = load_agent_report(waap_root, agent_id)?;
     if report.metadata.status != AgentStatus::Running.as_str() {
@@ -136,11 +136,11 @@ fn stop_agent_with_backend(
     }
 
     if let Some(session_id) = &report.metadata.session_id {
-        backend.abort(AbortContext {
+        super::runtime::new()?.block_on(backend.abort(AbortContext {
             waap_root,
             agent_id,
             session_id,
-        })?;
+        }))?;
     }
 
     mark_agent_aborted(waap_root, agent_id)

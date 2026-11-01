@@ -2,7 +2,8 @@ use std::io;
 use std::path::Path;
 use std::process::ExitCode;
 
-use super::backend::{AgentSystemBackend, RunHandle, RunOutcome, StartContext};
+use super::backend::{AgentSystemBackend, RunOutcome, StartContext};
+use super::commands::CommandHandle;
 use super::control::{ControlRequestHandler, ControlServer, SocketListener, SocketPath};
 use super::worktree::{collapse_errors, AgentWorktree};
 use crate::agent::{
@@ -51,7 +52,7 @@ pub(crate) fn run_agent(
         output_format,
         agent_id,
         system,
-        backend.as_mut(),
+        &mut backend,
     )
 }
 
@@ -62,7 +63,7 @@ fn run_agent_with_backend(
     output_format: &OutputFormat,
     agent_id: &str,
     system: &AgentSystem,
-    backend: &mut dyn AgentSystemBackend,
+    backend: &mut impl AgentSystemBackend,
 ) -> io::Result<ExitCode> {
     {
         let _lock = crate::state::StateLock::acquire(waap_root)?;
@@ -124,7 +125,7 @@ fn run_started_agent(
     output_format: &OutputFormat,
     agent_id: &str,
     system: &AgentSystem,
-    backend: &mut dyn AgentSystemBackend,
+    backend: &mut impl AgentSystemBackend,
 ) -> io::Result<RunOutcome> {
     let repository_root = repository_root.canonicalize()?;
     let control_root = control_root?;
@@ -132,16 +133,16 @@ fn run_started_agent(
     let runtime = super::runtime::new()?;
     let mut worktree = AgentWorktree::create(&repository_root, agent_id)?;
     let prompt = build_agent_goal(waap_root, agent_id);
-    // Register process/signal I/O against this runtime during backend startup.
-    let _entered = runtime.enter();
-    let run_result = backend
-        .start(StartContext {
-            agent_id,
-            prompt: &prompt,
-            repository_root: &repository_root,
-            worktree_dir: worktree.dir(),
-        })
-        .and_then(|started| {
+    let run_result = runtime.block_on(async {
+        let mut started = backend
+            .start(StartContext {
+                agent_id,
+                prompt: &prompt,
+                repository_root: &repository_root,
+                worktree_dir: worktree.dir(),
+            })
+            .await?;
+        let result = async {
             update_agent_session(
                 waap_root,
                 output_format,
@@ -150,40 +151,42 @@ fn run_started_agent(
                 system.clone(),
             )?;
             let listener = SocketListener::bind(socket_path)?;
-            runtime.block_on(wait_with_control_async(
+            wait_with_control_async(
                 ControlServer::new(listener),
-                started.handle.as_ref(),
-            ))
-        });
+                started.driver.run(),
+                &started.handle,
+            )
+            .await
+        }
+        .await;
+        // Reap local children even after publication, transport, or protocol errors.
+        collapse_errors(result, started.driver.cleanup().await)
+    });
     let cleanup_result = worktree.cleanup();
     collapse_errors(run_result, cleanup_result)
 }
 
-#[cfg(test)]
-pub(super) fn wait_with_control(
-    server: ControlServer,
-    handle: &dyn RunHandle,
-) -> io::Result<RunOutcome> {
-    super::runtime::new()?.block_on(wait_with_control_async(server, handle))
-}
-
-async fn wait_with_control_async(
+pub(super) async fn wait_with_control_async(
     mut server: ControlServer,
-    handle: &dyn RunHandle,
+    wait: impl std::future::Future<Output = io::Result<RunOutcome>>,
+    handle: &CommandHandle,
 ) -> io::Result<RunOutcome> {
     use futures_util::FutureExt;
-    let handler = ControlRequestHandler::new(handle);
-    let (outcome, ()) = tokio::join!(
-        async {
-            let outcome = std::panic::AssertUnwindSafe(async { handle.wait().await })
-                .catch_unwind()
-                .await
-                .unwrap_or_else(|_| Err(io::Error::other("agent wait panicked")));
-            server.shutdown();
-            outcome
-        },
-        server.run(|connection| handler.serve(connection))
-    );
+    let outcome = {
+        let handler = ControlRequestHandler::new(handle);
+        let wait = std::panic::AssertUnwindSafe(wait).catch_unwind();
+        tokio::pin!(wait);
+        let result = tokio::select! {
+            result = &mut wait => result,
+            control = server.run(|connection| handler.serve(connection)) => {
+                // A broken control endpoint must not abandon a running backend.
+                if let Err(error) = control { log::error!("control server failed: {error}"); }
+                wait.await
+            }
+        };
+        result.unwrap_or_else(|_| Err(io::Error::other("agent wait panicked")))
+        // Leaving this scope drops the losing control future and every handler.
+    };
     collapse_errors(outcome, server.close())
 }
 
@@ -380,7 +383,7 @@ mod tests {
         output_format: &OutputFormat,
         agent_id: &str,
         system: &AgentSystem,
-        backend: &mut dyn crate::agent::backend::AgentSystemBackend,
+        backend: &mut impl crate::agent::backend::AgentSystemBackend,
     ) -> std::io::Result<ExitCode> {
         let runtime = tempdir().unwrap();
         use std::os::unix::fs::PermissionsExt;

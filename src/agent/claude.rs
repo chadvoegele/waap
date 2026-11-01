@@ -1,17 +1,13 @@
 use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, ExitStatus, Stdio};
-use std::sync::Mutex;
-use std::time::Instant;
+use std::process::{ExitStatus, Stdio};
+use tokio::process::Command as ProcessCommand;
 
 use super::process::AgentProcess;
 use uuid::Uuid;
 
-use super::backend::{
-    AbortContext, AgentSystemBackend, BackendFuture, RunHandle, RunOutcome, StartContext,
-    StartedRun, SteeringError,
-};
+use super::backend::{AbortContext, AgentSystemBackend, Run, RunOutcome, StartContext, StartedRun};
 
 pub(super) struct ClaudeBackend {
     config: ClaudeRunConfig,
@@ -26,7 +22,7 @@ impl ClaudeBackend {
 }
 
 impl AgentSystemBackend for ClaudeBackend {
-    fn start(&mut self, context: StartContext<'_>) -> io::Result<StartedRun> {
+    async fn start(&mut self, context: StartContext<'_>) -> io::Result<StartedRun> {
         let session_id = Uuid::new_v4().to_string();
         let command = build_claude_run_command(
             &self.config,
@@ -37,43 +33,26 @@ impl AgentSystemBackend for ClaudeBackend {
         );
         Ok(StartedRun {
             session_id,
-            handle: Box::new(ClaudeRun {
-                child: Mutex::new(Some(spawn_claude_attached(&command)?)),
+            handle: super::commands::CommandHandle::Unsupported("claude"),
+            driver: Run::Claude(ClaudeRun {
+                child: spawn_claude_attached(&command)?,
             }),
         })
     }
-
-    fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
-        kill_claude_session(context.session_id)
+    async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
+        kill_claude_session(context.session_id).await
     }
 }
 
-struct ClaudeRun {
-    child: Mutex<Option<AgentProcess>>,
+pub(super) struct ClaudeRun {
+    child: AgentProcess,
 }
-
-impl RunHandle for ClaudeRun {
-    fn wait(&self) -> BackendFuture<'_, io::Result<RunOutcome>> {
-        Box::pin(async move {
-            let mut child = self
-                .child
-                .lock()
-                .map_err(|_| io::Error::other("Claude process lock poisoned"))?
-                .take()
-                .ok_or_else(|| io::Error::other("Claude run already waited"))?;
-            // Attached process waiting is blocking; never block the async I/O loop.
-            tokio::task::spawn_blocking(move || Ok(RunOutcome::from_exit_status(child.wait()?)))
-                .await
-                .map_err(io::Error::other)?
-        })
+impl ClaudeRun {
+    pub(super) async fn run(&mut self) -> io::Result<RunOutcome> {
+        Ok(RunOutcome::from_exit_status(self.child.wait().await?))
     }
-
-    fn steer<'a>(
-        &'a self,
-        _prompt: &'a str,
-        _deadline: Instant,
-    ) -> BackendFuture<'a, Result<(), SteeringError>> {
-        Box::pin(async { Err(SteeringError::not_implemented("claude")) })
+    pub(super) async fn cleanup(&mut self) -> io::Result<()> {
+        self.child.terminate().await
     }
 }
 
@@ -97,12 +76,13 @@ fn claude_run_config_from_env() -> ClaudeRunConfig {
     }
 }
 
-fn kill_claude_session(session_id: &str) -> io::Result<()> {
+async fn kill_claude_session(session_id: &str) -> io::Result<()> {
     let status = ProcessCommand::new("pkill")
         .arg("-TERM")
         .arg("-f")
         .arg(session_id)
-        .status()?;
+        .status()
+        .await?;
     map_pkill_status(status)
 }
 
@@ -170,38 +150,24 @@ mod tests {
         ClaudeRunConfig,
     };
 
-    #[test]
-    fn steering_rejection_does_not_acquire_the_process_wait_lock() {
-        use super::{ClaudeRun, RunHandle, SteeringError};
-        use std::sync::Mutex;
-        use std::time::Instant;
-
+    #[tokio::test(flavor = "current_thread")]
+    async fn unsupported_steering_does_not_need_to_wait_for_the_process() {
         let command = ClaudeRunCommand {
-            program: "sh".to_string(),
-            args: vec!["-c".to_string(), "exit 0".to_string()],
+            program: "sh".into(),
+            args: vec!["-c".into(), "exit 0".into()],
             working_dir: std::env::temp_dir(),
         };
-        let run = ClaudeRun {
-            child: Mutex::new(Some(spawn_claude_attached(&command).unwrap())),
+        let mut run = super::ClaudeRun {
+            child: spawn_claude_attached(&command).unwrap(),
         };
-        let wait_lock = run.child.lock().unwrap();
-        crate::agent::control::tests::assert_backend_socket_rejection(&run, "claude");
-        let error =
-            crate::agent::runtime::block_on(run.steer("steer", Instant::now())).unwrap_err();
-        assert_eq!(error, SteeringError::not_implemented("claude"));
-        assert_eq!(
-            error.to_string(),
-            "steering not implemented for backend claude"
-        );
-        drop(wait_lock);
-        assert_eq!(
-            crate::agent::runtime::block_on(run.wait()).unwrap(),
-            super::RunOutcome::Completed
-        );
+        let handle = crate::agent::commands::CommandHandle::Unsupported("claude");
+        crate::agent::control::tests::assert_backend_socket_rejection(&handle, "claude").await;
+        assert_eq!(run.run().await.unwrap(), super::RunOutcome::Completed);
+        run.cleanup().await.unwrap();
     }
 
-    #[test]
-    fn spawn_claude_attached_returns_child_with_exit_code() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn spawn_claude_attached_returns_child_with_exit_code() {
         let command = ClaudeRunCommand {
             program: "sh".to_string(),
             args: vec!["-c".to_string(), "exit 5".to_string()],
@@ -209,20 +175,24 @@ mod tests {
         };
 
         let mut child = spawn_claude_attached(&command).unwrap();
-        let status = child.wait().unwrap();
+        let status = child.wait().await.unwrap();
 
         assert_eq!(status.code(), Some(5));
     }
 
-    #[test]
-    fn spawn_claude_attached_connects_stdin_to_null() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn spawn_claude_attached_connects_stdin_to_null() {
         let command = ClaudeRunCommand {
             program: "sh".to_string(),
             args: vec!["-c".to_string(), "read value; test $? -ne 0".to_string()],
             working_dir: std::env::temp_dir(),
         };
 
-        let status = spawn_claude_attached(&command).unwrap().wait().unwrap();
+        let status = spawn_claude_attached(&command)
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
 
         assert!(status.success());
     }

@@ -56,6 +56,8 @@ import json, os, sys, time
 with open(os.environ['WAAP_TEST_PID_FILE'], 'w') as file:
     file.write(str(os.getpid()))
 mode = os.environ['WAAP_TEST_MODE']
+if mode == 'startup-held':
+    time.sleep(60)
 root = os.path.dirname(os.environ['WAAP_TEST_PID_FILE'])
 steers = 0
 def emit(value):
@@ -221,6 +223,54 @@ fn codex_success_failure_and_malformed_startup_reap_process_and_clean_worktree()
         assert!(!git(root, &["worktree", "list"]).contains("worktrees/aa-test"));
         assert!(waap(root, &["check"], mode).status.success());
     }
+}
+
+#[test]
+fn sigterm_during_async_startup_reaps_child_before_worktree_cleanup() {
+    let repo = tempfile::tempdir().unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    init_repo(root);
+    seed_backend(root);
+    fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(waap(root, &["init"], "startup-held").status.success());
+    assert!(
+        waap(root, &["agent", "new", "--name", "Test"], "startup-held")
+            .status
+            .success()
+    );
+    let mut child = RunningChild(Some(
+        waap_command(root, "startup-held", runtime.path())
+            .args(["agent", "run", "--agent-id", "aa-test", "--system", "codex"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    ));
+    wait_until(|| {
+        fs::read_to_string(root.join("backend.pid"))
+            .ok()
+            .and_then(|pid| pid.parse::<u32>().ok())
+            .is_some()
+    });
+    let pid = fs::read_to_string(root.join("backend.pid")).unwrap();
+    assert!(Command::new("kill")
+        .args(["-TERM", &child.0.as_ref().unwrap().id().to_string()])
+        .status()
+        .unwrap()
+        .success());
+    wait_until(|| child.0.as_mut().unwrap().try_wait().unwrap().is_some());
+    let output = child.0.take().unwrap().wait_with_output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("startup interrupted"));
+    assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    assert!(!root.join("worktrees/aa-test").exists());
+    assert!(!git(root, &["worktree", "list"]).contains("worktrees/aa-test"));
+    assert!(
+        fs::read_to_string(root.join(".state/agents/aa-test/agent.md"))
+            .unwrap()
+            .contains("status = \"failed\"")
+    );
 }
 
 struct RunningChild(Option<std::process::Child>);

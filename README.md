@@ -75,7 +75,7 @@ Then run your agent with `waap agent run --agent-id aa-file-picker-implementer`.
 
 Steer a running agent with `waap agent steer --agent-id aa-file-picker-implementer --prompt "Focus on keyboard navigation"`.
 
-Steering currently supports Codex. Only one native steering acknowledgement may be outstanding; competing requests receive `busy`, including after an uncertain timeout until the earlier acknowledgement arrives. A single-threaded Tokio runtime drives Codex I/O and at most eight concurrent async control handlers, with no application waiting queue; excess connections are closed without acceptance. Slow clients do not block other handlers; each frame has a five-second deadline. Run completion cancels active handlers and closes their sockets. Steering calls have 30-second acknowledgement deadlines. Claude/OpenCode's blocking waits are isolated on Tokio's blocking pool.
+Steering currently supports Codex. Only one native steering acknowledgement may be outstanding; competing requests receive `busy`, including after an uncertain timeout until the earlier acknowledgement arrives. A single-threaded Tokio runtime drives backend startup, I/O, and at most eight concurrent async control handlers, with no application waiting queue; excess connections are closed without acceptance. Slow clients do not block other handlers; each frame has a five-second deadline. Run completion drops the control-server future, cancelling its handlers and closing their sockets. Local children are terminated and reaped before worktree cleanup. Steering calls have 30-second acknowledgement deadlines.
 
 ## `waap` Loop
 

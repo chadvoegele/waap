@@ -12,7 +12,11 @@ pub(in crate::agent) struct SocketListener {
 
 impl SocketListener {
     pub(in crate::agent) fn async_listener(&self) -> io::Result<tokio::net::UnixListener> {
-        tokio::net::UnixListener::from_std(self.listener.as_ref().unwrap().try_clone()?)
+        let listener = self
+            .listener
+            .as_ref()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotConnected))?;
+        tokio::net::UnixListener::from_std(listener.try_clone()?)
     }
 
     pub(in crate::agent) fn bind(path: SocketPath) -> io::Result<Self> {

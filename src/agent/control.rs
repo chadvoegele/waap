@@ -20,7 +20,8 @@ pub(in crate::agent) mod tests {
     use super::socket::AsyncSocketConnection;
     use super::socket::MAX_FRAME_BYTES;
     use super::*;
-    use crate::agent::backend::{BackendFuture, RunHandle, RunOutcome, SteeringError};
+    use crate::agent::backend::{RunOutcome, SteeringError};
+    use crate::agent::commands::{Command, CommandHandle};
     use crate::root::{find_control_root_in, ControlRoot};
     use serde_json::{json, Value};
     use std::fs;
@@ -28,7 +29,6 @@ pub(in crate::agent) mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicBool;
     use std::sync::{
         mpsc::{self, Receiver},
         Arc, Mutex,
@@ -45,8 +45,32 @@ pub(in crate::agent) mod tests {
     }
 
     impl Fixture {
-        fn wait(self, run: &dyn RunHandle) -> io::Result<RunOutcome> {
-            crate::agent::run::wait_with_control(self.server, run)
+        fn wait<F: Fn(&str, Instant) -> Result<(), SteeringError>>(
+            self,
+            run: &Run<F>,
+        ) -> io::Result<RunOutcome> {
+            crate::agent::runtime::block_on(async {
+                let (handle, mut commands) = CommandHandle::channel();
+                let completion = Arc::clone(&run.completion);
+                let wait = async {
+                    let mut completion = tokio::task::spawn_blocking(move || {
+                        completion
+                            .lock()
+                            .unwrap()
+                            .recv_timeout(Duration::from_secs(10))
+                            .unwrap();
+                    });
+                    loop {
+                        tokio::select! {
+                            result = &mut completion => { result.unwrap(); return Ok(RunOutcome::Completed); }
+                            Some(Command::Steer(mut request)) = commands.recv() => {
+                                request.respond((run.steer)(&request.message, request.deadline));
+                            }
+                        }
+                    }
+                };
+                crate::agent::run::wait_with_control_async(self.server, wait, &handle).await
+            })
         }
 
         fn new() -> Self {
@@ -78,31 +102,6 @@ pub(in crate::agent) mod tests {
         completion: Arc<Mutex<Receiver<()>>>,
     }
 
-    impl<F: Fn(&str, Instant) -> Result<(), SteeringError> + Sync> RunHandle for Run<F> {
-        fn wait(&self) -> BackendFuture<'_, io::Result<RunOutcome>> {
-            let completion = Arc::clone(&self.completion);
-            Box::pin(async move {
-                tokio::task::spawn_blocking(move || {
-                    completion
-                        .lock()
-                        .unwrap()
-                        .recv_timeout(Duration::from_secs(10))
-                        .unwrap();
-                    Ok(RunOutcome::Completed)
-                })
-                .await
-                .map_err(io::Error::other)?
-            })
-        }
-        fn steer<'a>(
-            &'a self,
-            prompt: &'a str,
-            deadline: Instant,
-        ) -> BackendFuture<'a, Result<(), SteeringError>> {
-            Box::pin(async move { (self.steer)(prompt, deadline) })
-        }
-    }
-
     fn bind_server(root: &ControlRoot, agent_id: &str) -> io::Result<ControlServer> {
         Ok(ControlServer::new(SocketListener::bind(
             SocketPath::for_agent(root, agent_id)?,
@@ -115,16 +114,16 @@ pub(in crate::agent) mod tests {
 
     fn serve_connection(
         stream: UnixStream,
-        run: &dyn RunHandle,
-        _completed: &AtomicBool,
+        run: &Run<impl Fn(&str, Instant) -> Result<(), SteeringError>>,
     ) -> io::Result<()> {
         stream.set_nonblocking(true)?;
         crate::agent::runtime::block_on(async {
-            ControlRequestHandler::new(run)
-                .serve(AsyncSocketConnection::new(
-                    tokio::net::UnixStream::from_std(stream)?,
-                ))
-                .await
+            let (handle, mut commands) = CommandHandle::channel();
+            let handler = ControlRequestHandler::new(&handle);
+            tokio::select! {
+                result = handler.serve(AsyncSocketConnection::new(tokio::net::UnixStream::from_std(stream)?)) => result,
+                Some(Command::Steer(request)) = commands.recv() => { (run.steer)(&request.message, request.deadline).unwrap(); panic!("unexpected dispatch"); }
+            }
         })
     }
 
@@ -176,118 +175,103 @@ pub(in crate::agent) mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn delayed_ack_does_not_serialize_handlers_and_shutdown_cancels_reply_wait() {
-        struct HeldRun {
-            entered: tokio::sync::Notify,
-            release: tokio::sync::Notify,
-        }
-        impl RunHandle for HeldRun {
-            fn wait(&self) -> BackendFuture<'_, io::Result<RunOutcome>> {
-                Box::pin(std::future::pending())
-            }
-            fn steer<'a>(
-                &'a self,
-                prompt: &'a str,
-                _: Instant,
-            ) -> BackendFuture<'a, Result<(), SteeringError>> {
-                Box::pin(async move {
-                    if prompt == "first" {
-                        self.entered.notify_one();
-                        self.release.notified().await;
-                    }
-                    Ok(())
-                })
-            }
-        }
-        let mut fixture = Fixture::new();
-        let run = HeldRun {
-            entered: tokio::sync::Notify::new(),
-            release: tokio::sync::Notify::new(),
+    async fn delayed_ack_does_not_serialize_handlers_and_completion_cancels_reply_wait() {
+        let fixture = Fixture::new();
+        let path = fixture.path.clone();
+        let (handle, mut commands) = CommandHandle::channel();
+        let entered = tokio::sync::Notify::new();
+        let release = tokio::sync::Notify::new();
+        let complete = tokio::sync::Notify::new();
+        let driver = async {
+            let actor = async {
+                let Some(Command::Steer(mut first)) = commands.recv().await else {
+                    panic!()
+                };
+                entered.notify_one();
+                let Some(Command::Steer(mut second)) = commands.recv().await else {
+                    panic!()
+                };
+                second.respond(Ok(()));
+                release.notified().await;
+                first.respond(Ok(()));
+                let Some(Command::Steer(_held)) = commands.recv().await else {
+                    panic!()
+                };
+                entered.notify_one();
+                std::future::pending::<()>().await;
+            };
+            tokio::select! { _ = complete.notified() => Ok(RunOutcome::Completed), _ = actor => panic!() }
         };
-        let handler = ControlRequestHandler::new(&run);
         tokio::time::timeout(Duration::from_secs(2), async {
-            tokio::join!(
-                fixture.server.run(|connection| handler.serve(connection)),
+            let (outcome, ()) = tokio::join!(
+                crate::agent::run::wait_with_control_async(fixture.server, driver, &handle),
                 async {
                     let mut first = AsyncSocketConnection::new(
-                        tokio::net::UnixStream::connect(&fixture.path)
-                            .await
-                            .unwrap(),
+                        tokio::net::UnixStream::connect(&path).await.unwrap(),
                     );
                     let bytes = frame("first");
                     first.write_frame(&bytes[..bytes.len() - 1]).await.unwrap();
-                    run.entered.notified().await;
+                    entered.notified().await;
                     let mut second = AsyncSocketConnection::new(
-                        tokio::net::UnixStream::connect(&fixture.path)
-                            .await
-                            .unwrap(),
+                        tokio::net::UnixStream::connect(&path).await.unwrap(),
                     );
                     let bytes = frame("second");
                     second.write_frame(&bytes[..bytes.len() - 1]).await.unwrap();
                     let reply: Value =
                         serde_json::from_slice(&second.read_frame().await.unwrap()).unwrap();
                     assert_eq!(reply["accepted"], true);
-                    run.release.notify_one();
+                    release.notify_one();
                     let reply: Value =
                         serde_json::from_slice(&first.read_frame().await.unwrap()).unwrap();
                     assert_eq!(reply["accepted"], true);
                     let mut held = AsyncSocketConnection::new(
-                        tokio::net::UnixStream::connect(&fixture.path)
-                            .await
-                            .unwrap(),
+                        tokio::net::UnixStream::connect(&path).await.unwrap(),
                     );
-                    let bytes = frame("first");
+                    let bytes = frame("held");
                     held.write_frame(&bytes[..bytes.len() - 1]).await.unwrap();
-                    run.entered.notified().await;
-                    fixture.server.shutdown();
+                    entered.notified().await;
+                    complete.notify_one();
                     assert_eq!(
                         held.read_frame().await.unwrap_err().kind(),
                         io::ErrorKind::UnexpectedEof
                     );
                 }
             );
+            assert_eq!(outcome.unwrap(), RunOutcome::Completed);
         })
         .await
         .unwrap();
+        assert!(!path.exists());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn control_failure_does_not_restart_or_abandon_the_backend_future() {
+        let mut fixture = Fixture::new();
         fixture.server.close().unwrap();
+        let calls = std::cell::Cell::new(0);
+        let (complete, completion) = tokio::sync::oneshot::channel();
+        let handle = CommandHandle::Unsupported("test");
+        let wait = async {
+            calls.set(calls.get() + 1);
+            completion.await.unwrap();
+            Ok(RunOutcome::Completed)
+        };
+        let (outcome, ()) = tokio::join!(
+            crate::agent::run::wait_with_control_async(fixture.server, wait, &handle),
+            async {
+                tokio::task::yield_now().await;
+                complete.send(()).unwrap();
+            }
+        );
+        assert_eq!(outcome.unwrap(), RunOutcome::Completed);
+        assert_eq!(calls.get(), 1);
     }
 
     #[test]
-    fn backend_and_control_futures_are_polled_on_the_owner_thread() {
-        struct OwnerRun {
-            owner: thread::ThreadId,
-            completion: Arc<Mutex<Receiver<()>>>,
-        }
-        impl RunHandle for OwnerRun {
-            fn wait(&self) -> BackendFuture<'_, io::Result<RunOutcome>> {
-                let completion = Arc::clone(&self.completion);
-                Box::pin(async move {
-                    assert_eq!(thread::current().id(), self.owner);
-                    tokio::task::spawn_blocking(move || {
-                        completion
-                            .lock()
-                            .unwrap()
-                            .recv_timeout(Duration::from_secs(3))
-                            .unwrap();
-                    })
-                    .await
-                    .unwrap();
-                    Ok(RunOutcome::Completed)
-                })
-            }
-            fn steer<'a>(
-                &'a self,
-                _: &'a str,
-                _: Instant,
-            ) -> BackendFuture<'a, Result<(), SteeringError>> {
-                Box::pin(async move {
-                    assert_eq!(thread::current().id(), self.owner);
-                    Ok(())
-                })
-            }
-        }
+    fn command_actor_and_control_are_polled_on_the_owner_thread() {
         let fixture = Fixture::new();
         let path = fixture.path.clone();
+        let owner = thread::current().id();
         let (complete, completion) = mpsc::channel();
         let client = thread::spawn(move || {
             let mut stream = connect(&path);
@@ -296,9 +280,12 @@ pub(in crate::agent) mod tests {
             complete.send(()).unwrap();
         });
         fixture
-            .wait(&OwnerRun {
-                owner: thread::current().id(),
+            .wait(&Run {
                 completion: Arc::new(Mutex::new(completion)),
+                steer: |_: &str, _| {
+                    assert_eq!(thread::current().id(), owner);
+                    Ok(())
+                },
             })
             .unwrap();
         client.join().unwrap();
@@ -346,7 +333,7 @@ pub(in crate::agent) mod tests {
                 steer: |_: &str, _| panic!("invalid request dispatched"),
             };
             thread::scope(|scope| {
-                scope.spawn(|| serve_connection(server, &run, &AtomicBool::new(false)).unwrap());
+                scope.spawn(|| serve_connection(server, &run).unwrap());
                 client.write_all(&bytes).unwrap();
                 let value = read_response(client);
                 assert_eq!(value["accepted"], false);
@@ -467,56 +454,42 @@ pub(in crate::agent) mod tests {
         assert!(bind_server(&root, "aa-2").is_err());
     }
 
-    pub(in crate::agent) fn assert_backend_socket_rejection(target: &dyn RunHandle, backend: &str) {
-        struct Proxy<'a> {
-            target: &'a dyn RunHandle,
-            completion: Arc<Mutex<Receiver<()>>>,
-        }
-        impl RunHandle for Proxy<'_> {
-            fn wait(&self) -> BackendFuture<'_, io::Result<RunOutcome>> {
-                let completion = Arc::clone(&self.completion);
-                Box::pin(async move {
-                    tokio::task::spawn_blocking(move || {
-                        completion
-                            .lock()
-                            .unwrap()
-                            .recv_timeout(Duration::from_secs(3))
-                            .unwrap();
-                        Ok(RunOutcome::Completed)
-                    })
-                    .await
-                    .map_err(io::Error::other)?
-                })
-            }
-            fn steer<'a>(
-                &'a self,
-                prompt: &'a str,
-                deadline: Instant,
-            ) -> BackendFuture<'a, Result<(), SteeringError>> {
-                self.target.steer(prompt, deadline)
-            }
-        }
+    pub(in crate::agent) async fn assert_backend_socket_rejection(
+        handle: &CommandHandle,
+        backend: &str,
+    ) {
         let fixture = Fixture::new();
         let path = fixture.path.clone();
-        let (complete, completion) = mpsc::channel();
-        let client = thread::spawn(move || {
-            let mut stream = connect(&path);
-            stream.write_all(&frame("steer")).unwrap();
-            let result = read_response(stream);
-            complete.send(()).unwrap();
-            result
-        });
-        fixture
-            .wait(&Proxy {
-                target,
-                completion: Arc::new(Mutex::new(completion)),
-            })
-            .unwrap();
-        let value = client.join().unwrap();
-        assert_eq!(value["accepted"], false);
-        assert_eq!(value["error"]["code"], "not_implemented");
+        let complete = tokio::sync::Notify::new();
+        let (outcome, reply) = tokio::join!(
+            crate::agent::run::wait_with_control_async(
+                fixture.server,
+                async {
+                    complete.notified().await;
+                    Ok(RunOutcome::Completed)
+                },
+                handle
+            ),
+            async {
+                let mut connection = AsyncSocketConnection::new(
+                    tokio::net::UnixStream::connect(&path).await.unwrap(),
+                );
+                let bytes = frame("steer");
+                connection
+                    .write_frame(&bytes[..bytes.len() - 1])
+                    .await
+                    .unwrap();
+                let reply: Value =
+                    serde_json::from_slice(&connection.read_frame().await.unwrap()).unwrap();
+                complete.notify_one();
+                reply
+            }
+        );
+        outcome.unwrap();
+        assert_eq!(reply["accepted"], false);
+        assert_eq!(reply["error"]["code"], "not_implemented");
         assert_eq!(
-            value["error"]["message"],
+            reply["error"]["message"],
             format!("steering not implemented for backend {backend}")
         );
     }

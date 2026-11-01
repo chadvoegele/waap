@@ -1,28 +1,33 @@
 use std::collections::VecDeque;
 use std::env;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io;
+#[cfg(test)]
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{ChildStdin, ChildStdout, Command as ProcessCommand, Stdio};
+use std::process::Stdio;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
 use std::sync::Arc;
+#[cfg(test)]
 use std::sync::Mutex;
 #[cfg(test)]
 use std::thread;
 #[cfg(test)]
 use std::time::Duration;
 use std::time::Instant;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
+};
+use tokio::process::{ChildStdin, ChildStdout, Command as ProcessCommand};
 use tokio::sync::mpsc::Receiver;
 
-use super::request_reply;
+use super::commands::{Command, CommandHandle, SteerRequest, SteeringResult};
 
 use serde_json::{json, Value as JsonValue};
 
 use super::backend::{
-    AbortContext, AgentSystemBackend, BackendFuture, RunHandle, RunOutcome, StartContext,
-    StartedRun, SteeringError,
+    AbortContext, AgentSystemBackend, Run, RunOutcome, StartContext, StartedRun, SteeringError,
 };
 use super::process::AgentProcess;
 use super::{AgentRunOptions, ReasoningEffort};
@@ -41,124 +46,82 @@ impl CodexBackend {
 }
 
 impl AgentSystemBackend for CodexBackend {
-    fn start(&mut self, context: StartContext<'_>) -> io::Result<StartedRun> {
-        let interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    async fn start(&mut self, context: StartContext<'_>) -> io::Result<StartedRun> {
+        let mut interrupt =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let mut server = spawn_codex_app_server(&self.config, context.worktree_dir)?;
-        server.client.initialize()?;
-        let thread_id = server.client.thread_start(context.worktree_dir)?;
-        let (steering_sender, steering_receiver) = request_reply::channel(1);
+        let startup = tokio::select! {
+            result = async {
+                server.client.initialize().await?;
+                server.client.thread_start(context.worktree_dir).await
+            } => result,
+            _ = interrupt.recv() => Err(io::Error::new(io::ErrorKind::Interrupted, "Codex startup interrupted")),
+        };
+        let thread_id = match startup {
+            Ok(thread_id) => thread_id,
+            Err(error) => {
+                return super::worktree::collapse_errors(
+                    Err(error),
+                    server.process.terminate().await,
+                )
+            }
+        };
+        let (handle, steering_receiver) = CommandHandle::channel();
         Ok(StartedRun {
             session_id: thread_id.clone(),
-            handle: Box::new(CodexRun {
-                state: Mutex::new(Some(CodexRunState {
-                    server,
-                    steering_receiver,
-                    interrupt,
-                })),
-                steering_sender,
+            handle,
+            driver: Run::Codex(Box::new(CodexRun {
+                server,
+                steering_receiver,
+                interrupt,
                 thread_id,
                 prompt: context.prompt.to_string(),
-            }),
+            })),
         })
     }
-
-    fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
-        signal_codex_run(context.agent_id)
+    async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
+        signal_codex_run(context.agent_id).await
     }
 }
 
 struct CodexAppServer {
-    client: CodexClient<BufReader<ChildStdout>, ChildStdin, io::Stdout>,
-    _process: AgentProcess,
+    client: CodexClient<tokio::io::BufReader<ChildStdout>, ChildStdin, tokio::io::Stdout>,
+    process: AgentProcess,
 }
-
-struct CodexRunState {
+pub(super) struct CodexRun {
     server: CodexAppServer,
-    steering_receiver: Receiver<SteerRequest>,
+    steering_receiver: Receiver<Command>,
     interrupt: tokio::signal::unix::Signal,
-}
-
-struct CodexRun {
-    state: Mutex<Option<CodexRunState>>,
-    steering_sender: request_reply::Client<String, SteeringResult>,
     thread_id: String,
     prompt: String,
 }
-
-impl RunHandle for CodexRun {
-    fn wait(&self) -> BackendFuture<'_, io::Result<RunOutcome>> {
-        Box::pin(async move {
-            let CodexRunState {
-                server,
-                steering_receiver,
-                mut interrupt,
-            } = self
-                .state
-                .lock()
-                .map_err(|_| io::Error::other("Codex app-server lock poisoned"))?
-                .take()
-                .ok_or_else(|| io::Error::other("Codex run already waited"))?;
-            let CodexAppServer { client, _process } = server;
-            // Preserve any notifications read ahead during synchronous startup.
-            let buffer = client.reader.buffer().to_vec();
-            let mut client = CodexClient {
-                reader: tokio::process::ChildStdout::from_std(client.reader.into_inner())?,
-                writer: tokio::process::ChildStdin::from_std(client.writer)?,
-                out: client.out,
-                next_id: client.next_id,
-                model: client.model,
-                reasoning_effort: client.reasoning_effort,
-            };
-            let status = client
-                .run_turn(
-                    &self.thread_id,
-                    &self.prompt,
-                    async {
-                        interrupt.recv().await;
-                    },
-                    steering_receiver,
-                    buffer,
-                )
-                .await?;
-            if status.is_success() {
-                Ok(RunOutcome::Completed)
-            } else {
-                Ok(RunOutcome::Failed(std::process::ExitCode::FAILURE))
-            }
-        })
+impl CodexRun {
+    pub(super) async fn run(&mut self) -> io::Result<RunOutcome> {
+        let interrupt = &mut self.interrupt;
+        let status = self
+            .server
+            .client
+            .run_turn(
+                &self.thread_id,
+                &self.prompt,
+                async {
+                    interrupt.recv().await;
+                },
+                &mut self.steering_receiver,
+            )
+            .await;
+        self.steering_receiver.close();
+        while self.steering_receiver.try_recv().is_ok() {}
+        if status?.is_success() {
+            Ok(RunOutcome::Completed)
+        } else {
+            Ok(RunOutcome::Failed(std::process::ExitCode::FAILURE))
+        }
     }
-
-    fn steer<'a>(
-        &'a self,
-        prompt: &'a str,
-        deadline: Instant,
-    ) -> BackendFuture<'a, SteeringResult> {
-        Box::pin(async move {
-            if Instant::now() >= deadline {
-                return Err(reject(
-                    "timeout",
-                    "Steering request expired before Codex dispatch",
-                ));
-            }
-            self.steering_sender
-                .call(prompt.to_string(), deadline)
-                .await
-                .unwrap_or_else(|error| {
-                    Err(match error {
-                        request_reply::CallError::QueueFull => {
-                            reject("busy", "Codex steering dispatch is busy")
-                        }
-                        request_reply::CallError::ReceiverClosed => reject(
-                            "agent_exited",
-                            "Codex protocol owner exited before steering dispatch",
-                        ),
-                        request_reply::CallError::Timeout
-                        | request_reply::CallError::ReplyClosed => build_acceptance_unknown_error(
-                            "no reply received before the deadline or driver exit",
-                        ),
-                    })
-                })
-        })
+    pub(super) async fn cleanup(&mut self) -> io::Result<()> {
+        self.steering_receiver.close();
+        while self.steering_receiver.try_recv().is_ok() {}
+        self.server.process.terminate().await
     }
 }
 
@@ -218,17 +181,17 @@ fn get_codex_run_config(options: &AgentRunOptions) -> io::Result<CodexRunConfig>
     })
 }
 
-fn signal_codex_run(agent_id: &str) -> io::Result<()> {
+async fn signal_codex_run(agent_id: &str) -> io::Result<()> {
     let mut command = ProcessCommand::new("pkill");
     command
         .arg("-TERM")
         .arg("-f")
         .arg(format!("agent run --agent-id {agent_id}"));
-    map_pkill_status(command)
+    map_pkill_status(command).await
 }
 
-fn map_pkill_status(mut command: ProcessCommand) -> io::Result<()> {
-    let status = command.status()?;
+async fn map_pkill_status(mut command: ProcessCommand) -> io::Result<()> {
+    let status = command.status().await?;
     match status.code() {
         Some(0) | Some(1) => Ok(()),
         Some(code) => Err(io::Error::other(format!("pkill exited with status {code}"))),
@@ -380,14 +343,14 @@ fn spawn_codex_app_server(
     let stdout = process.take_stdout()?;
     Ok(CodexAppServer {
         client: CodexClient {
-            reader: BufReader::new(stdout),
+            reader: tokio::io::BufReader::new(stdout),
             writer,
-            out: io::stdout(),
+            out: tokio::io::stdout(),
             next_id: 0,
             model: config.model.clone(),
             reasoning_effort: config.reasoning_effort,
         },
-        _process: process,
+        process,
     })
 }
 
@@ -400,17 +363,17 @@ fn codex_app_server_command(worktree_dir: &Path) -> ProcessCommand {
     command
 }
 
-impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
-    fn write_line(&mut self, line: &str) -> io::Result<()> {
-        self.writer.write_all(line.as_bytes())?;
-        self.writer.flush()
+impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> CodexClient<R, W, O> {
+    async fn write_line(&mut self, line: &str) -> io::Result<()> {
+        self.writer.write_all(line.as_bytes()).await?;
+        self.writer.flush().await
     }
 
-    fn read_message(&mut self) -> io::Result<Option<JsonValue>> {
+    async fn read_message(&mut self) -> io::Result<Option<JsonValue>> {
         let mut line = String::new();
         loop {
             line.clear();
-            if self.reader.read_line(&mut line)? == 0 {
+            if self.reader.read_line(&mut line).await? == 0 {
                 return Ok(None);
             }
             if line.trim().is_empty() {
@@ -426,13 +389,13 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
         }
     }
 
-    fn send_request(&mut self, method: &str, params: JsonValue) -> io::Result<JsonValue> {
+    async fn send_request(&mut self, method: &str, params: JsonValue) -> io::Result<JsonValue> {
         let id = self.next_id;
         self.next_id += 1;
-        self.write_line(&request_line(id, method, params))?;
+        self.write_line(&request_line(id, method, params)).await?;
 
         loop {
-            let message = self.read_message()?.ok_or_else(|| {
+            let message = self.read_message().await?.ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     format!("codex app-server closed before responding to request {id}"),
@@ -441,7 +404,7 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
 
             if message.get("method").is_some() {
                 if message.get("id").is_none() {
-                    self.forward_delta(&message)?;
+                    self.forward_delta(&message).await?;
                 }
                 continue;
             }
@@ -458,14 +421,16 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
         }
     }
 
-    fn initialize(&mut self) -> io::Result<()> {
-        self.send_request(METHOD_INITIALIZE, initialize_params())?;
+    async fn initialize(&mut self) -> io::Result<()> {
+        self.send_request(METHOD_INITIALIZE, initialize_params())
+            .await?;
         self.write_line(&notification_line(METHOD_INITIALIZED))
+            .await
     }
 
-    fn thread_start(&mut self, cwd: &Path) -> io::Result<String> {
+    async fn thread_start(&mut self, cwd: &Path) -> io::Result<String> {
         let params = thread_start_params(cwd, self.model.as_deref());
-        let result = self.send_request(METHOD_THREAD_START, params)?;
+        let result = self.send_request(METHOD_THREAD_START, params).await?;
         result
             .pointer("/thread/id")
             .and_then(JsonValue::as_str)
@@ -478,10 +443,6 @@ impl<R: BufRead, W: Write, O: Write> CodexClient<R, W, O> {
             })
     }
 }
-
-type SteeringResult = Result<(), SteeringError>;
-
-type SteerRequest = request_reply::Call<String, SteeringResult>;
 
 fn reject(code: &'static str, message: &str) -> SteeringError {
     SteeringError::Rejected {
@@ -532,14 +493,13 @@ struct TurnState<'a> {
     interrupt_request_id: Option<i64>,
 }
 
-impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, O: Write> CodexClient<R, W, O> {
+impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> CodexClient<R, W, O> {
     async fn run_turn(
         &mut self,
         thread_id: &str,
         prompt: &str,
         interrupt: impl std::future::Future<Output = ()>,
-        mut steering_receiver: Receiver<SteerRequest>,
-        mut buffer: Vec<u8>,
+        steering_receiver: &mut Receiver<Command>,
     ) -> io::Result<TurnStatus> {
         let mut turn = TurnState {
             thread_id,
@@ -564,8 +524,9 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, O: Write> CodexClient<R, W, O>
         let mut interrupted = false;
         let mut channel_open = true;
         let mut chunk = [0; 8192];
+        let mut buffer = Vec::new();
         loop {
-            if let Some(status) = self.process_frames(&mut turn, &mut buffer)? {
+            if let Some(status) = self.process_frames(&mut turn, &mut buffer).await? {
                 return status;
             }
             self.prepare_writes(&mut turn);
@@ -603,7 +564,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, O: Write> CodexClient<R, W, O>
                 }
                 request = steering_receiver.recv(), if channel_open => {
                     match request {
-                        Some(request) => self.dispatch_steering(&mut turn, request),
+                        Some(Command::Steer(request)) => self.dispatch_steering(&mut turn, request),
                         None => channel_open = false,
                     }
                 }
@@ -621,18 +582,18 @@ async fn wait_for_deadline(deadline: Option<Instant>) {
     }
 }
 
-impl<R, W, O: Write> CodexClient<R, W, O> {
-    fn forward_delta(&mut self, message: &JsonValue) -> io::Result<()> {
+impl<R, W, O: AsyncWrite + Unpin> CodexClient<R, W, O> {
+    async fn forward_delta(&mut self, message: &JsonValue) -> io::Result<()> {
         if message.get("method").and_then(JsonValue::as_str) == Some(METHOD_AGENT_MESSAGE_DELTA) {
             if let Some(delta) = message.pointer("/params/delta").and_then(JsonValue::as_str) {
-                self.out.write_all(delta.as_bytes())?;
-                self.out.flush()?;
+                self.out.write_all(delta.as_bytes()).await?;
+                self.out.flush().await?;
             }
         }
         Ok(())
     }
 
-    fn process_frames(
+    async fn process_frames(
         &mut self,
         turn: &mut TurnState<'_>,
         buffer: &mut Vec<u8>,
@@ -651,7 +612,7 @@ impl<R, W, O: Write> CodexClient<R, W, O> {
                     "codex app-server sent malformed JSON",
                 )
             })?;
-            if let Some(status) = self.process_message(turn, &message)? {
+            if let Some(status) = self.process_message(turn, &message).await? {
                 return Ok(Some(status));
             }
         }
@@ -763,13 +724,13 @@ impl<R, W, O: Write> CodexClient<R, W, O> {
         }
     }
 
-    fn process_message(
+    async fn process_message(
         &mut self,
         turn: &mut TurnState<'_>,
         message: &JsonValue,
     ) -> io::Result<Option<io::Result<TurnStatus>>> {
         if message.get("method").is_some() {
-            return self.process_notification(turn, message);
+            return self.process_notification(turn, message).await;
         }
         let Some(id) = message.get("id").and_then(JsonValue::as_i64) else {
             return Ok(None);
@@ -794,7 +755,7 @@ impl<R, W, O: Write> CodexClient<R, W, O> {
         Ok(None)
     }
 
-    fn process_notification(
+    async fn process_notification(
         &mut self,
         turn: &mut TurnState<'_>,
         message: &JsonValue,
@@ -804,8 +765,8 @@ impl<R, W, O: Write> CodexClient<R, W, O> {
         }
         if let Some(turn_id) = &turn.turn_id {
             if let Some(delta) = delta_for_turn(message, turn.thread_id, turn_id) {
-                self.out.write_all(delta.as_bytes())?;
-                self.out.flush()?;
+                self.out.write_all(delta.as_bytes()).await?;
+                self.out.flush().await?;
             }
             return Ok(completed_status_for_turn(message, turn.thread_id, turn_id));
         }
@@ -816,7 +777,7 @@ impl<R, W, O: Write> CodexClient<R, W, O> {
         {
             return Ok(None);
         }
-        self.forward_delta(message)?;
+        self.forward_delta(message).await?;
         if let Some(id) = message
             .pointer("/params/turn/id")
             .and_then(JsonValue::as_str)
@@ -915,21 +876,34 @@ mod steering_tests {
         }
     }
 
-    fn create_test_run() -> (CodexRun, Receiver<SteerRequest>) {
-        let (steering_sender, steering_receiver) = request_reply::channel(1);
-        (
-            CodexRun {
-                state: Mutex::new(None),
-                steering_sender,
-                thread_id: "th".to_string(),
-                prompt: "initial".to_string(),
-            },
-            steering_receiver,
-        )
+    impl AsyncWrite for CapturedOutput {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            bytes: &[u8],
+        ) -> std::task::Poll<io::Result<usize>> {
+            std::task::Poll::Ready(Write::write(&mut *self, bytes))
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    fn create_test_run() -> (CommandHandle, Receiver<Command>) {
+        CommandHandle::channel()
     }
 
     struct TestMailbox {
-        run: CodexRun,
+        run: CommandHandle,
         finished: AtomicBool,
         output: CapturedOutput,
     }
@@ -1005,6 +979,7 @@ mod steering_tests {
         let (interrupt, mut interrupts) = tokio::sync::watch::channel(false);
         let result = thread::scope(|scope| {
             let worker = scope.spawn(|| {
+                let mut steering_receiver = steering_receiver;
                 let result = crate::agent::runtime::block_on(async {
                     let (reader, writer) = tokio::net::UnixStream::from_std(stream)
                         .unwrap()
@@ -1024,11 +999,11 @@ mod steering_tests {
                             async {
                                 interrupts.changed().await.unwrap();
                             },
-                            steering_receiver,
-                            Vec::new(),
+                            &mut steering_receiver,
                         )
                         .await
                 });
+                drop(steering_receiver);
                 mailbox.finished.store(true, Ordering::Release);
                 result
             });
@@ -1070,15 +1045,9 @@ mod steering_tests {
             model: None,
             reasoning_effort: None,
         };
-        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
         let (result, ()) = tokio::join!(
-            client.run_turn(
-                "th",
-                "initial",
-                std::future::pending(),
-                receiver,
-                Vec::new()
-            ),
+            client.run_turn("th", "initial", std::future::pending(), &mut receiver),
             async {
                 use tokio::io::AsyncBufReadExt;
                 let mut server = tokio::io::BufReader::new(server);
@@ -1099,7 +1068,7 @@ mod steering_tests {
                     "expires".to_string(),
                     Instant::now() + Duration::from_millis(100),
                 );
-                sender.send(request).await.unwrap();
+                sender.send(Command::Steer(request)).await.unwrap();
                 line.clear();
                 server.read_line(&mut line).await.unwrap();
                 assert_eq!(
@@ -1591,7 +1560,7 @@ mod steering_tests {
                 .await,
             Err(SteeringError::AcceptanceUnknown { .. })
         ));
-        let request = steering_receiver.recv().await.unwrap();
+        let Command::Steer(request) = steering_receiver.recv().await.unwrap();
         assert!(Instant::now() >= request.deadline);
         let mut client = CodexClient {
             reader: io::Cursor::new(Vec::<u8>::new()),
@@ -1678,9 +1647,11 @@ mod tests {
         serde_json::from_str(line).expect("line is JSON")
     }
 
-    fn client_over(input: &str) -> CodexClient<Cursor<Vec<u8>>, Vec<u8>, Vec<u8>> {
+    fn client_over(
+        input: &str,
+    ) -> CodexClient<tokio::io::BufReader<Cursor<Vec<u8>>>, Vec<u8>, Vec<u8>> {
         CodexClient {
-            reader: Cursor::new(input.as_bytes().to_vec()),
+            reader: tokio::io::BufReader::new(Cursor::new(input.as_bytes().to_vec())),
             writer: Vec::new(),
             out: Vec::new(),
             next_id: 0,
@@ -1724,7 +1695,7 @@ mod tests {
         );
         let mut client = client_over(input);
 
-        client.initialize().unwrap();
+        crate::agent::runtime::block_on(client.initialize()).unwrap();
 
         assert_eq!(String::from_utf8(client.out.clone()).unwrap(), "ready");
         let lines = String::from_utf8(client.writer.clone()).unwrap();
@@ -1750,12 +1721,15 @@ mod tests {
         assert_eq!(params["model"], json!("o3"));
         assert!(params.get("effort").is_none());
         assert!(params.get("reasoningEffort").is_none());
-        assert_eq!(command.get_program(), "codex");
+        assert_eq!(command.as_std().get_program(), "codex");
         assert_eq!(
-            command.get_args().collect::<Vec<_>>(),
+            command.as_std().get_args().collect::<Vec<_>>(),
             ["app-server", "--stdio"]
         );
-        assert_eq!(command.get_current_dir(), Some(worktree_dir.as_path()));
+        assert_eq!(
+            command.as_std().get_current_dir(),
+            Some(worktree_dir.as_path())
+        );
     }
 
     #[test]
@@ -1891,7 +1865,8 @@ mod tests {
         );
         let mut client = client_over(input);
 
-        let thread_id = client.thread_start(&PathBuf::from("/repo")).unwrap();
+        let thread_id =
+            crate::agent::runtime::block_on(client.thread_start(&PathBuf::from("/repo"))).unwrap();
 
         assert_eq!(thread_id, "th_abc");
         let request = parse(&String::from_utf8(client.writer.clone()).unwrap());
@@ -1903,8 +1878,7 @@ mod tests {
         let input = "{\"id\":0,\"error\":{\"code\":-32603,\"message\":\"boom\"}}\n";
         let mut client = client_over(input);
 
-        let error = client
-            .thread_start(&PathBuf::from("/repo"))
+        let error = crate::agent::runtime::block_on(client.thread_start(&PathBuf::from("/repo")))
             .expect_err("server error must propagate");
 
         assert!(error.to_string().contains("boom"));
@@ -1916,14 +1890,15 @@ mod tests {
             let mut command = ProcessCommand::new("sh");
             command.arg("-c").arg(format!("exit {code}"));
             assert!(
-                map_pkill_status(command).is_ok(),
+                crate::agent::runtime::block_on(map_pkill_status(command)).is_ok(),
                 "exit {code} should be Ok"
             );
         }
 
         let mut command = ProcessCommand::new("sh");
         command.arg("-c").arg("exit 2");
-        let error = map_pkill_status(command).expect_err("exit 2 should be Err");
+        let error = crate::agent::runtime::block_on(map_pkill_status(command))
+            .expect_err("exit 2 should be Err");
         assert!(error.to_string().contains("status 2"));
     }
 }

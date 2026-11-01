@@ -236,7 +236,9 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("cannot connect"));
-        drop(UnixListener::bind(&path).unwrap());
+        // A datagram socket cannot accept stream connections even if another
+        // test's concurrent fork briefly inherits the descriptor before exec.
+        drop(std::os::unix::net::UnixDatagram::bind(&path).unwrap());
         let error = submit(&path, "data").unwrap_err();
         assert!(error.to_string().contains("stale endpoint"), "{error}");
     }
