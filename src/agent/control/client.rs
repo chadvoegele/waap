@@ -10,32 +10,38 @@ pub(in crate::agent) struct ControlClient {
 }
 
 impl ControlClient {
-    pub(in crate::agent) fn connect(path: &Path) -> io::Result<Self> {
-        let connection = SocketConnection::connect(path)?;
-        connection.set_timeouts(IO_TIMEOUT, ACK_TIMEOUT + IO_TIMEOUT)?;
+    pub(in crate::agent) async fn connect(path: &Path) -> io::Result<Self> {
+        let connection = SocketConnection::connect(path).await?;
         Ok(Self { connection })
     }
 
-    pub(in crate::agent) fn steer(&mut self, prompt: &str) -> io::Result<()> {
-        self.exchange(Request::steer(prompt))
+    pub(in crate::agent) async fn steer(&mut self, prompt: &str) -> io::Result<()> {
+        self.exchange(Request::steer(prompt)).await
     }
 
-    fn exchange(&mut self, request: Request) -> io::Result<()> {
+    async fn exchange(&mut self, request: Request) -> io::Result<()> {
         let payload = serde_json::to_vec(&request)?;
-        self.connection.write_frame(&payload).map_err(|error| {
-            if error.kind() == io::ErrorKind::InvalidInput {
-                error
-            } else {
+        self.connection
+            .write_frame(&payload)
+            .await
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::InvalidInput {
+                    error
+                } else {
+                    build_acceptance_unknown_error(&format!(
+                        "request write failed (agent may be busy or unavailable): {error}"
+                    ))
+                }
+            })?;
+        let frame = self
+            .connection
+            .read_frame(ACK_TIMEOUT + IO_TIMEOUT)
+            .await
+            .map_err(|error| {
                 build_acceptance_unknown_error(&format!(
-                    "request write failed (agent may be busy or unavailable): {error}"
+                    "acknowledgement failed (agent may be busy or unavailable): {error}"
                 ))
-            }
-        })?;
-        let frame = self.connection.read_frame().map_err(|error| {
-            build_acceptance_unknown_error(&format!(
-                "acknowledgement failed (agent may be busy or unavailable): {error}"
-            ))
-        })?;
+            })?;
         validate_response(&frame, &request.request_id)
     }
 }
@@ -75,11 +81,12 @@ mod tests {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::thread;
-    use std::time::Duration;
     use uuid::Uuid;
 
     fn submit(path: &Path, prompt: &str) -> io::Result<()> {
-        ControlClient::connect(path)?.steer(prompt)
+        crate::agent::runtime::block_on(async {
+            ControlClient::connect(path).await?.steer(prompt).await
+        })
     }
 
     #[test]
@@ -243,22 +250,124 @@ mod tests {
         assert!(error.to_string().contains("stale endpoint"), "{error}");
     }
 
-    #[test]
-    fn missing_acknowledgement_times_out_without_retry() {
-        let (client, _server) = UnixStream::pair().unwrap();
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_acknowledgement_times_out_without_retry() {
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        client.writable().await.unwrap();
+        tokio::time::pause();
         let mut socket = ControlClient {
             connection: SocketConnection::new(client),
         };
-        socket
-            .connection
-            .set_timeouts(IO_TIMEOUT, Duration::from_millis(20))
-            .unwrap();
-        let error = socket.exchange(Request::steer("request")).unwrap_err();
+        let started = tokio::time::Instant::now();
+        let error = socket
+            .exchange(Request::steer("request"))
+            .await
+            .unwrap_err();
+        // Tokio timers round up to millisecond ticks.
+        assert!((ACK_TIMEOUT + IO_TIMEOUT
+            ..=ACK_TIMEOUT + IO_TIMEOUT + std::time::Duration::from_millis(1))
+            .contains(&started.elapsed()));
         assert!(error.to_string().contains("acceptance is unknown"));
+        let mut bytes = [0; MAX_FRAME_BYTES];
+        let count = server.try_read(&mut bytes).unwrap();
+        assert_eq!(
+            bytes[..count].iter().filter(|byte| **byte == b'\n').count(),
+            1
+        );
+        assert_eq!(
+            server.try_read(&mut bytes).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
     }
 
-    #[test]
-    fn response_eof_truncation_and_oversize_are_uncertain() {
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn acknowledgement_after_server_frame_deadline_is_accepted() {
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let mut client = ControlClient {
+            connection: SocketConnection::new(client),
+        };
+        let mut server = SocketConnection::new(server);
+        let (result, ()) = tokio::join!(client.steer("delayed acknowledgement"), async {
+            let frame = server.read_frame(IO_TIMEOUT).await.unwrap();
+            let request: Value = serde_json::from_slice(&frame).unwrap();
+            tokio::time::sleep(ACK_TIMEOUT).await;
+            server
+                .write_frame(
+                    &serde_json::to_vec(&json!({
+                        "version": 1, "request_id": request["request_id"], "accepted": true
+                    }))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+        result.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_write_reports_uncertainty_without_retry() {
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        drop(server);
+        let mut client = ControlClient {
+            connection: SocketConnection::new(client),
+        };
+        let error = client
+            .steer("private prompt")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("acceptance is unknown"));
+        assert!(error.contains("request write failed"));
+        assert!(error.contains("no automatic retry"));
+        assert!(!error.contains("private prompt"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn partial_write_times_out_after_five_seconds_and_reports_uncertainty() {
+        use std::os::fd::AsRawFd;
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        client.writable().await.unwrap();
+        tokio::time::pause();
+        let capacity: libc::c_int = 4096;
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    client.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    (&capacity as *const libc::c_int).cast(),
+                    std::mem::size_of_val(&capacity) as libc::socklen_t,
+                )
+            },
+            0
+        );
+        let mut client = ControlClient {
+            connection: SocketConnection::new(client),
+        };
+        let request = Request::steer(&"x".repeat(MAX_FRAME_BYTES / 2));
+        let expected = serde_json::to_vec(&request).unwrap();
+        let started = tokio::time::Instant::now();
+        let error = client.exchange(request).await.unwrap_err().to_string();
+        assert!(
+            (IO_TIMEOUT..=IO_TIMEOUT + std::time::Duration::from_millis(1))
+                .contains(&started.elapsed())
+        );
+        assert!(error.contains("acceptance is unknown"));
+        assert!(error.contains("request write failed"));
+        assert!(error.contains("no automatic retry"));
+        let mut bytes = [0; MAX_FRAME_BYTES];
+        server.readable().await.unwrap();
+        let count = server.try_read(&mut bytes).unwrap();
+        assert!(count > 0 && count < expected.len());
+        assert_eq!(&bytes[..count], &expected[..count]);
+        assert_eq!(
+            server.try_read(&mut bytes).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn response_eof_truncation_and_oversize_are_uncertain() {
         for frame in [
             vec![],
             b"{}".to_vec(),
@@ -266,27 +375,26 @@ mod tests {
             vec![b'x'; MAX_FRAME_BYTES + 1],
         ] {
             let (client, mut server) = UnixStream::pair().unwrap();
+            client.set_nonblocking(true).unwrap();
             let mut socket = ControlClient {
-                connection: SocketConnection::new(client),
+                connection: SocketConnection::new(
+                    tokio::net::UnixStream::from_std(client).unwrap(),
+                ),
             };
-            socket
-                .connection
-                .set_timeouts(IO_TIMEOUT, ACK_TIMEOUT)
-                .unwrap();
-            thread::scope(|scope| {
-                scope.spawn(move || {
-                    let mut request = String::new();
-                    BufReader::new(server.try_clone().unwrap())
-                        .read_line(&mut request)
-                        .unwrap();
-                    let _ = server.write_all(&frame);
-                });
-                assert!(socket
-                    .exchange(Request::steer("request"))
-                    .unwrap_err()
-                    .to_string()
-                    .contains("acceptance is unknown"));
+            let server = thread::spawn(move || {
+                let mut request = String::new();
+                BufReader::new(server.try_clone().unwrap())
+                    .read_line(&mut request)
+                    .unwrap();
+                let _ = server.write_all(&frame);
             });
+            assert!(socket
+                .exchange(Request::steer("request"))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("acceptance is unknown"));
+            server.join().unwrap();
         }
     }
 }

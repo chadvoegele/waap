@@ -3,8 +3,8 @@ use std::time::Instant;
 
 use super::super::commands::CommandHandle;
 use super::protocol::{build_rejection, build_response, parse_request, Request, Response};
-use super::socket::AsyncSocketConnection;
-use super::ACK_TIMEOUT;
+use super::socket::SocketConnection;
+use super::{ACK_TIMEOUT, IO_TIMEOUT};
 
 pub(in crate::agent) struct ControlRequestHandler<'a> {
     run: &'a CommandHandle,
@@ -24,11 +24,8 @@ impl<'a> ControlRequestHandler<'a> {
         )
     }
 
-    pub(in crate::agent) async fn serve(
-        &self,
-        mut connection: AsyncSocketConnection,
-    ) -> io::Result<()> {
-        let response = match connection.read_frame().await {
+    pub(in crate::agent) async fn serve(&self, mut connection: SocketConnection) -> io::Result<()> {
+        let response = match connection.read_frame(IO_TIMEOUT).await {
             Ok(frame) => match parse_request(&frame) {
                 Ok(request) => self.handle(request).await,
                 Err(response) => response,

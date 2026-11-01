@@ -1,4 +1,4 @@
-use super::socket::{AsyncSocketConnection, SocketListener};
+use super::socket::{SocketConnection, SocketListener};
 use futures_util::{stream::FuturesUnordered, FutureExt, StreamExt};
 use std::future::Future;
 use std::io;
@@ -18,7 +18,7 @@ impl ControlServer {
 
     pub(in crate::agent) async fn run<F: Future<Output = io::Result<()>>>(
         &self,
-        handler: impl Fn(AsyncSocketConnection) -> F,
+        handler: impl Fn(SocketConnection) -> F,
     ) -> io::Result<()> {
         let listener = self.listener.async_listener()?;
         let mut handlers = FuturesUnordered::new();
@@ -33,7 +33,7 @@ impl ControlServer {
                         Ok((stream, _)) if handlers.len() < MAX_HANDLERS => {
                             let handler = &handler;
                             handlers.push(std::panic::AssertUnwindSafe(async move {
-                                handler(AsyncSocketConnection::new(stream)).await
+                                handler(SocketConnection::new(stream)).await
                             }).catch_unwind());
                         }
                         // No application work queue: overload is a closed connection,
@@ -55,6 +55,7 @@ impl ControlServer {
 mod tests {
     use super::*;
     use crate::agent::control::socket::SocketPath;
+    use crate::agent::control::IO_TIMEOUT;
     use crate::root::find_control_root_in;
     use crate::test_git::init_repo_with_commit;
     use std::os::unix::fs::PermissionsExt;
@@ -110,9 +111,9 @@ mod tests {
                         impl Drop for Cleanup { fn drop(&mut self) { self.0.send(()).unwrap(); } }
                         let _cleanup = Cleanup(finished);
                         entered.send(std::thread::current().id()).unwrap();
-                        let frame = connection.read_frame().await?;
+                        let frame = connection.read_frame(IO_TIMEOUT).await?;
                         connection.write_frame(&frame[..frame.len() - 1]).await?;
-                        connection.read_frame().await?;
+                        connection.read_frame(IO_TIMEOUT).await?;
                         Ok(())
                     }
                 }) => panic!("server exited: {result:?}"),
@@ -149,15 +150,15 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), async {
             tokio::select! {
                 result = server.run(|mut connection| async move {
-                    assert_eq!(connection.read_frame().await?, b"\xffraw\n");
+                    assert_eq!(connection.read_frame(IO_TIMEOUT).await?, b"\xffraw\n");
                     connection.write_frame(b"\xfereply").await
                 }) => panic!("server exited: {result:?}"),
                 _ = async {
                     for _ in 0..MAX_HANDLERS * 2 {
                         let stream = UnixStream::connect(&path).await.unwrap();
-                        let mut client = AsyncSocketConnection::new(stream);
+                        let mut client = SocketConnection::new(stream);
                         client.write_frame(b"\xffraw").await.unwrap();
-                        assert_eq!(client.read_frame().await.unwrap(), b"\xfereply\n");
+                        assert_eq!(client.read_frame(IO_TIMEOUT).await.unwrap(), b"\xfereply\n");
                     }
                 } => {}
             }

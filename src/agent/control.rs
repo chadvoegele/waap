@@ -17,7 +17,6 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 pub(in crate::agent) mod tests {
-    use super::socket::AsyncSocketConnection;
     use super::socket::MAX_FRAME_BYTES;
     use super::*;
     use crate::agent::backend::{RunOutcome, SteeringError};
@@ -109,7 +108,13 @@ pub(in crate::agent) mod tests {
     }
 
     fn read_frame(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
-        SocketConnection::new(stream.try_clone()?).read_frame()
+        let stream = stream.try_clone()?;
+        stream.set_nonblocking(true)?;
+        crate::agent::runtime::block_on(async {
+            SocketConnection::new(tokio::net::UnixStream::from_std(stream)?)
+                .read_frame(IO_TIMEOUT)
+                .await
+        })
     }
 
     fn serve_connection(
@@ -121,7 +126,7 @@ pub(in crate::agent) mod tests {
             let (handle, mut commands) = CommandHandle::channel();
             let handler = ControlRequestHandler::new(&handle);
             tokio::select! {
-                result = handler.serve(AsyncSocketConnection::new(tokio::net::UnixStream::from_std(stream)?)) => result,
+                result = handler.serve(SocketConnection::new(tokio::net::UnixStream::from_std(stream)?)) => result,
                 Some(Command::Steer(request)) = commands.recv() => { (run.steer)(&request.message, request.deadline).unwrap(); panic!("unexpected dispatch"); }
             }
         })
@@ -206,25 +211,27 @@ pub(in crate::agent) mod tests {
             let (outcome, ()) = tokio::join!(
                 crate::agent::run::wait_with_control_async(fixture.server, driver, &handle),
                 async {
-                    let mut first = AsyncSocketConnection::new(
+                    let mut first = SocketConnection::new(
                         tokio::net::UnixStream::connect(&path).await.unwrap(),
                     );
                     let bytes = frame("first");
                     first.write_frame(&bytes[..bytes.len() - 1]).await.unwrap();
                     entered.notified().await;
-                    let mut second = AsyncSocketConnection::new(
+                    let mut second = SocketConnection::new(
                         tokio::net::UnixStream::connect(&path).await.unwrap(),
                     );
                     let bytes = frame("second");
                     second.write_frame(&bytes[..bytes.len() - 1]).await.unwrap();
                     let reply: Value =
-                        serde_json::from_slice(&second.read_frame().await.unwrap()).unwrap();
+                        serde_json::from_slice(&second.read_frame(IO_TIMEOUT).await.unwrap())
+                            .unwrap();
                     assert_eq!(reply["accepted"], true);
                     release.notify_one();
                     let reply: Value =
-                        serde_json::from_slice(&first.read_frame().await.unwrap()).unwrap();
+                        serde_json::from_slice(&first.read_frame(IO_TIMEOUT).await.unwrap())
+                            .unwrap();
                     assert_eq!(reply["accepted"], true);
-                    let mut held = AsyncSocketConnection::new(
+                    let mut held = SocketConnection::new(
                         tokio::net::UnixStream::connect(&path).await.unwrap(),
                     );
                     let bytes = frame("held");
@@ -232,7 +239,7 @@ pub(in crate::agent) mod tests {
                     entered.notified().await;
                     complete.notify_one();
                     assert_eq!(
-                        held.read_frame().await.unwrap_err().kind(),
+                        held.read_frame(IO_TIMEOUT).await.unwrap_err().kind(),
                         io::ErrorKind::UnexpectedEof
                     );
                 }
@@ -371,19 +378,6 @@ pub(in crate::agent) mod tests {
     }
 
     #[test]
-    fn incomplete_frame_has_an_inactivity_timeout() {
-        let (_client, mut server) = UnixStream::pair().unwrap();
-        server
-            .set_read_timeout(Some(Duration::from_millis(20)))
-            .unwrap();
-        let error = read_frame(&mut server).unwrap_err();
-        assert!(matches!(
-            error.kind(),
-            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-        ));
-    }
-
-    #[test]
     fn completion_closes_an_idle_connection_and_removes_endpoint() {
         let fixture = Fixture::new();
         let path = fixture.path.clone();
@@ -471,16 +465,16 @@ pub(in crate::agent) mod tests {
                 handle
             ),
             async {
-                let mut connection = AsyncSocketConnection::new(
-                    tokio::net::UnixStream::connect(&path).await.unwrap(),
-                );
+                let mut connection =
+                    SocketConnection::new(tokio::net::UnixStream::connect(&path).await.unwrap());
                 let bytes = frame("steer");
                 connection
                     .write_frame(&bytes[..bytes.len() - 1])
                     .await
                     .unwrap();
                 let reply: Value =
-                    serde_json::from_slice(&connection.read_frame().await.unwrap()).unwrap();
+                    serde_json::from_slice(&connection.read_frame(IO_TIMEOUT).await.unwrap())
+                        .unwrap();
                 complete.notify_one();
                 reply
             }

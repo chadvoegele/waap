@@ -31,7 +31,12 @@ pub(crate) fn steer_agent(
         ));
     }
     let path = SocketPath::for_agent(&control_root?, agent_id)?;
-    ControlClient::connect(path.as_path())?.steer(prompt)
+    super::runtime::new()?.block_on(async {
+        ControlClient::connect(path.as_path())
+            .await?
+            .steer(prompt)
+            .await
+    })
 }
 
 pub(crate) fn print_steering_report(format: &OutputFormat, agent_id: &str) {
