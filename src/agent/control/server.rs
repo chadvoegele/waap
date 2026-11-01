@@ -5,8 +5,6 @@ use std::io;
 
 const MAX_HANDLERS: usize = 8;
 
-/// Owns all connection futures. Dropping `run` cancels them and closes their
-/// sockets; no shutdown messages, detached tasks, or worker joins are needed.
 pub(in crate::agent) struct ControlServer {
     listener: SocketListener,
 }
@@ -36,8 +34,6 @@ impl ControlServer {
                                 handler(SocketConnection::new(stream)).await
                             }).catch_unwind());
                         }
-                        // No application work queue: overload is a closed connection,
-                        // never an acceptance or an implicit retry.
                         Ok((stream, _)) => drop(stream),
                         Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
                         Err(error) => return Err(error),

@@ -2,8 +2,6 @@ use std::io;
 use std::process::ExitStatus;
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
-/// Local child ownership. Normal/error paths explicitly terminate and reap;
-/// kill-on-drop is the cancellation/panic fallback, with reaping owned by Tokio.
 pub(super) struct AgentProcess {
     child: Child,
     reaped: bool,

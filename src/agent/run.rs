@@ -159,7 +159,6 @@ fn run_started_agent(
             .await
         }
         .await;
-        // Reap local children even after publication, transport, or protocol errors.
         collapse_errors(result, started.driver.cleanup().await)
     });
     let cleanup_result = worktree.cleanup();
@@ -179,13 +178,11 @@ pub(super) async fn wait_with_control_async(
         let result = tokio::select! {
             result = &mut wait => result,
             control = server.run(|connection| handler.serve(connection)) => {
-                // A broken control endpoint must not abandon a running backend.
                 if let Err(error) = control { log::error!("control server failed: {error}"); }
                 wait.await
             }
         };
         result.unwrap_or_else(|_| Err(io::Error::other("agent wait panicked")))
-        // Leaving this scope drops the losing control future and every handler.
     };
     collapse_errors(outcome, server.close())
 }

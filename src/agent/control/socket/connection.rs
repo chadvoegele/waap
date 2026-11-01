@@ -22,8 +22,6 @@ impl SocketConnection {
         })
     }
 
-    // Callers choose the whole-frame deadline: acknowledgements may take longer
-    // than incoming requests. Activity never extends either deadline.
     pub(in crate::agent::control) async fn read_frame(
         &mut self,
         timeout: Duration,

@@ -1,5 +1,3 @@
-//! Typed commands for a backend actor. Sending wakes the actor without a
-//! separate notification mechanism. Caller cancellation never retracts a command.
 use std::time::Instant;
 use tokio::sync::{mpsc, oneshot};
 

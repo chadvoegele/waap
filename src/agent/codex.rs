@@ -1088,7 +1088,7 @@ mod steering_tests {
                     .write_all(format!("{complete}\n").as_bytes())
                     .await
                     .unwrap();
-                // Keep stdout open until the driver consumes the completion.
+                // Avoid racing completion against EOF when the mock server drops its stream.
                 tokio::task::yield_now().await;
             }
         );
@@ -1121,7 +1121,6 @@ mod steering_tests {
                 let first = scope.spawn(|| mailbox.steer("first", deadline()));
                 let request = server.read();
                 assert_eq!(request["method"], METHOD_TURN_STEER);
-                // No server output/acknowledgement is sent during this call.
                 assert_rejected(mailbox.steer("second", deadline()), "busy");
                 assert!(!first.is_finished());
                 server.accept(&request["id"]);

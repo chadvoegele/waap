@@ -34,7 +34,6 @@ pub(super) struct StartedRun {
     pub(super) driver: Run,
 }
 
-// The actor owns its resources. Its command handle never borrows protocol state.
 pub(super) enum Run {
     Claude(super::claude::ClaudeRun),
     Codex(Box<super::codex::CodexRun>),
@@ -104,7 +103,6 @@ pub(super) struct AbortContext<'a> {
     pub(super) session_id: &'a str,
 }
 
-// Static async dispatch keeps backend tests injectable without boxed futures.
 pub(super) trait AgentSystemBackend {
     async fn start(&mut self, context: StartContext<'_>) -> io::Result<StartedRun>;
     async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()>;
