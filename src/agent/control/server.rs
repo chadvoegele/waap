@@ -17,7 +17,6 @@ impl ControlServer {
 
     pub(in crate::agent) async fn run(&self, dispatcher: &CommandDispatcher) -> io::Result<()> {
         let handler = ControlRequestHandler::new(dispatcher);
-        let listener = self.listener.async_listener()?;
         let mut handlers = FuturesUnordered::new();
         loop {
             tokio::select! {
@@ -25,14 +24,14 @@ impl ControlServer {
                 result = handlers.next(), if !handlers.is_empty() => {
                     if matches!(result, Some(Err(_))) { log::error!("control handler panicked"); }
                 },
-                connection = listener.accept() => {
+                connection = self.listener.accept() => {
                     match connection {
-                        Ok((stream, _)) if handlers.len() < MAX_HANDLERS => {
+                        Ok(stream) if handlers.len() < MAX_HANDLERS => {
                             handlers.push(std::panic::AssertUnwindSafe(
                                 handler.serve(SocketConnection::new(stream))
                             ).catch_unwind());
                         }
-                        Ok((stream, _)) => drop(stream),
+                        Ok(stream) => drop(stream),
                         Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
                         Err(error) => return Err(error),
                     }
@@ -61,7 +60,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
 
-    fn fixture() -> (
+    async fn fixture() -> (
         tempfile::TempDir,
         tempfile::TempDir,
         ControlServer,
@@ -95,7 +94,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn cancellation_of_idle_or_unpolled_server_needs_no_notification() {
         for polled in [false, true] {
-            let (_repo, _runtime, mut server, path) = fixture();
+            let (_repo, _runtime, mut server, path) = fixture().await;
             let dispatcher = CommandDispatcher::Unsupported("test");
             let future = server.run(&dispatcher);
             if polled {
@@ -110,7 +109,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn slow_clients_are_concurrent_overload_closes_and_cancellation_drops_handlers() {
-        let (_repo, _runtime, mut server, path) = fixture();
+        let (_repo, _runtime, mut server, path) = fixture().await;
         let (dispatcher, mut commands) = CommandDispatcher::channel();
         let mut clients = Vec::new();
         let mut pending = Vec::new();
@@ -158,7 +157,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn completed_handlers_are_reaped_before_admitting_backlogged_connections() {
-        let (_repo, _runtime, mut server, path) = fixture();
+        let (_repo, _runtime, mut server, path) = fixture().await;
         let (dispatcher, mut commands) = CommandDispatcher::channel();
         tokio::time::timeout(Duration::from_secs(2), async {
             let future = server.run(&dispatcher);
@@ -198,7 +197,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn serves_one_protocol_request_and_reclaims_completed_slots() {
-        let (_repo, _runtime, mut server, path) = fixture();
+        let (_repo, _runtime, mut server, path) = fixture().await;
         let (dispatcher, mut commands) = CommandDispatcher::channel();
         tokio::time::timeout(Duration::from_secs(2), async {
             tokio::select! {

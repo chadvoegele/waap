@@ -44,35 +44,33 @@ pub(in crate::agent) mod tests {
     }
 
     impl Fixture {
-        fn wait<F: Fn(&str, Instant) -> Result<(), SteeringError>>(
+        async fn wait<F: Fn(&str, Instant) -> Result<(), SteeringError>>(
             self,
             runner: &FakeRunner<F>,
         ) -> io::Result<RunOutcome> {
-            crate::agent::runtime::block_on(async {
-                let (dispatcher, mut commands) = CommandDispatcher::channel();
-                let completion = Arc::clone(&runner.completion);
-                let wait = async {
-                    let mut completion = tokio::task::spawn_blocking(move || {
-                        completion
-                            .lock()
-                            .unwrap()
-                            .recv_timeout(Duration::from_secs(10))
-                            .unwrap();
-                    });
-                    loop {
-                        tokio::select! {
-                            result = &mut completion => { result.unwrap(); return Ok(RunOutcome::Completed); }
-                            Some(Command::Steer(mut request)) = commands.recv() => {
-                                request.respond((runner.steer)(&request.message, request.deadline));
-                            }
+            let (dispatcher, mut commands) = CommandDispatcher::channel();
+            let completion = Arc::clone(&runner.completion);
+            let wait = async {
+                let mut completion = tokio::task::spawn_blocking(move || {
+                    completion
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(10))
+                        .unwrap();
+                });
+                loop {
+                    tokio::select! {
+                        result = &mut completion => { result.unwrap(); return Ok(RunOutcome::Completed); }
+                        Some(Command::Steer(mut request)) = commands.recv() => {
+                            request.respond((runner.steer)(&request.message, request.deadline));
                         }
                     }
-                };
-                crate::agent::run::wait_with_control_async(self.server, wait, &dispatcher).await
-            })
+                }
+            };
+            crate::agent::run::wait_with_control_async(self.server, wait, &dispatcher).await
         }
 
-        fn new() -> Self {
+        async fn new() -> Self {
             let repo = tempdir().unwrap();
             std::process::Command::new("git")
                 .args(["init", "-q"])
@@ -150,9 +148,9 @@ pub(in crate::agent) mod tests {
         serde_json::from_slice(&read_frame(&mut stream).unwrap()).unwrap()
     }
 
-    #[test]
-    fn socket_preserves_prompt_and_correlates_acknowledgement() {
-        let fixture = Fixture::new();
+    #[tokio::test(flavor = "current_thread")]
+    async fn socket_preserves_prompt_and_correlates_acknowledgement() {
+        let fixture = Fixture::new().await;
         let path = fixture.path.clone();
         let (complete, completion) = mpsc::channel();
         let prompt = "  Unicode 雪\n\"quoted\" '$HOME' `echo data`  ";
@@ -172,6 +170,7 @@ pub(in crate::agent) mod tests {
                     Ok(())
                 },
             })
+            .await
             .unwrap();
         assert_eq!(
             client.join().unwrap(),
@@ -181,7 +180,7 @@ pub(in crate::agent) mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn delayed_ack_does_not_serialize_handlers_and_completion_cancels_reply_wait() {
-        let fixture = Fixture::new();
+        let fixture = Fixture::new().await;
         let path = fixture.path.clone();
         let (dispatcher, mut commands) = CommandDispatcher::channel();
         let entered = tokio::sync::Notify::new();
@@ -253,7 +252,7 @@ pub(in crate::agent) mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn control_failure_does_not_restart_or_abandon_the_backend_future() {
-        let mut fixture = Fixture::new();
+        let mut fixture = Fixture::new().await;
         fixture.server.close().unwrap();
         let calls = std::cell::Cell::new(0);
         let (complete, completion) = tokio::sync::oneshot::channel();
@@ -274,9 +273,9 @@ pub(in crate::agent) mod tests {
         assert_eq!(calls.get(), 1);
     }
 
-    #[test]
-    fn command_actor_and_control_are_polled_on_the_owner_thread() {
-        let fixture = Fixture::new();
+    #[tokio::test(flavor = "current_thread")]
+    async fn command_actor_and_control_are_polled_on_the_owner_thread() {
+        let fixture = Fixture::new().await;
         let path = fixture.path.clone();
         let owner = thread::current().id();
         let (complete, completion) = mpsc::channel();
@@ -294,6 +293,7 @@ pub(in crate::agent) mod tests {
                     Ok(())
                 },
             })
+            .await
             .unwrap();
         client.join().unwrap();
     }
@@ -377,9 +377,9 @@ pub(in crate::agent) mod tests {
         }
     }
 
-    #[test]
-    fn completion_closes_an_idle_connection_and_removes_endpoint() {
-        let fixture = Fixture::new();
+    #[tokio::test(flavor = "current_thread")]
+    async fn completion_closes_an_idle_connection_and_removes_endpoint() {
+        let fixture = Fixture::new().await;
         let path = fixture.path.clone();
         let (complete, completion) = mpsc::channel();
         let client = thread::spawn(move || {
@@ -400,14 +400,15 @@ pub(in crate::agent) mod tests {
                 completion: Arc::new(Mutex::new(completion)),
                 steer: |_: &str, _| panic!("unexpected dispatch"),
             })
+            .await
             .unwrap();
         client.join().unwrap();
         assert!(!path.exists());
     }
 
-    #[test]
-    fn endpoint_is_private_and_stale_socket_is_not_replaced() {
-        let fixture = Fixture::new();
+    #[tokio::test(flavor = "current_thread")]
+    async fn endpoint_is_private_and_stale_socket_is_not_replaced() {
+        let fixture = Fixture::new().await;
         assert_eq!(
             fs::metadata(&fixture.path).unwrap().permissions().mode() & 0o777,
             0o600
@@ -424,9 +425,9 @@ pub(in crate::agent) mod tests {
         assert!(fixture.path.exists());
     }
 
-    #[test]
-    fn bind_rejects_insecure_or_symlinked_runtime_descendants() {
-        let fixture = Fixture::new();
+    #[tokio::test(flavor = "current_thread")]
+    async fn bind_rejects_insecure_or_symlinked_runtime_descendants() {
+        let fixture = Fixture::new().await;
         let parent = fixture.path.parent().unwrap();
         fs::set_permissions(parent, fs::Permissions::from_mode(0o755)).unwrap();
         let root = find_control_root_in(
@@ -452,7 +453,7 @@ pub(in crate::agent) mod tests {
         dispatcher: &CommandDispatcher,
         backend: &str,
     ) {
-        let fixture = Fixture::new();
+        let fixture = Fixture::new().await;
         let path = fixture.path.clone();
         let complete = tokio::sync::Notify::new();
         let (outcome, reply) = tokio::join!(

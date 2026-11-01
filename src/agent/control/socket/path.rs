@@ -173,8 +173,8 @@ mod tests {
         assert_ne!(resolve(&other), expected);
     }
 
-    #[test]
-    fn full_socket_path_byte_boundary_allows_fitting_historical_ids() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn full_socket_path_byte_boundary_allows_fitting_historical_ids() {
         let repo = tempfile::tempdir().unwrap();
         init_repo_with_commit(repo.path());
         let address: libc::sockaddr_un = unsafe { std::mem::zeroed() };

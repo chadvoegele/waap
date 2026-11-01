@@ -1,7 +1,7 @@
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixListener;
+use tokio::net::{UnixListener, UnixStream};
 
 use super::SocketPath;
 
@@ -11,14 +11,6 @@ pub(in crate::agent) struct SocketListener {
 }
 
 impl SocketListener {
-    pub(in crate::agent) fn async_listener(&self) -> io::Result<tokio::net::UnixListener> {
-        let listener = self
-            .listener
-            .as_ref()
-            .ok_or_else(|| io::Error::from(io::ErrorKind::NotConnected))?;
-        tokio::net::UnixListener::from_std(listener.try_clone()?)
-    }
-
     pub(in crate::agent) fn bind(path: SocketPath) -> io::Result<Self> {
         path.prepare_parent()?;
         let listener = UnixListener::bind(path.as_path()).map_err(|error| {
@@ -29,8 +21,16 @@ impl SocketListener {
             path,
         };
         fs::set_permissions(listener.path.as_path(), fs::Permissions::from_mode(0o600))?;
-        listener.listener.as_ref().unwrap().set_nonblocking(true)?;
         Ok(listener)
+    }
+
+    pub(in crate::agent) async fn accept(&self) -> io::Result<UnixStream> {
+        self.listener
+            .as_ref()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotConnected))?
+            .accept()
+            .await
+            .map(|(stream, _)| stream)
     }
 
     pub(in crate::agent) fn close(&mut self) -> io::Result<()> {
