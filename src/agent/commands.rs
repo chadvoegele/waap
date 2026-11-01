@@ -43,12 +43,12 @@ impl SteerRequest {
 }
 
 #[derive(Clone)]
-pub(super) enum CommandHandle {
+pub(super) enum CommandDispatcher {
     Channel(mpsc::Sender<Command>),
     Unsupported(&'static str),
 }
 
-impl CommandHandle {
+impl CommandDispatcher {
     pub(super) fn channel() -> (Self, mpsc::Receiver<Command>) {
         let (sender, receiver) = mpsc::channel(1);
         (Self::Channel(sender), receiver)
@@ -97,9 +97,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn owned_commands_wake_actor_and_correlate_replies() {
-        let (handle, mut requests) = CommandHandle::channel();
+        let (dispatcher, mut requests) = CommandDispatcher::channel();
         let expires = deadline();
-        let (result, ()) = tokio::join!(handle.steer("Unicode 雪", expires), async {
+        let (result, ()) = tokio::join!(dispatcher.steer("Unicode 雪", expires), async {
             let Command::Steer(mut request) = requests.recv().await.unwrap();
             assert_eq!(request.message, "Unicode 雪");
             assert_eq!(request.deadline, expires);
@@ -111,21 +111,21 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn queue_is_bounded_and_driver_exit_is_distinguished_from_uncertain_delivery() {
-        let (handle, mut requests) = CommandHandle::channel();
-        let CommandHandle::Channel(sender) = &handle else {
+    async fn queue_is_bounded_and_runner_exit_is_distinguished_from_uncertain_delivery() {
+        let (dispatcher, mut requests) = CommandDispatcher::channel();
+        let CommandDispatcher::Channel(sender) = &dispatcher else {
             unreachable!()
         };
         let (request, _reply) = SteerRequest::new("first".into(), deadline());
         sender.try_send(Command::Steer(request)).ok().unwrap();
         assert!(matches!(
-            handle.steer("second", deadline()).await,
+            dispatcher.steer("second", deadline()).await,
             Err(SteeringError::Rejected { code: "busy", .. })
         ));
         let Command::Steer(request) = requests.recv().await.unwrap();
         assert_eq!(request.message, "first");
         assert!(requests.try_recv().is_err());
-        let (result, ()) = tokio::join!(handle.steer("no reply", deadline()), async {
+        let (result, ()) = tokio::join!(dispatcher.steer("no reply", deadline()), async {
             drop(requests.recv().await.unwrap());
         });
         assert!(matches!(
@@ -134,7 +134,7 @@ mod tests {
         ));
         drop(requests);
         assert!(matches!(
-            handle.steer("after exit", deadline()).await,
+            dispatcher.steer("after exit", deadline()).await,
             Err(SteeringError::Rejected {
                 code: "agent_exited",
                 ..
@@ -144,9 +144,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn caller_timeout_does_not_retract_enqueued_command() {
-        let (handle, mut requests) = CommandHandle::channel();
+        let (dispatcher, mut requests) = CommandDispatcher::channel();
         assert!(matches!(
-            handle
+            dispatcher
                 .steer("queued", Instant::now() + Duration::from_millis(1))
                 .await,
             Err(SteeringError::AcceptanceUnknown { .. })

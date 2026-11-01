@@ -3,7 +3,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use super::backend::{AgentSystemBackend, RunOutcome, StartContext};
-use super::commands::CommandHandle;
+use super::commands::CommandDispatcher;
 use super::control::{ControlServer, SocketListener, SocketPath};
 use super::worktree::{collapse_errors, AgentWorktree};
 use crate::agent::{
@@ -153,13 +153,13 @@ fn run_started_agent(
             let listener = SocketListener::bind(socket_path)?;
             wait_with_control_async(
                 ControlServer::new(listener),
-                started.driver.run(),
-                &started.handle,
+                started.runner.run(),
+                &started.dispatcher,
             )
             .await
         }
         .await;
-        collapse_errors(result, started.driver.cleanup().await)
+        collapse_errors(result, started.runner.cleanup().await)
     });
     let cleanup_result = worktree.cleanup();
     collapse_errors(run_result, cleanup_result)
@@ -168,7 +168,7 @@ fn run_started_agent(
 pub(super) async fn wait_with_control_async(
     mut server: ControlServer,
     wait: impl std::future::Future<Output = io::Result<RunOutcome>>,
-    handle: &CommandHandle,
+    dispatcher: &CommandDispatcher,
 ) -> io::Result<RunOutcome> {
     use futures_util::FutureExt;
     let outcome = {
@@ -176,7 +176,7 @@ pub(super) async fn wait_with_control_async(
         tokio::pin!(wait);
         let result = tokio::select! {
             result = &mut wait => result,
-            control = server.run(handle) => {
+            control = server.run(dispatcher) => {
                 if let Err(error) = control { log::error!("control server failed: {error}"); }
                 wait.await
             }

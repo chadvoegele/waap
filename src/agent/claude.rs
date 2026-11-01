@@ -7,7 +7,9 @@ use tokio::process::Command as ProcessCommand;
 use super::process::AgentProcess;
 use uuid::Uuid;
 
-use super::backend::{AbortContext, AgentSystemBackend, Run, RunOutcome, StartContext, StartedRun};
+use super::backend::{
+    AbortContext, AgentSystemBackend, RunOutcome, Runner, StartContext, StartedRun,
+};
 
 pub(super) struct ClaudeBackend {
     config: ClaudeRunConfig,
@@ -33,8 +35,8 @@ impl AgentSystemBackend for ClaudeBackend {
         );
         Ok(StartedRun {
             session_id,
-            handle: super::commands::CommandHandle::Unsupported("claude"),
-            driver: Run::Claude(ClaudeRun {
+            dispatcher: super::commands::CommandDispatcher::Unsupported("claude"),
+            runner: Runner::Claude(ClaudeRunner {
                 child: spawn_claude_attached(&command)?,
             }),
         })
@@ -44,10 +46,10 @@ impl AgentSystemBackend for ClaudeBackend {
     }
 }
 
-pub(super) struct ClaudeRun {
+pub(super) struct ClaudeRunner {
     child: AgentProcess,
 }
-impl ClaudeRun {
+impl ClaudeRunner {
     pub(super) async fn run(&mut self) -> io::Result<RunOutcome> {
         Ok(RunOutcome::from_exit_status(self.child.wait().await?))
     }
@@ -157,13 +159,13 @@ mod tests {
             args: vec!["-c".into(), "exit 0".into()],
             working_dir: std::env::temp_dir(),
         };
-        let mut run = super::ClaudeRun {
+        let mut runner = super::ClaudeRunner {
             child: spawn_claude_attached(&command).unwrap(),
         };
-        let handle = crate::agent::commands::CommandHandle::Unsupported("claude");
-        crate::agent::control::tests::assert_backend_socket_rejection(&handle, "claude").await;
-        assert_eq!(run.run().await.unwrap(), super::RunOutcome::Completed);
-        run.cleanup().await.unwrap();
+        let dispatcher = crate::agent::commands::CommandDispatcher::Unsupported("claude");
+        crate::agent::control::tests::assert_backend_socket_rejection(&dispatcher, "claude").await;
+        assert_eq!(runner.run().await.unwrap(), super::RunOutcome::Completed);
+        runner.cleanup().await.unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]

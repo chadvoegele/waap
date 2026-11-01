@@ -1,24 +1,24 @@
 use std::io;
 use std::time::Instant;
 
-use super::super::commands::CommandHandle;
+use super::super::commands::CommandDispatcher;
 use super::protocol::{build_rejection, build_response, parse_request, Request, Response};
 use super::socket::SocketConnection;
 use super::{ACK_TIMEOUT, IO_TIMEOUT};
 
 pub(super) struct ControlRequestHandler<'a> {
-    run: &'a CommandHandle,
+    dispatcher: &'a CommandDispatcher,
 }
 
 impl<'a> ControlRequestHandler<'a> {
-    pub(super) fn new(run: &'a CommandHandle) -> Self {
-        Self { run }
+    pub(super) fn new(dispatcher: &'a CommandDispatcher) -> Self {
+        Self { dispatcher }
     }
 
     async fn handle(&self, request: Request) -> Response {
         build_response(
             &request.request_id,
-            self.run
+            self.dispatcher
                 .steer(&request.prompt, Instant::now() + ACK_TIMEOUT)
                 .await,
         )
@@ -50,8 +50,10 @@ mod tests {
     async fn unsupported_backend_rejection_is_forwarded() {
         let request = Request::steer("steer");
         let id = request.request_id.clone();
-        let handle = CommandHandle::Unsupported("claude");
-        let response = ControlRequestHandler::new(&handle).handle(request).await;
+        let dispatcher = CommandDispatcher::Unsupported("claude");
+        let response = ControlRequestHandler::new(&dispatcher)
+            .handle(request)
+            .await;
         assert_eq!(response.request_id.as_deref(), Some(id.as_str()));
         assert_eq!(response.accepted, Some(false));
         assert_eq!(response.error.unwrap().code, "not_implemented");

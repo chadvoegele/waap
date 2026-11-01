@@ -8,7 +8,9 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use reqwest::{Client, Response};
 use serde_json::{json, Value as JsonValue};
 
-use super::backend::{AbortContext, AgentSystemBackend, Run, RunOutcome, StartContext, StartedRun};
+use super::backend::{
+    AbortContext, AgentSystemBackend, RunOutcome, Runner, StartContext, StartedRun,
+};
 
 pub(super) struct OpencodeBackend {
     config: OpencodeRunConfig,
@@ -39,8 +41,8 @@ impl AgentSystemBackend for OpencodeBackend {
         .await?;
         Ok(StartedRun {
             session_id: session_id.clone(),
-            handle: super::commands::CommandHandle::Unsupported("opencode"),
-            driver: Run::Opencode(OpencodeRun {
+            dispatcher: super::commands::CommandDispatcher::Unsupported("opencode"),
+            runner: Runner::Opencode(OpencodeRunner {
                 events: Some(events),
                 session_id,
             }),
@@ -52,11 +54,11 @@ impl AgentSystemBackend for OpencodeBackend {
     }
 }
 
-pub(super) struct OpencodeRun {
+pub(super) struct OpencodeRunner {
     events: Option<Response>,
     session_id: String,
 }
-impl OpencodeRun {
+impl OpencodeRunner {
     pub(super) async fn run(&mut self) -> io::Result<RunOutcome> {
         let events = self
             .events
@@ -664,10 +666,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(started.session_id, "ses_123");
-        crate::agent::control::tests::assert_backend_socket_rejection(&started.handle, "opencode")
-            .await;
+        crate::agent::control::tests::assert_backend_socket_rejection(
+            &started.dispatcher,
+            "opencode",
+        )
+        .await;
         let error = started
-            .handle
+            .dispatcher
             .steer("steer", std::time::Instant::now())
             .await
             .unwrap_err();
@@ -679,7 +684,7 @@ mod tests {
             error.to_string(),
             "steering not implemented for backend opencode"
         );
-        assert_eq!(started.driver.run().await.unwrap(), RunOutcome::Completed);
+        assert_eq!(started.runner.run().await.unwrap(), RunOutcome::Completed);
         server.join().unwrap();
     }
 

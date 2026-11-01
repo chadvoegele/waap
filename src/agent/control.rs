@@ -20,7 +20,7 @@ pub(in crate::agent) mod tests {
     use super::socket::MAX_FRAME_BYTES;
     use super::*;
     use crate::agent::backend::{RunOutcome, SteeringError};
-    use crate::agent::commands::{Command, CommandHandle};
+    use crate::agent::commands::{Command, CommandDispatcher};
     use crate::root::{find_control_root_in, ControlRoot};
     use serde_json::{json, Value};
     use std::fs;
@@ -46,11 +46,11 @@ pub(in crate::agent) mod tests {
     impl Fixture {
         fn wait<F: Fn(&str, Instant) -> Result<(), SteeringError>>(
             self,
-            run: &Run<F>,
+            runner: &FakeRunner<F>,
         ) -> io::Result<RunOutcome> {
             crate::agent::runtime::block_on(async {
-                let (handle, mut commands) = CommandHandle::channel();
-                let completion = Arc::clone(&run.completion);
+                let (dispatcher, mut commands) = CommandDispatcher::channel();
+                let completion = Arc::clone(&runner.completion);
                 let wait = async {
                     let mut completion = tokio::task::spawn_blocking(move || {
                         completion
@@ -63,12 +63,12 @@ pub(in crate::agent) mod tests {
                         tokio::select! {
                             result = &mut completion => { result.unwrap(); return Ok(RunOutcome::Completed); }
                             Some(Command::Steer(mut request)) = commands.recv() => {
-                                request.respond((run.steer)(&request.message, request.deadline));
+                                request.respond((runner.steer)(&request.message, request.deadline));
                             }
                         }
                     }
                 };
-                crate::agent::run::wait_with_control_async(self.server, wait, &handle).await
+                crate::agent::run::wait_with_control_async(self.server, wait, &dispatcher).await
             })
         }
 
@@ -96,7 +96,7 @@ pub(in crate::agent) mod tests {
         }
     }
 
-    struct Run<F> {
+    struct FakeRunner<F> {
         steer: F,
         completion: Arc<Mutex<Receiver<()>>>,
     }
@@ -119,15 +119,15 @@ pub(in crate::agent) mod tests {
 
     fn serve_connection(
         stream: UnixStream,
-        run: &Run<impl Fn(&str, Instant) -> Result<(), SteeringError>>,
+        runner: &FakeRunner<impl Fn(&str, Instant) -> Result<(), SteeringError>>,
     ) -> io::Result<()> {
         stream.set_nonblocking(true)?;
         crate::agent::runtime::block_on(async {
-            let (handle, mut commands) = CommandHandle::channel();
-            let handler = ControlRequestHandler::new(&handle);
+            let (dispatcher, mut commands) = CommandDispatcher::channel();
+            let handler = ControlRequestHandler::new(&dispatcher);
             tokio::select! {
                 result = handler.serve(SocketConnection::new(tokio::net::UnixStream::from_std(stream)?)) => result,
-                Some(Command::Steer(request)) = commands.recv() => { (run.steer)(&request.message, request.deadline).unwrap(); panic!("unexpected dispatch"); }
+                Some(Command::Steer(request)) = commands.recv() => { (runner.steer)(&request.message, request.deadline).unwrap(); panic!("unexpected dispatch"); }
             }
         })
     }
@@ -164,7 +164,7 @@ pub(in crate::agent) mod tests {
             result
         });
         fixture
-            .wait(&Run {
+            .wait(&FakeRunner {
                 completion: Arc::new(Mutex::new(completion)),
                 steer: |received: &str, deadline| {
                     assert_eq!(received, prompt);
@@ -183,11 +183,11 @@ pub(in crate::agent) mod tests {
     async fn delayed_ack_does_not_serialize_handlers_and_completion_cancels_reply_wait() {
         let fixture = Fixture::new();
         let path = fixture.path.clone();
-        let (handle, mut commands) = CommandHandle::channel();
+        let (dispatcher, mut commands) = CommandDispatcher::channel();
         let entered = tokio::sync::Notify::new();
         let release = tokio::sync::Notify::new();
         let complete = tokio::sync::Notify::new();
-        let driver = async {
+        let runner = async {
             let actor = async {
                 let Some(Command::Steer(mut first)) = commands.recv().await else {
                     panic!()
@@ -209,7 +209,7 @@ pub(in crate::agent) mod tests {
         };
         tokio::time::timeout(Duration::from_secs(2), async {
             let (outcome, ()) = tokio::join!(
-                crate::agent::run::wait_with_control_async(fixture.server, driver, &handle),
+                crate::agent::run::wait_with_control_async(fixture.server, runner, &dispatcher),
                 async {
                     let mut first = SocketConnection::new(
                         tokio::net::UnixStream::connect(&path).await.unwrap(),
@@ -257,14 +257,14 @@ pub(in crate::agent) mod tests {
         fixture.server.close().unwrap();
         let calls = std::cell::Cell::new(0);
         let (complete, completion) = tokio::sync::oneshot::channel();
-        let handle = CommandHandle::Unsupported("test");
+        let dispatcher = CommandDispatcher::Unsupported("test");
         let wait = async {
             calls.set(calls.get() + 1);
             completion.await.unwrap();
             Ok(RunOutcome::Completed)
         };
         let (outcome, ()) = tokio::join!(
-            crate::agent::run::wait_with_control_async(fixture.server, wait, &handle),
+            crate::agent::run::wait_with_control_async(fixture.server, wait, &dispatcher),
             async {
                 tokio::task::yield_now().await;
                 complete.send(()).unwrap();
@@ -287,7 +287,7 @@ pub(in crate::agent) mod tests {
             complete.send(()).unwrap();
         });
         fixture
-            .wait(&Run {
+            .wait(&FakeRunner {
                 completion: Arc::new(Mutex::new(completion)),
                 steer: |_: &str, _| {
                     assert_eq!(thread::current().id(), owner);
@@ -335,12 +335,12 @@ pub(in crate::agent) mod tests {
         for (bytes, code, trusted_id) in cases {
             let (mut client, server) = UnixStream::pair().unwrap();
             let (_complete, completion) = mpsc::channel();
-            let run = Run {
+            let runner = FakeRunner {
                 completion: Arc::new(Mutex::new(completion)),
                 steer: |_: &str, _| panic!("invalid request dispatched"),
             };
             thread::scope(|scope| {
-                scope.spawn(|| serve_connection(server, &run).unwrap());
+                scope.spawn(|| serve_connection(server, &runner).unwrap());
                 client.write_all(&bytes).unwrap();
                 let value = read_response(client);
                 assert_eq!(value["accepted"], false);
@@ -396,7 +396,7 @@ pub(in crate::agent) mod tests {
         });
         let path = fixture.path.clone();
         fixture
-            .wait(&Run {
+            .wait(&FakeRunner {
                 completion: Arc::new(Mutex::new(completion)),
                 steer: |_: &str, _| panic!("unexpected dispatch"),
             })
@@ -449,7 +449,7 @@ pub(in crate::agent) mod tests {
     }
 
     pub(in crate::agent) async fn assert_backend_socket_rejection(
-        handle: &CommandHandle,
+        dispatcher: &CommandDispatcher,
         backend: &str,
     ) {
         let fixture = Fixture::new();
@@ -462,7 +462,7 @@ pub(in crate::agent) mod tests {
                     complete.notified().await;
                     Ok(RunOutcome::Completed)
                 },
-                handle
+                dispatcher
             ),
             async {
                 let mut connection =

@@ -2,7 +2,7 @@ use std::io;
 use std::path::Path;
 use std::process::{ExitCode, ExitStatus};
 
-use super::commands::CommandHandle;
+use super::commands::CommandDispatcher;
 use super::{claude::ClaudeBackend, codex::CodexBackend, opencode::OpencodeBackend};
 
 #[derive(Debug, PartialEq)]
@@ -30,33 +30,33 @@ pub(super) struct StartContext<'a> {
 
 pub(super) struct StartedRun {
     pub(super) session_id: String,
-    pub(super) handle: CommandHandle,
-    pub(super) driver: Run,
+    pub(super) dispatcher: CommandDispatcher,
+    pub(super) runner: Runner,
 }
 
-pub(super) enum Run {
-    Claude(super::claude::ClaudeRun),
-    Codex(Box<super::codex::CodexRun>),
-    Opencode(super::opencode::OpencodeRun),
+pub(super) enum Runner {
+    Claude(super::claude::ClaudeRunner),
+    Codex(Box<super::codex::CodexRunner>),
+    Opencode(super::opencode::OpencodeRunner),
     #[cfg(test)]
-    Fake(fake::FakeRun),
+    Fake(fake::FakeRunner),
 }
 
-impl Run {
+impl Runner {
     pub(super) async fn run(&mut self) -> io::Result<RunOutcome> {
         match self {
-            Self::Claude(run) => run.run().await,
-            Self::Codex(run) => run.run().await,
-            Self::Opencode(run) => run.run().await,
+            Self::Claude(runner) => runner.run().await,
+            Self::Codex(runner) => runner.run().await,
+            Self::Opencode(runner) => runner.run().await,
             #[cfg(test)]
-            Self::Fake(run) => run.run().await,
+            Self::Fake(runner) => runner.run().await,
         }
     }
 
     pub(super) async fn cleanup(&mut self) -> io::Result<()> {
         match self {
-            Self::Claude(run) => run.cleanup().await,
-            Self::Codex(run) => run.cleanup().await,
+            Self::Claude(runner) => runner.cleanup().await,
+            Self::Codex(runner) => runner.cleanup().await,
             Self::Opencode(_) => Ok(()),
             #[cfg(test)]
             Self::Fake(_) => Ok(()),
@@ -195,7 +195,7 @@ pub(super) mod fake {
             }
         }
     }
-    pub(in crate::agent) struct FakeRun {
+    pub(in crate::agent) struct FakeRunner {
         outcome: Option<RunOutcome>,
         error: Option<String>,
         action: Option<Box<dyn FnOnce() -> io::Result<()> + Send>>,
@@ -204,7 +204,7 @@ pub(super) mod fake {
         steer_error: Option<SteeringError>,
         commands: mpsc::Receiver<Command>,
     }
-    impl FakeRun {
+    impl FakeRunner {
         pub(super) async fn run(&mut self) -> io::Result<RunOutcome> {
             self.wait_calls.fetch_add(1, Ordering::SeqCst);
             let action = self.action.take();
@@ -244,11 +244,11 @@ pub(super) mod fake {
             if let Some(error) = self.start_error.take() {
                 return Err(io::Error::other(error));
             }
-            let (handle, commands) = CommandHandle::channel();
+            let (dispatcher, commands) = CommandDispatcher::channel();
             Ok(StartedRun {
                 session_id: self.session_id.clone(),
-                handle,
-                driver: Run::Fake(FakeRun {
+                dispatcher,
+                runner: Runner::Fake(FakeRunner {
                     outcome: self.outcome.take(),
                     error: self.wait_error.take(),
                     action: self.wait_action.take(),

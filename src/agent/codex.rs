@@ -22,12 +22,12 @@ use tokio::io::{
 use tokio::process::{ChildStdin, ChildStdout, Command as ProcessCommand};
 use tokio::sync::mpsc::Receiver;
 
-use super::commands::{Command, CommandHandle, SteerRequest, SteeringResult};
+use super::commands::{Command, CommandDispatcher, SteerRequest, SteeringResult};
 
 use serde_json::{json, Value as JsonValue};
 
 use super::backend::{
-    AbortContext, AgentSystemBackend, Run, RunOutcome, StartContext, StartedRun, SteeringError,
+    AbortContext, AgentSystemBackend, RunOutcome, Runner, StartContext, StartedRun, SteeringError,
 };
 use super::process::AgentProcess;
 use super::{AgentRunOptions, ReasoningEffort};
@@ -66,11 +66,11 @@ impl AgentSystemBackend for CodexBackend {
                 )
             }
         };
-        let (handle, steering_receiver) = CommandHandle::channel();
+        let (dispatcher, steering_receiver) = CommandDispatcher::channel();
         Ok(StartedRun {
             session_id: thread_id.clone(),
-            handle,
-            driver: Run::Codex(Box::new(CodexRun {
+            dispatcher,
+            runner: Runner::Codex(Box::new(CodexRunner {
                 server,
                 steering_receiver,
                 interrupt,
@@ -88,14 +88,14 @@ struct CodexAppServer {
     client: CodexClient<tokio::io::BufReader<ChildStdout>, ChildStdin, tokio::io::Stdout>,
     process: AgentProcess,
 }
-pub(super) struct CodexRun {
+pub(super) struct CodexRunner {
     server: CodexAppServer,
     steering_receiver: Receiver<Command>,
     interrupt: tokio::signal::unix::Signal,
     thread_id: String,
     prompt: String,
 }
-impl CodexRun {
+impl CodexRunner {
     pub(super) async fn run(&mut self) -> io::Result<RunOutcome> {
         let interrupt = &mut self.interrupt;
         let status = self
@@ -898,19 +898,19 @@ mod steering_tests {
         }
     }
 
-    fn create_test_run() -> (CommandHandle, Receiver<Command>) {
-        CommandHandle::channel()
+    fn create_test_dispatcher() -> (CommandDispatcher, Receiver<Command>) {
+        CommandDispatcher::channel()
     }
 
     struct TestMailbox {
-        run: CommandHandle,
+        dispatcher: CommandDispatcher,
         finished: AtomicBool,
         output: CapturedOutput,
     }
 
     impl TestMailbox {
         fn steer(&self, prompt: &str, deadline: Instant) -> SteeringResult {
-            crate::agent::runtime::block_on(self.run.steer(prompt, deadline))
+            crate::agent::runtime::block_on(self.dispatcher.steer(prompt, deadline))
         }
     }
 
@@ -970,9 +970,9 @@ mod steering_tests {
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
         let output = CapturedOutput::default();
-        let (run, steering_receiver) = create_test_run();
+        let (dispatcher, steering_receiver) = create_test_dispatcher();
         let mailbox = TestMailbox {
-            run,
+            dispatcher,
             finished: AtomicBool::new(false),
             output: output.clone(),
         };
@@ -1553,9 +1553,10 @@ mod steering_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn caller_timeout_is_unknown_and_owner_discards_expired_queued_request() {
-        let (run, mut steering_receiver) = create_test_run();
+        let (dispatcher, mut steering_receiver) = create_test_dispatcher();
         assert!(matches!(
-            run.steer("queued", Instant::now() + Duration::from_millis(10))
+            dispatcher
+                .steer("queued", Instant::now() + Duration::from_millis(10))
                 .await,
             Err(SteeringError::AcceptanceUnknown { .. })
         ));
@@ -1585,9 +1586,9 @@ mod steering_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn driver_exit_without_a_reply_is_unknown_and_later_calls_are_rejected() {
-        let (run, mut steering_receiver) = create_test_run();
-        let (result, ()) = tokio::join!(run.steer("queued", deadline()), async {
+    async fn runner_exit_without_a_reply_is_unknown_and_later_calls_are_rejected() {
+        let (dispatcher, mut steering_receiver) = create_test_dispatcher();
+        let (result, ()) = tokio::join!(dispatcher.steer("queued", deadline()), async {
             drop(steering_receiver.recv().await.unwrap());
         });
         assert!(matches!(
@@ -1595,7 +1596,10 @@ mod steering_tests {
             Err(SteeringError::AcceptanceUnknown { .. })
         ));
         drop(steering_receiver);
-        assert_rejected(run.steer("after exit", deadline()).await, "agent_exited");
+        assert_rejected(
+            dispatcher.steer("after exit", deadline()).await,
+            "agent_exited",
+        );
     }
 
     #[test]
