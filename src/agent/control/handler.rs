@@ -18,12 +18,13 @@ impl<'a> ControlRequestHandler<'a> {
     pub(super) async fn handle(&self, mut connection: SocketConnection) -> io::Result<()> {
         let response = match connection.read_frame(IO_TIMEOUT).await {
             Ok(frame) => match parse_request(&frame) {
-                Ok(request) => build_response(
-                    &request.request_id,
-                    self.dispatcher
+                Ok(request) => {
+                    let steering_result = self
+                        .dispatcher
                         .steer(&request.prompt, Instant::now() + ACK_TIMEOUT)
-                        .await,
-                ),
+                        .await;
+                    build_response(&request.request_id, steering_result)
+                }
                 Err(response) => response,
             },
             Err(error) if error.kind() == io::ErrorKind::InvalidData => build_rejection(
