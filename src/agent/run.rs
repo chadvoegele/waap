@@ -151,7 +151,7 @@ fn run_started_agent(
                 system.clone(),
             )?;
             let listener = SocketListener::bind(socket_path)?;
-            wait_with_control_async(
+            run_with_control(
                 ControlServer::new(listener),
                 started.runner.run(),
                 &started.dispatcher,
@@ -165,7 +165,7 @@ fn run_started_agent(
     collapse_errors(run_result, cleanup_result)
 }
 
-pub(super) async fn wait_with_control_async(
+pub(super) async fn run_with_control(
     mut server: ControlServer,
     wait: impl std::future::Future<Output = io::Result<RunOutcome>>,
     dispatcher: &CommandDispatcher,

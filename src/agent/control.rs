@@ -67,7 +67,7 @@ pub(in crate::agent) mod tests {
                     }
                 }
             };
-            crate::agent::run::wait_with_control_async(self.server, wait, &dispatcher).await
+            crate::agent::run::run_with_control(self.server, wait, &dispatcher).await
         }
 
         async fn new() -> Self {
@@ -208,7 +208,7 @@ pub(in crate::agent) mod tests {
         };
         tokio::time::timeout(Duration::from_secs(2), async {
             let (outcome, ()) = tokio::join!(
-                crate::agent::run::wait_with_control_async(fixture.server, runner, &dispatcher),
+                crate::agent::run::run_with_control(fixture.server, runner, &dispatcher),
                 async {
                     let mut first = SocketConnection::new(
                         tokio::net::UnixStream::connect(&path).await.unwrap(),
@@ -263,7 +263,7 @@ pub(in crate::agent) mod tests {
             Ok(RunOutcome::Completed)
         };
         let (outcome, ()) = tokio::join!(
-            crate::agent::run::wait_with_control_async(fixture.server, wait, &dispatcher),
+            crate::agent::run::run_with_control(fixture.server, wait, &dispatcher),
             async {
                 tokio::task::yield_now().await;
                 complete.send(()).unwrap();
@@ -457,7 +457,7 @@ pub(in crate::agent) mod tests {
         let path = fixture.path.clone();
         let complete = tokio::sync::Notify::new();
         let (outcome, reply) = tokio::join!(
-            crate::agent::run::wait_with_control_async(
+            crate::agent::run::run_with_control(
                 fixture.server,
                 async {
                     complete.notified().await;
