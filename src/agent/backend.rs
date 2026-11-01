@@ -23,28 +23,6 @@ impl RunOutcome {
     }
 }
 
-pub(in crate::agent) async fn run_unsupported<F>(
-    wait: F,
-    receiver: Receiver<Command>,
-    backend: &'static str,
-) -> io::Result<RunOutcome>
-where
-    F: Future<Output = io::Result<RunOutcome>>,
-{
-    tokio::pin!(wait);
-    let mut receiver = receiver;
-    let mut channel_open = true;
-    loop {
-        tokio::select! {
-            result = &mut wait => return result,
-            request = receiver.recv(), if channel_open => match request {
-                Some(Command::Steer(mut request)) => request.respond(Err(SteeringError::not_implemented(backend))),
-                None => channel_open = false,
-            }
-        }
-    }
-}
-
 pub(super) struct StartContext<'a> {
     pub(super) agent_id: &'a str,
     pub(super) prompt: &'a str,
@@ -87,9 +65,9 @@ pub(super) enum Runner {
 impl Runner {
     pub(super) async fn run(&mut self, receiver: Receiver<Command>) -> io::Result<RunOutcome> {
         match self {
-            Self::Claude(runner) => run_unsupported(runner.run(), receiver, "claude").await,
+            Self::Claude(runner) => runner.run(receiver).await,
             Self::Codex(runner) => runner.run(receiver).await,
-            Self::Opencode(runner) => run_unsupported(runner.run(), receiver, "opencode").await,
+            Self::Opencode(runner) => runner.run(receiver).await,
             #[cfg(test)]
             Self::Fake(runner) => runner.run(receiver).await,
         }
@@ -426,63 +404,6 @@ mod execution_tests {
                 })
             ));
             session.runner.cleanup().await.unwrap();
-        }
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn completed_execution_closes_command_transport() {
-        let (dispatcher, receiver) = CommandDispatcher::channel();
-        assert_eq!(
-            run_unsupported(async { Ok(RunOutcome::Completed) }, receiver, "claude")
-                .await
-                .unwrap(),
-            RunOutcome::Completed
-        );
-        assert!(matches!(
-            dispatcher
-                .steer("after completion", Instant::now() + Duration::from_secs(1))
-                .await,
-            Err(SteeringError::Rejected {
-                code: "agent_exited",
-                ..
-            })
-        ));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn cancelling_execution_drops_queued_replies_without_waiting_for_deadline() {
-        for polled in [false, true] {
-            let (dispatcher, receiver) = CommandDispatcher::channel();
-            let mut execution = Box::pin(run_unsupported(
-                std::future::pending(),
-                receiver,
-                "opencode",
-            ));
-            if polled {
-                assert!(execution.as_mut().now_or_never().is_none());
-            }
-            let steering = dispatcher.steer("queued", Instant::now() + Duration::from_secs(30));
-            tokio::pin!(steering);
-            assert!(steering.as_mut().now_or_never().is_none());
-            drop(execution);
-            assert!(matches!(
-                tokio::time::timeout(Duration::from_millis(100), steering)
-                    .await
-                    .unwrap(),
-                Err(SteeringError::AcceptanceUnknown { .. })
-            ));
-            assert!(matches!(
-                dispatcher
-                    .steer(
-                        "after cancellation",
-                        Instant::now() + Duration::from_secs(1)
-                    )
-                    .await,
-                Err(SteeringError::Rejected {
-                    code: "agent_exited",
-                    ..
-                })
-            ));
         }
     }
 }

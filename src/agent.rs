@@ -31,6 +31,7 @@ mod run;
 mod runtime;
 mod steer;
 mod stop;
+mod unsupported_commands;
 mod update;
 mod worktree;
 

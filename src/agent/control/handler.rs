@@ -48,25 +48,26 @@ mod tests {
     async fn unsupported_backend_rejection_is_forwarded() {
         let request = Request::steer("steer");
         let id = request.request_id.clone();
-        let (dispatcher, commands) = CommandDispatcher::channel();
+        let (dispatcher, mut commands) = CommandDispatcher::channel();
         let handler = ControlRequestHandler::new(dispatcher.clone());
         let (server, client) = tokio::net::UnixStream::pair().unwrap();
         let mut client = SocketConnection::new(client);
-        let unsupported = crate::agent::backend::run_unsupported(
-            std::future::pending::<io::Result<crate::agent::backend::RunOutcome>>(),
-            commands,
-            "claude",
-        );
-        let (result, response) = tokio::join!(
+        let (result, response, ()) = tokio::join!(
             handler.handle(SocketConnection::new(server)),
             async {
-                tokio::select! {
-                    result = unsupported => panic!("unsupported runner exited: {result:?}"),
-                    response = async {
-                        client.write_frame(&serde_json::to_vec(&request).unwrap()).await.unwrap();
-                        serde_json::from_slice::<Response>(&client.read_frame(IO_TIMEOUT).await.unwrap()).unwrap()
-                    } => response,
-                }
+                client
+                    .write_frame(&serde_json::to_vec(&request).unwrap())
+                    .await
+                    .unwrap();
+                serde_json::from_slice::<Response>(&client.read_frame(IO_TIMEOUT).await.unwrap())
+                    .unwrap()
+            },
+            async {
+                let crate::agent::commands::Command::Steer(mut request) =
+                    commands.recv().await.unwrap();
+                request.respond(Err(crate::agent::backend::SteeringError::not_implemented(
+                    "claude",
+                )));
             }
         );
         result.unwrap();

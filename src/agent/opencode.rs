@@ -65,14 +65,19 @@ pub(super) struct OpencodeRunner {
     session_id: String,
 }
 impl OpencodeRunner {
-    pub(super) async fn run(&mut self) -> io::Result<RunOutcome> {
+    pub(super) async fn run(&mut self, receiver: Receiver<Command>) -> io::Result<RunOutcome> {
         let events = self
             .events
             .take()
             .ok_or_else(|| io::Error::other("OpenCode run already waited"))?;
         let stream = events.bytes_stream().map_err(io::Error::other);
         let reader = tokio::io::BufReader::new(tokio_util::io::StreamReader::new(stream));
-        monitor_opencode_events(reader, &self.session_id, &mut tokio::io::stdout()).await
+        super::unsupported_commands::await_with_unsupported_commands(
+            monitor_opencode_events(reader, &self.session_id, &mut tokio::io::stdout()),
+            receiver,
+            "opencode",
+        )
+        .await
     }
 }
 
@@ -497,6 +502,160 @@ mod tests {
         prompt_payload, AgentSystemBackend, OpencodeBackend, OpencodeRunConfig, RunOutcome,
         StartContext,
     };
+
+    use crate::agent::backend::SteeringError;
+    use crate::agent::commands::CommandDispatcher;
+    use futures_util::FutureExt;
+    use std::time::{Duration, Instant};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn pending_runner() -> (super::OpencodeRunner, tokio::net::TcpStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (response, socket) = tokio::join!(
+            super::opencode_client()
+                .unwrap()
+                .get(format!("http://{address}/event"))
+                .send(),
+            async {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(socket.read_u8().await.unwrap());
+                }
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n: connected\n\n").await.unwrap();
+                socket
+            }
+        );
+        (
+            super::OpencodeRunner {
+                events: Some(response.unwrap()),
+                session_id: "ses_test".into(),
+            },
+            socket,
+        )
+    }
+
+    async fn finish_events(socket: &mut tokio::net::TcpStream) {
+        socket.write_all(b"data: {\"type\":\"session.status\",\"properties\":{\"sessionID\":\"ses_test\",\"status\":{\"type\":\"idle\"}}}\n\n").await.unwrap();
+        socket.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn concrete_runner_rejects_steering_then_finishes_the_same_event_wait() {
+        let (mut runner, mut socket) = pending_runner().await;
+        let (dispatcher, receiver) = CommandDispatcher::channel();
+        let mut execution = Box::pin(runner.run(receiver));
+        assert!(execution.as_mut().now_or_never().is_none());
+        let ((), result) = tokio::join!(
+            async {
+                assert_eq!(
+                    dispatcher
+                        .steer("pending", Instant::now() + Duration::from_secs(2))
+                        .await,
+                    Err(SteeringError::not_implemented("opencode"))
+                );
+                finish_events(&mut socket).await;
+            },
+            tokio::time::timeout(Duration::from_secs(2), &mut execution)
+        );
+        assert_eq!(result.unwrap().unwrap(), RunOutcome::Completed);
+        drop(execution);
+        assert!(runner.events.is_none());
+        assert!(matches!(
+            dispatcher
+                .steer("completed", Instant::now() + Duration::from_secs(2))
+                .await,
+            Err(SteeringError::Rejected {
+                code: "agent_exited",
+                ..
+            })
+        ));
+        let mut byte = [0];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), socket.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn concrete_runner_completion_releases_queued_replies() {
+        let (mut runner, mut socket) = pending_runner().await;
+        finish_events(&mut socket).await;
+        let (dispatcher, receiver) = CommandDispatcher::channel();
+        let steering = dispatcher.steer("queued", Instant::now() + Duration::from_secs(30));
+        tokio::pin!(steering);
+        assert!(steering.as_mut().now_or_never().is_none());
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), runner.run(receiver))
+                .await
+                .unwrap()
+                .unwrap(),
+            RunOutcome::Completed
+        );
+        let result = tokio::time::timeout(Duration::from_millis(100), steering)
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, Err(SteeringError::AcceptanceUnknown { .. }))
+                || result == Err(SteeringError::not_implemented("opencode"))
+        );
+        assert!(runner.events.is_none());
+        let mut byte = [0];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), socket.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn concrete_runner_cancellation_releases_queued_replies_before_or_after_polling() {
+        for polled in [false, true] {
+            let (mut runner, mut socket) = pending_runner().await;
+            let (dispatcher, receiver) = CommandDispatcher::channel();
+            let mut execution = Box::pin(runner.run(receiver));
+            if polled {
+                assert!(execution.as_mut().now_or_never().is_none());
+            }
+            let steering = dispatcher.steer("queued", Instant::now() + Duration::from_secs(30));
+            tokio::pin!(steering);
+            assert!(steering.as_mut().now_or_never().is_none());
+            drop(execution);
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_millis(100), steering)
+                    .await
+                    .unwrap(),
+                Err(SteeringError::AcceptanceUnknown { .. })
+            ));
+            assert!(matches!(
+                dispatcher
+                    .steer("cancelled", Instant::now() + Duration::from_secs(2))
+                    .await,
+                Err(SteeringError::Rejected {
+                    code: "agent_exited",
+                    ..
+                })
+            ));
+            if polled {
+                assert!(runner.events.is_none());
+            }
+            drop(runner);
+            let mut byte = [0];
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), socket.read(&mut byte))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                0
+            );
+        }
+    }
 
     #[test]
     fn opencode_create_session_payload_matches_api() {

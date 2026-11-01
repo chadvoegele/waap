@@ -56,8 +56,13 @@ pub(super) struct ClaudeRunner {
     child: AgentProcess,
 }
 impl ClaudeRunner {
-    pub(super) async fn run(&mut self) -> io::Result<RunOutcome> {
-        Ok(RunOutcome::from_exit_status(self.child.wait().await?))
+    pub(super) async fn run(&mut self, receiver: Receiver<Command>) -> io::Result<RunOutcome> {
+        super::unsupported_commands::await_with_unsupported_commands(
+            async { Ok(RunOutcome::from_exit_status(self.child.wait().await?)) },
+            receiver,
+            "claude",
+        )
+        .await
     }
     pub(super) async fn cleanup(&mut self) -> io::Result<()> {
         self.child.terminate().await
@@ -157,6 +162,115 @@ mod tests {
         build_claude_run_command, map_pkill_status, spawn_claude_attached, ClaudeRunCommand,
         ClaudeRunConfig,
     };
+
+    use crate::agent::backend::{RunOutcome, SteeringError};
+    use crate::agent::commands::CommandDispatcher;
+    use futures_util::FutureExt;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    use tokio::io::AsyncWriteExt;
+
+    fn pending_runner() -> (super::ClaudeRunner, tokio::process::ChildStdin) {
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .args(["-c", "read release; exit 7"])
+            .stdin(Stdio::piped());
+        let mut child = super::AgentProcess::spawn(&mut command).unwrap();
+        let release = child.take_stdin().unwrap();
+        (super::ClaudeRunner { child }, release)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn concrete_runner_rejects_steering_then_finishes_the_same_process_wait() {
+        let (mut runner, mut release) = pending_runner();
+        let (dispatcher, receiver) = CommandDispatcher::channel();
+        let mut execution = Box::pin(runner.run(receiver));
+        assert!(execution.as_mut().now_or_never().is_none());
+        let ((), result) = tokio::join!(
+            async {
+                assert_eq!(
+                    dispatcher
+                        .steer("pending", Instant::now() + Duration::from_secs(2))
+                        .await,
+                    Err(SteeringError::not_implemented("claude"))
+                );
+                release.write_all(b"finish\n").await.unwrap();
+            },
+            tokio::time::timeout(Duration::from_secs(2), &mut execution)
+        );
+        assert_eq!(
+            result.unwrap().unwrap(),
+            RunOutcome::Failed(std::process::ExitCode::from(7))
+        );
+        drop(execution);
+        assert_eq!(runner.child.wait().await.unwrap().code(), Some(7));
+        runner.cleanup().await.unwrap();
+        assert!(matches!(
+            dispatcher
+                .steer("completed", Instant::now() + Duration::from_secs(2))
+                .await,
+            Err(SteeringError::Rejected {
+                code: "agent_exited",
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn concrete_runner_completion_releases_queued_replies() {
+        let (mut runner, mut release) = pending_runner();
+        release.write_all(b"finish\n").await.unwrap();
+        assert_eq!(runner.child.wait().await.unwrap().code(), Some(7));
+        let (dispatcher, receiver) = CommandDispatcher::channel();
+        let steering = dispatcher.steer("queued", Instant::now() + Duration::from_secs(30));
+        tokio::pin!(steering);
+        assert!(steering.as_mut().now_or_never().is_none());
+        assert_eq!(
+            runner.run(receiver).await.unwrap(),
+            RunOutcome::Failed(std::process::ExitCode::from(7))
+        );
+        let result = tokio::time::timeout(Duration::from_millis(100), steering)
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, Err(SteeringError::AcceptanceUnknown { .. }))
+                || result == Err(SteeringError::not_implemented("claude"))
+        );
+        runner.cleanup().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn concrete_runner_cancellation_releases_queued_replies_before_or_after_polling() {
+        for polled in [false, true] {
+            let (mut runner, _release) = pending_runner();
+            let (dispatcher, receiver) = CommandDispatcher::channel();
+            let mut execution = Box::pin(runner.run(receiver));
+            if polled {
+                assert!(execution.as_mut().now_or_never().is_none());
+            }
+            let steering = dispatcher.steer("queued", Instant::now() + Duration::from_secs(30));
+            tokio::pin!(steering);
+            assert!(steering.as_mut().now_or_never().is_none());
+            drop(execution);
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_millis(100), steering)
+                    .await
+                    .unwrap(),
+                Err(SteeringError::AcceptanceUnknown { .. })
+            ));
+            assert!(matches!(
+                dispatcher
+                    .steer("cancelled", Instant::now() + Duration::from_secs(2))
+                    .await,
+                Err(SteeringError::Rejected {
+                    code: "agent_exited",
+                    ..
+                })
+            ));
+            runner.cleanup().await.unwrap();
+            assert!(!runner.child.wait().await.unwrap().success());
+        }
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn unsupported_steering_does_not_need_to_wait_for_the_process() {
