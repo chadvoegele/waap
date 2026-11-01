@@ -2,8 +2,8 @@ use std::io;
 use std::path::Path;
 use std::process::ExitCode;
 
-use super::backend::{AgentSystemBackend, RunOutcome, StartContext};
-use super::commands::CommandDispatcher;
+use super::backend::{AgentSessionRun, AgentSystemBackend, RunOutcome, StartContext};
+use super::commands::{Command, CommandDispatcher};
 use super::control::{ControlServer, SocketListener, SocketPath};
 use super::worktree::{collapse_errors, AgentWorktree};
 use crate::agent::{
@@ -142,7 +142,7 @@ fn run_started_agent(
                 worktree_dir: worktree.dir(),
             })
             .await?;
-        let result = async {
+        let publication = (|| {
             update_agent_session(
                 waap_root,
                 output_format,
@@ -150,40 +150,55 @@ fn run_started_agent(
                 &started.session_id,
                 system.clone(),
             )?;
-            let listener = SocketListener::bind(socket_path)?;
-            run_with_control(
-                ControlServer::new(listener),
-                started.runner.run(),
-                &started.dispatcher,
-            )
-            .await
+            SocketListener::bind(socket_path)
+        })();
+        match publication {
+            Ok(listener) => AgentApp::new(started, listener).run().await,
+            Err(error) => collapse_errors(Err(error), started.runner.cleanup().await),
         }
-        .await;
-        collapse_errors(result, started.runner.cleanup().await)
     });
     let cleanup_result = worktree.cleanup();
     collapse_errors(run_result, cleanup_result)
 }
 
-pub(super) async fn run_with_control(
-    mut server: ControlServer,
-    wait: impl std::future::Future<Output = io::Result<RunOutcome>>,
-    dispatcher: &CommandDispatcher,
-) -> io::Result<RunOutcome> {
-    use futures_util::FutureExt;
-    let outcome = {
-        let wait = std::panic::AssertUnwindSafe(wait).catch_unwind();
-        tokio::pin!(wait);
-        let result = tokio::select! {
-            result = &mut wait => result,
-            control = server.run(dispatcher) => {
-                if let Err(error) = control { log::error!("control server failed: {error}"); }
-                wait.await
-            }
+pub(super) struct AgentApp {
+    run: AgentSessionRun,
+    control: ControlServer,
+    receiver: Option<tokio::sync::mpsc::Receiver<Command>>,
+}
+
+impl AgentApp {
+    pub(super) fn new(run: AgentSessionRun, listener: SocketListener) -> Self {
+        let (dispatcher, receiver) = CommandDispatcher::channel();
+        Self {
+            run,
+            control: ControlServer::new(listener, dispatcher),
+            receiver: Some(receiver),
+        }
+    }
+
+    pub(super) async fn run(&mut self) -> io::Result<RunOutcome> {
+        use futures_util::FutureExt;
+        let outcome = {
+            let receiver = self.receiver.take().expect("agent app can only run once");
+            let wait = std::panic::AssertUnwindSafe(self.run.runner.run(receiver)).catch_unwind();
+            tokio::pin!(wait);
+            let result = tokio::select! {
+                result = &mut wait => result,
+                control = self.control.run() => {
+                    if let Err(error) = control { log::error!("control server failed: {error}"); }
+                    wait.await
+                }
+            };
+            result.unwrap_or_else(|_| Err(io::Error::other("agent wait panicked")))
         };
-        result.unwrap_or_else(|_| Err(io::Error::other("agent wait panicked")))
-    };
-    collapse_errors(outcome, server.close())
+        let outcome = collapse_errors(outcome, self.control.close());
+        collapse_errors(outcome, self.cleanup().await)
+    }
+
+    async fn cleanup(&mut self) -> io::Result<()> {
+        self.run.runner.cleanup().await
+    }
 }
 
 fn build_agent_goal(waap_root: &Path, agent_id: &str) -> String {

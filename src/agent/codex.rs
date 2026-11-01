@@ -22,12 +22,13 @@ use tokio::io::{
 use tokio::process::{ChildStdin, ChildStdout, Command as ProcessCommand};
 use tokio::sync::mpsc::Receiver;
 
-use super::commands::{Command, CommandDispatcher, SteerRequest, SteeringResult};
+use super::commands::{Command, SteerRequest, SteeringResult};
 
 use serde_json::{json, Value as JsonValue};
 
 use super::backend::{
-    AbortContext, AgentSystemBackend, RunOutcome, Runner, StartContext, StartedRun, SteeringError,
+    AbortContext, AgentSessionRun, AgentSystemBackend, RunOutcome, Runner, StartContext,
+    SteeringError,
 };
 use super::process::AgentProcess;
 use super::{AgentRunOptions, ReasoningEffort};
@@ -46,7 +47,7 @@ impl CodexBackend {
 }
 
 impl AgentSystemBackend for CodexBackend {
-    async fn start(&mut self, context: StartContext<'_>) -> io::Result<StartedRun> {
+    async fn start(&mut self, context: StartContext<'_>) -> io::Result<AgentSessionRun> {
         let mut interrupt =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let mut server = spawn_codex_app_server(&self.config, context.worktree_dir)?;
@@ -66,13 +67,10 @@ impl AgentSystemBackend for CodexBackend {
                 )
             }
         };
-        let (dispatcher, steering_receiver) = CommandDispatcher::channel();
-        Ok(StartedRun {
+        Ok(AgentSessionRun {
             session_id: thread_id.clone(),
-            dispatcher,
             runner: Runner::Codex(Box::new(CodexRunner {
                 server,
-                steering_receiver,
                 interrupt,
                 thread_id,
                 prompt: context.prompt.to_string(),
@@ -90,13 +88,15 @@ struct CodexAppServer {
 }
 pub(super) struct CodexRunner {
     server: CodexAppServer,
-    steering_receiver: Receiver<Command>,
     interrupt: tokio::signal::unix::Signal,
     thread_id: String,
     prompt: String,
 }
 impl CodexRunner {
-    pub(super) async fn run(&mut self) -> io::Result<RunOutcome> {
+    pub(super) async fn run(
+        &mut self,
+        mut steering_receiver: Receiver<Command>,
+    ) -> io::Result<RunOutcome> {
         let interrupt = &mut self.interrupt;
         let status = self
             .server
@@ -107,11 +107,9 @@ impl CodexRunner {
                 async {
                     interrupt.recv().await;
                 },
-                &mut self.steering_receiver,
+                &mut steering_receiver,
             )
             .await;
-        self.steering_receiver.close();
-        while self.steering_receiver.try_recv().is_ok() {}
         if status?.is_success() {
             Ok(RunOutcome::Completed)
         } else {
@@ -119,8 +117,6 @@ impl CodexRunner {
         }
     }
     pub(super) async fn cleanup(&mut self) -> io::Result<()> {
-        self.steering_receiver.close();
-        while self.steering_receiver.try_recv().is_ok() {}
         self.server.process.terminate().await
     }
 }
@@ -860,6 +856,7 @@ fn parse_steering_response(message: &JsonValue, expected_turn: &str) -> Steering
 mod steering_tests {
     use std::os::unix::net::UnixStream;
 
+    use super::super::commands::CommandDispatcher;
     use super::*;
 
     #[derive(Clone, Default)]

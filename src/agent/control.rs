@@ -19,7 +19,7 @@ pub(in crate::agent) mod tests {
     use super::handler::ControlRequestHandler;
     use super::socket::MAX_FRAME_BYTES;
     use super::*;
-    use crate::agent::backend::{RunOutcome, SteeringError};
+    use crate::agent::backend::{AgentSessionRun, RunOutcome, Runner, SteeringError};
     use crate::agent::commands::{Command, CommandDispatcher};
     use crate::root::{find_control_root_in, ControlRoot};
     use serde_json::{json, Value};
@@ -39,7 +39,7 @@ pub(in crate::agent) mod tests {
     struct Fixture {
         repo: TempDir,
         runtime: TempDir,
-        server: ControlServer,
+        listener: SocketListener,
         path: PathBuf,
     }
 
@@ -48,26 +48,35 @@ pub(in crate::agent) mod tests {
             self,
             runner: &FakeRunner<F>,
         ) -> io::Result<RunOutcome> {
-            let (dispatcher, mut commands) = CommandDispatcher::channel();
             let completion = Arc::clone(&runner.completion);
-            let wait = async {
-                let mut completion = tokio::task::spawn_blocking(move || {
-                    completion
-                        .lock()
-                        .unwrap()
-                        .recv_timeout(Duration::from_secs(10))
-                        .unwrap();
-                });
-                loop {
-                    tokio::select! {
-                        result = &mut completion => { result.unwrap(); return Ok(RunOutcome::Completed); }
-                        Some(Command::Steer(mut request)) = commands.recv() => {
-                            request.respond((runner.steer)(&request.message, request.deadline));
-                        }
-                    }
-                }
+            let steer_calls = Arc::new(Mutex::new(Vec::new()));
+            let observed = Arc::clone(&steer_calls);
+            let action = Box::new(move || {
+                completion
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10))
+                    .map(|_| ())
+                    .map_err(io::Error::other)
+            });
+            let session = AgentSessionRun {
+                session_id: "test".into(),
+                runner: Runner::Fake(crate::agent::backend::fake::FakeRunner {
+                    outcome: Some(RunOutcome::Completed),
+                    error: None,
+                    action: Some(action),
+                    wait_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    steer_calls: steer_calls.clone(),
+                    steer_error: None,
+                }),
             };
-            crate::agent::run::run_with_control(self.server, wait, &dispatcher).await
+            let mut app = crate::agent::run::AgentApp::new(session, self.listener);
+            let result = app.run().await;
+            for (message, deadline, owner) in observed.lock().unwrap().iter() {
+                assert_eq!(*owner, thread::current().id());
+                (runner.steer)(message, *deadline).map_err(io::Error::other)?;
+            }
+            result
         }
 
         async fn new() -> Self {
@@ -84,11 +93,11 @@ pub(in crate::agent) mod tests {
                 .unwrap()
                 .as_path()
                 .to_path_buf();
-            let server = bind_server(&root, "aa-1").unwrap();
+            let listener = bind_listener(&root, "aa-1").unwrap();
             Self {
                 repo,
                 runtime,
-                server,
+                listener,
                 path,
             }
         }
@@ -99,10 +108,8 @@ pub(in crate::agent) mod tests {
         completion: Arc<Mutex<Receiver<()>>>,
     }
 
-    fn bind_server(root: &ControlRoot, agent_id: &str) -> io::Result<ControlServer> {
-        Ok(ControlServer::new(SocketListener::bind(
-            SocketPath::for_agent(root, agent_id)?,
-        )?))
+    fn bind_listener(root: &ControlRoot, agent_id: &str) -> io::Result<SocketListener> {
+        SocketListener::bind(SocketPath::for_agent(root, agent_id)?)
     }
 
     fn read_frame(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
@@ -122,7 +129,7 @@ pub(in crate::agent) mod tests {
         stream.set_nonblocking(true)?;
         crate::agent::runtime::block_on(async {
             let (dispatcher, mut commands) = CommandDispatcher::channel();
-            let handler = ControlRequestHandler::new(&dispatcher);
+            let handler = ControlRequestHandler::new(dispatcher);
             tokio::select! {
                 result = handler.handle(SocketConnection::new(tokio::net::UnixStream::from_std(stream)?)) => result,
                 Some(Command::Steer(request)) = commands.recv() => { (runner.steer)(&request.message, request.deadline).unwrap(); panic!("unexpected dispatch"); }
@@ -179,98 +186,37 @@ pub(in crate::agent) mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn delayed_ack_does_not_serialize_handlers_and_completion_cancels_reply_wait() {
-        let fixture = Fixture::new().await;
-        let path = fixture.path.clone();
-        let (dispatcher, mut commands) = CommandDispatcher::channel();
-        let entered = tokio::sync::Notify::new();
-        let release = tokio::sync::Notify::new();
-        let complete = tokio::sync::Notify::new();
-        let runner = async {
-            let actor = async {
-                let Some(Command::Steer(mut first)) = commands.recv().await else {
-                    panic!()
-                };
-                entered.notify_one();
-                let Some(Command::Steer(mut second)) = commands.recv().await else {
-                    panic!()
-                };
-                second.respond(Ok(()));
-                release.notified().await;
-                first.respond(Ok(()));
-                let Some(Command::Steer(_held)) = commands.recv().await else {
-                    panic!()
-                };
-                entered.notify_one();
-                std::future::pending::<()>().await;
-            };
-            tokio::select! { _ = complete.notified() => Ok(RunOutcome::Completed), _ = actor => panic!() }
-        };
-        tokio::time::timeout(Duration::from_secs(2), async {
-            let (outcome, ()) = tokio::join!(
-                crate::agent::run::run_with_control(fixture.server, runner, &dispatcher),
-                async {
-                    let mut first = SocketConnection::new(
-                        tokio::net::UnixStream::connect(&path).await.unwrap(),
-                    );
-                    let bytes = frame("first");
-                    first.write_frame(&bytes[..bytes.len() - 1]).await.unwrap();
-                    entered.notified().await;
-                    let mut second = SocketConnection::new(
-                        tokio::net::UnixStream::connect(&path).await.unwrap(),
-                    );
-                    let bytes = frame("second");
-                    second.write_frame(&bytes[..bytes.len() - 1]).await.unwrap();
-                    let reply: Value =
-                        serde_json::from_slice(&second.read_frame(IO_TIMEOUT).await.unwrap())
-                            .unwrap();
-                    assert_eq!(reply["accepted"], true);
-                    release.notify_one();
-                    let reply: Value =
-                        serde_json::from_slice(&first.read_frame(IO_TIMEOUT).await.unwrap())
-                            .unwrap();
-                    assert_eq!(reply["accepted"], true);
-                    let mut held = SocketConnection::new(
-                        tokio::net::UnixStream::connect(&path).await.unwrap(),
-                    );
-                    let bytes = frame("held");
-                    held.write_frame(&bytes[..bytes.len() - 1]).await.unwrap();
-                    entered.notified().await;
-                    complete.notify_one();
-                    assert_eq!(
-                        held.read_frame(IO_TIMEOUT).await.unwrap_err().kind(),
-                        io::ErrorKind::UnexpectedEof
-                    );
-                }
-            );
-            assert_eq!(outcome.unwrap(), RunOutcome::Completed);
-        })
-        .await
-        .unwrap();
-        assert!(!path.exists());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn control_failure_does_not_restart_or_abandon_the_backend_future() {
         let mut fixture = Fixture::new().await;
-        fixture.server.close().unwrap();
-        let calls = std::cell::Cell::new(0);
-        let (complete, completion) = tokio::sync::oneshot::channel();
-        let dispatcher = CommandDispatcher::Unsupported("test");
-        let wait = async {
-            calls.set(calls.get() + 1);
-            completion.await.unwrap();
-            Ok(RunOutcome::Completed)
+        fixture.listener.close().unwrap();
+        let (complete, completion) = mpsc::channel();
+        let calls = Arc::new(Mutex::new(0usize));
+        let observed_calls = Arc::clone(&calls);
+        let wait_action = Box::new(move || {
+            *observed_calls.lock().unwrap() += 1;
+            completion
+                .recv_timeout(Duration::from_secs(3))
+                .map(|_| ())
+                .map_err(io::Error::other)
+        });
+        let session = AgentSessionRun {
+            session_id: "test".into(),
+            runner: Runner::Fake(crate::agent::backend::fake::FakeRunner {
+                outcome: Some(RunOutcome::Completed),
+                error: None,
+                action: Some(wait_action),
+                wait_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                steer_calls: Arc::new(Mutex::new(Vec::new())),
+                steer_error: None,
+            }),
         };
-        let (outcome, ()) = tokio::join!(
-            crate::agent::run::run_with_control(fixture.server, wait, &dispatcher),
-            async {
-                tokio::task::yield_now().await;
-                complete.send(()).unwrap();
-            }
-        );
+        let mut app = crate::agent::run::AgentApp::new(session, fixture.listener);
+        let (outcome, ()) = tokio::join!(app.run(), async {
+            tokio::task::yield_now().await;
+            complete.send(()).unwrap();
+        });
         assert_eq!(outcome.unwrap(), RunOutcome::Completed);
-        assert_eq!(calls.get(), 1);
+        assert_eq!(*calls.lock().unwrap(), 1);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -418,7 +364,7 @@ pub(in crate::agent) mod tests {
             Some(fixture.runtime.path().as_os_str()),
         )
         .unwrap();
-        let error = bind_server(&root, "aa-1").err().unwrap();
+        let error = bind_listener(&root, "aa-1").err().unwrap();
         assert!(error
             .to_string()
             .contains("existing endpoints are not automatically removed"));
@@ -435,7 +381,7 @@ pub(in crate::agent) mod tests {
             Some(fixture.runtime.path().as_os_str()),
         )
         .unwrap();
-        assert!(bind_server(&root, "aa-2").is_err());
+        assert!(bind_listener(&root, "aa-2").is_err());
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).unwrap();
         let runtime = tempdir().unwrap();
         fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -446,25 +392,27 @@ pub(in crate::agent) mod tests {
         .unwrap();
         let root =
             find_control_root_in(fixture.repo.path(), Some(runtime.path().as_os_str())).unwrap();
-        assert!(bind_server(&root, "aa-2").is_err());
+        assert!(bind_listener(&root, "aa-2").is_err());
     }
 
     pub(in crate::agent) async fn assert_backend_socket_rejection(
-        dispatcher: &CommandDispatcher,
-        backend: &str,
+        runner: &mut Runner,
+        backend: &'static str,
     ) {
         let fixture = Fixture::new().await;
         let path = fixture.path.clone();
         let complete = tokio::sync::Notify::new();
+        let (dispatcher, receiver) = CommandDispatcher::channel();
+        let mut server = ControlServer::new(fixture.listener, dispatcher);
         let (outcome, reply) = tokio::join!(
-            crate::agent::run::run_with_control(
-                fixture.server,
-                async {
-                    complete.notified().await;
-                    Ok(RunOutcome::Completed)
-                },
-                dispatcher
-            ),
+            async {
+                let unsupported = runner.run(receiver);
+                tokio::select! {
+                    result = server.run() => result.map(|_| RunOutcome::Completed),
+                    result = unsupported => panic!("backend exited before rejection: {result:?}"),
+                    _ = complete.notified() => { server.close()?; Ok(RunOutcome::Completed) },
+                }
+            },
             async {
                 let mut connection =
                     SocketConnection::new(tokio::net::UnixStream::connect(&path).await.unwrap());

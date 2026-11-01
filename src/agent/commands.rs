@@ -43,22 +43,17 @@ impl SteerRequest {
 }
 
 #[derive(Clone)]
-pub(super) enum CommandDispatcher {
-    Channel(mpsc::Sender<Command>),
-    Unsupported(&'static str),
+pub(super) struct CommandDispatcher {
+    sender: mpsc::Sender<Command>,
 }
 
 impl CommandDispatcher {
     pub(super) fn channel() -> (Self, mpsc::Receiver<Command>) {
         let (sender, receiver) = mpsc::channel(1);
-        (Self::Channel(sender), receiver)
+        (Self { sender }, receiver)
     }
 
     pub(super) async fn steer(&self, prompt: &str, deadline: Instant) -> SteeringResult {
-        let sender = match self {
-            Self::Channel(sender) => sender,
-            Self::Unsupported(backend) => return Err(SteeringError::not_implemented(backend)),
-        };
         if Instant::now() >= deadline {
             return Err(SteeringError::Rejected {
                 code: "timeout",
@@ -66,7 +61,7 @@ impl CommandDispatcher {
             });
         }
         let (request, replies) = SteerRequest::new(prompt.to_string(), deadline);
-        sender
+        self.sender
             .try_send(Command::Steer(request))
             .map_err(|error| match error {
                 mpsc::error::TrySendError::Full(_) => SteeringError::Rejected {
@@ -113,9 +108,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn queue_is_bounded_and_runner_exit_is_distinguished_from_uncertain_delivery() {
         let (dispatcher, mut requests) = CommandDispatcher::channel();
-        let CommandDispatcher::Channel(sender) = &dispatcher else {
-            unreachable!()
-        };
+        let sender = dispatcher.sender.clone();
         let (request, _reply) = SteerRequest::new("first".into(), deadline());
         sender.try_send(Command::Steer(request)).ok().unwrap();
         assert!(matches!(
@@ -153,5 +146,18 @@ mod tests {
         ));
         let Command::Steer(request) = requests.recv().await.unwrap();
         assert_eq!(request.message, "queued");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropping_receiver_releases_queued_reply_senders() {
+        let (dispatcher, receiver) = CommandDispatcher::channel();
+        let (result, ()) = tokio::join!(dispatcher.steer("queued", deadline()), async {
+            tokio::task::yield_now().await;
+            drop(receiver);
+        });
+        assert!(matches!(
+            result,
+            Err(SteeringError::AcceptanceUnknown { .. })
+        ));
     }
 }

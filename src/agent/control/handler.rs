@@ -6,12 +6,12 @@ use super::protocol::{build_rejection, build_response, parse_request};
 use super::socket::SocketConnection;
 use super::{ACK_TIMEOUT, IO_TIMEOUT};
 
-pub(super) struct ControlRequestHandler<'a> {
-    dispatcher: &'a CommandDispatcher,
+pub(super) struct ControlRequestHandler {
+    dispatcher: CommandDispatcher,
 }
 
-impl<'a> ControlRequestHandler<'a> {
-    pub(super) fn new(dispatcher: &'a CommandDispatcher) -> Self {
+impl ControlRequestHandler {
+    pub(super) fn new(dispatcher: CommandDispatcher) -> Self {
         Self { dispatcher }
     }
 
@@ -48,19 +48,27 @@ mod tests {
     async fn unsupported_backend_rejection_is_forwarded() {
         let request = Request::steer("steer");
         let id = request.request_id.clone();
-        let dispatcher = CommandDispatcher::Unsupported("claude");
-        let handler = ControlRequestHandler::new(&dispatcher);
+        let (dispatcher, commands) = CommandDispatcher::channel();
+        let handler = ControlRequestHandler::new(dispatcher.clone());
         let (server, client) = tokio::net::UnixStream::pair().unwrap();
         let mut client = SocketConnection::new(client);
-        let (result, response) =
-            tokio::join!(handler.handle(SocketConnection::new(server)), async {
-                client
-                    .write_frame(&serde_json::to_vec(&request).unwrap())
-                    .await
-                    .unwrap();
-                serde_json::from_slice::<Response>(&client.read_frame(IO_TIMEOUT).await.unwrap())
-                    .unwrap()
-            });
+        let unsupported = crate::agent::backend::run_unsupported(
+            std::future::pending::<io::Result<crate::agent::backend::RunOutcome>>(),
+            commands,
+            "claude",
+        );
+        let (result, response) = tokio::join!(
+            handler.handle(SocketConnection::new(server)),
+            async {
+                tokio::select! {
+                    result = unsupported => panic!("unsupported runner exited: {result:?}"),
+                    response = async {
+                        client.write_frame(&serde_json::to_vec(&request).unwrap()).await.unwrap();
+                        serde_json::from_slice::<Response>(&client.read_frame(IO_TIMEOUT).await.unwrap()).unwrap()
+                    } => response,
+                }
+            }
+        );
         result.unwrap();
         assert_eq!(response.request_id.as_deref(), Some(id.as_str()));
         assert_eq!(response.accepted, Some(false));

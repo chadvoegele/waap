@@ -9,7 +9,7 @@ use reqwest::{Client, Response};
 use serde_json::{json, Value as JsonValue};
 
 use super::backend::{
-    AbortContext, AgentSystemBackend, RunOutcome, Runner, StartContext, StartedRun,
+    AbortContext, AgentSessionRun, AgentSystemBackend, RunOutcome, Runner, StartContext,
 };
 
 pub(super) struct OpencodeBackend {
@@ -25,7 +25,7 @@ impl OpencodeBackend {
 }
 
 impl AgentSystemBackend for OpencodeBackend {
-    async fn start(&mut self, context: StartContext<'_>) -> io::Result<StartedRun> {
+    async fn start(&mut self, context: StartContext<'_>) -> io::Result<AgentSessionRun> {
         let repository_root = opencode_repository_root(context.repository_root)?;
         let client = opencode_client()?;
         let session_id = create_opencode_session(&client, &self.config, &repository_root).await?;
@@ -39,9 +39,8 @@ impl AgentSystemBackend for OpencodeBackend {
             context.prompt,
         )
         .await?;
-        Ok(StartedRun {
+        Ok(AgentSessionRun {
             session_id: session_id.clone(),
-            dispatcher: super::commands::CommandDispatcher::Unsupported("opencode"),
             runner: Runner::Opencode(OpencodeRunner {
                 events: Some(events),
                 session_id,
@@ -605,6 +604,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let expected_root = repository_root.clone();
+        let (release, completion) = std::sync::mpsc::channel();
         let server = thread::spawn(move || {
             let mut create = listener.accept().unwrap().0;
             let request = read_request(&mut create);
@@ -642,6 +642,9 @@ mod tests {
             write_response(&mut prompt, "HTTP/1.1 204 No Content", None);
             drop(prompt);
 
+            completion
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
             events
                 .write_all(
                     b"data: {\"type\":\"session.status\",\"properties\":{\"sessionID\":\"ses_123\",\"status\":{\"type\":\"idle\"}}}\n\n",
@@ -667,24 +670,12 @@ mod tests {
 
         assert_eq!(started.session_id, "ses_123");
         crate::agent::control::tests::assert_backend_socket_rejection(
-            &started.dispatcher,
+            &mut started.runner,
             "opencode",
         )
         .await;
-        let error = started
-            .dispatcher
-            .steer("steer", std::time::Instant::now())
-            .await
-            .unwrap_err();
-        assert_eq!(
-            error,
-            crate::agent::backend::SteeringError::not_implemented("opencode")
-        );
-        assert_eq!(
-            error.to_string(),
-            "steering not implemented for backend opencode"
-        );
-        assert_eq!(started.runner.run().await.unwrap(), RunOutcome::Completed);
+        release.send(()).unwrap();
+        started.runner.cleanup().await.unwrap();
         server.join().unwrap();
     }
 

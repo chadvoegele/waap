@@ -8,7 +8,7 @@ use super::process::AgentProcess;
 use uuid::Uuid;
 
 use super::backend::{
-    AbortContext, AgentSystemBackend, RunOutcome, Runner, StartContext, StartedRun,
+    AbortContext, AgentSessionRun, AgentSystemBackend, RunOutcome, Runner, StartContext,
 };
 
 pub(super) struct ClaudeBackend {
@@ -24,7 +24,7 @@ impl ClaudeBackend {
 }
 
 impl AgentSystemBackend for ClaudeBackend {
-    async fn start(&mut self, context: StartContext<'_>) -> io::Result<StartedRun> {
+    async fn start(&mut self, context: StartContext<'_>) -> io::Result<AgentSessionRun> {
         let session_id = Uuid::new_v4().to_string();
         let command = build_claude_run_command(
             &self.config,
@@ -33,9 +33,8 @@ impl AgentSystemBackend for ClaudeBackend {
             context.worktree_dir,
             context.prompt,
         );
-        Ok(StartedRun {
+        Ok(AgentSessionRun {
             session_id,
-            dispatcher: super::commands::CommandDispatcher::Unsupported("claude"),
             runner: Runner::Claude(ClaudeRunner {
                 child: spawn_claude_attached(&command)?,
             }),
@@ -156,15 +155,13 @@ mod tests {
     async fn unsupported_steering_does_not_need_to_wait_for_the_process() {
         let command = ClaudeRunCommand {
             program: "sh".into(),
-            args: vec!["-c".into(), "exit 0".into()],
+            args: vec!["-c".into(), "while :; do :; done".into()],
             working_dir: std::env::temp_dir(),
         };
-        let mut runner = super::ClaudeRunner {
+        let mut runner = super::super::backend::Runner::Claude(super::ClaudeRunner {
             child: spawn_claude_attached(&command).unwrap(),
-        };
-        let dispatcher = crate::agent::commands::CommandDispatcher::Unsupported("claude");
-        crate::agent::control::tests::assert_backend_socket_rejection(&dispatcher, "claude").await;
-        assert_eq!(runner.run().await.unwrap(), super::RunOutcome::Completed);
+        });
+        crate::agent::control::tests::assert_backend_socket_rejection(&mut runner, "claude").await;
         runner.cleanup().await.unwrap();
     }
 

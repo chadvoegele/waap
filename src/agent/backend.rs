@@ -2,8 +2,10 @@ use std::io;
 use std::path::Path;
 use std::process::{ExitCode, ExitStatus};
 
-use super::commands::CommandDispatcher;
+use super::commands::Command;
 use super::{claude::ClaudeBackend, codex::CodexBackend, opencode::OpencodeBackend};
+use std::future::Future;
+use tokio::sync::mpsc::Receiver;
 
 #[derive(Debug, PartialEq)]
 pub(super) enum RunOutcome {
@@ -21,6 +23,28 @@ impl RunOutcome {
     }
 }
 
+pub(in crate::agent) async fn run_unsupported<F>(
+    wait: F,
+    receiver: Receiver<Command>,
+    backend: &'static str,
+) -> io::Result<RunOutcome>
+where
+    F: Future<Output = io::Result<RunOutcome>>,
+{
+    tokio::pin!(wait);
+    let mut receiver = receiver;
+    let mut channel_open = true;
+    loop {
+        tokio::select! {
+            result = &mut wait => return result,
+            request = receiver.recv(), if channel_open => match request {
+                Some(Command::Steer(mut request)) => request.respond(Err(SteeringError::not_implemented(backend))),
+                None => channel_open = false,
+            }
+        }
+    }
+}
+
 pub(super) struct StartContext<'a> {
     pub(super) agent_id: &'a str,
     pub(super) prompt: &'a str,
@@ -28,9 +52,8 @@ pub(super) struct StartContext<'a> {
     pub(super) worktree_dir: &'a Path,
 }
 
-pub(super) struct StartedRun {
+pub(super) struct AgentSessionRun {
     pub(super) session_id: String,
-    pub(super) dispatcher: CommandDispatcher,
     pub(super) runner: Runner,
 }
 
@@ -43,13 +66,13 @@ pub(super) enum Runner {
 }
 
 impl Runner {
-    pub(super) async fn run(&mut self) -> io::Result<RunOutcome> {
+    pub(super) async fn run(&mut self, receiver: Receiver<Command>) -> io::Result<RunOutcome> {
         match self {
-            Self::Claude(runner) => runner.run().await,
-            Self::Codex(runner) => runner.run().await,
-            Self::Opencode(runner) => runner.run().await,
+            Self::Claude(runner) => run_unsupported(runner.run(), receiver, "claude").await,
+            Self::Codex(runner) => runner.run(receiver).await,
+            Self::Opencode(runner) => run_unsupported(runner.run(), receiver, "opencode").await,
             #[cfg(test)]
-            Self::Fake(runner) => runner.run().await,
+            Self::Fake(runner) => runner.run(receiver).await,
         }
     }
 
@@ -104,7 +127,7 @@ pub(super) struct AbortContext<'a> {
 }
 
 pub(super) trait AgentSystemBackend {
-    async fn start(&mut self, context: StartContext<'_>) -> io::Result<StartedRun>;
+    async fn start(&mut self, context: StartContext<'_>) -> io::Result<AgentSessionRun>;
     async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()>;
 }
 
@@ -114,7 +137,7 @@ pub(super) enum Backend {
     Opencode(OpencodeBackend),
 }
 impl AgentSystemBackend for Backend {
-    async fn start(&mut self, context: StartContext<'_>) -> io::Result<StartedRun> {
+    async fn start(&mut self, context: StartContext<'_>) -> io::Result<AgentSessionRun> {
         match self {
             Self::Claude(b) => b.start(context).await,
             Self::Codex(b) => b.start(context).await,
@@ -174,7 +197,7 @@ pub(super) mod fake {
         pub(crate) abort_error: Option<String>,
         pub(crate) start_calls: Vec<StartCall>,
         pub(crate) wait_calls: Arc<AtomicUsize>,
-        pub(crate) steer_calls: Arc<Mutex<Vec<(String, Instant)>>>,
+        pub(crate) steer_calls: Arc<Mutex<Vec<(String, Instant, std::thread::ThreadId)>>>,
         pub(crate) steer_error: Option<SteeringError>,
         pub(crate) abort_calls: Vec<AbortCall>,
     }
@@ -196,16 +219,18 @@ pub(super) mod fake {
         }
     }
     pub(in crate::agent) struct FakeRunner {
-        outcome: Option<RunOutcome>,
-        error: Option<String>,
-        action: Option<Box<dyn FnOnce() -> io::Result<()> + Send>>,
-        wait_calls: Arc<AtomicUsize>,
-        steer_calls: Arc<Mutex<Vec<(String, Instant)>>>,
-        steer_error: Option<SteeringError>,
-        commands: mpsc::Receiver<Command>,
+        pub(in crate::agent) outcome: Option<RunOutcome>,
+        pub(in crate::agent) error: Option<String>,
+        pub(in crate::agent) action: Option<Box<dyn FnOnce() -> io::Result<()> + Send>>,
+        pub(in crate::agent) wait_calls: Arc<AtomicUsize>,
+        pub(in crate::agent) steer_calls: Arc<Mutex<Vec<(String, Instant, std::thread::ThreadId)>>>,
+        pub(in crate::agent) steer_error: Option<SteeringError>,
     }
     impl FakeRunner {
-        pub(super) async fn run(&mut self) -> io::Result<RunOutcome> {
+        pub(super) async fn run(
+            &mut self,
+            mut commands: mpsc::Receiver<Command>,
+        ) -> io::Result<RunOutcome> {
             self.wait_calls.fetch_add(1, Ordering::SeqCst);
             let action = self.action.take();
             let mut wait = tokio::task::spawn_blocking(move || {
@@ -224,8 +249,8 @@ pub(super) mod fake {
                         }
                         return if let Some(error) = self.error.take() { Err(io::Error::other(error)) } else { Ok(self.outcome.take().unwrap()) };
                     }
-                    Some(Command::Steer(mut request)) = self.commands.recv() => {
-                        self.steer_calls.lock().unwrap().push((request.message.clone(), request.deadline));
+                    Some(Command::Steer(mut request)) = commands.recv() => {
+                        self.steer_calls.lock().unwrap().push((request.message.clone(), request.deadline, std::thread::current().id()));
                         request.respond(self.steer_error.clone().map_or(Ok(()), Err));
                     }
                 }
@@ -233,7 +258,7 @@ pub(super) mod fake {
         }
     }
     impl AgentSystemBackend for FakeBackend {
-        async fn start(&mut self, context: StartContext<'_>) -> io::Result<StartedRun> {
+        async fn start(&mut self, context: StartContext<'_>) -> io::Result<AgentSessionRun> {
             self.start_calls.push(StartCall {
                 agent_id: context.agent_id.into(),
                 prompt: context.prompt.into(),
@@ -244,10 +269,8 @@ pub(super) mod fake {
             if let Some(error) = self.start_error.take() {
                 return Err(io::Error::other(error));
             }
-            let (dispatcher, commands) = CommandDispatcher::channel();
-            Ok(StartedRun {
+            Ok(AgentSessionRun {
                 session_id: self.session_id.clone(),
-                dispatcher,
                 runner: Runner::Fake(FakeRunner {
                     outcome: self.outcome.take(),
                     error: self.wait_error.take(),
@@ -255,7 +278,6 @@ pub(super) mod fake {
                     wait_calls: Arc::clone(&self.wait_calls),
                     steer_calls: Arc::clone(&self.steer_calls),
                     steer_error: self.steer_error.clone(),
-                    commands,
                 }),
             })
         }
@@ -290,5 +312,70 @@ mod tests {
             RunOutcome::from_exit_status(ExitStatus::from_raw(9)),
             RunOutcome::Failed(ExitCode::from(1))
         );
+    }
+}
+
+#[cfg(test)]
+mod execution_tests {
+    use super::*;
+    use crate::agent::commands::CommandDispatcher;
+    use futures_util::FutureExt;
+    use std::time::{Duration, Instant};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completed_execution_closes_command_transport() {
+        let (dispatcher, receiver) = CommandDispatcher::channel();
+        assert_eq!(
+            run_unsupported(async { Ok(RunOutcome::Completed) }, receiver, "claude")
+                .await
+                .unwrap(),
+            RunOutcome::Completed
+        );
+        assert!(matches!(
+            dispatcher
+                .steer("after completion", Instant::now() + Duration::from_secs(1))
+                .await,
+            Err(SteeringError::Rejected {
+                code: "agent_exited",
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelling_execution_drops_queued_replies_without_waiting_for_deadline() {
+        for polled in [false, true] {
+            let (dispatcher, receiver) = CommandDispatcher::channel();
+            let mut execution = Box::pin(run_unsupported(
+                std::future::pending(),
+                receiver,
+                "opencode",
+            ));
+            if polled {
+                assert!(execution.as_mut().now_or_never().is_none());
+            }
+            let steering = dispatcher.steer("queued", Instant::now() + Duration::from_secs(30));
+            tokio::pin!(steering);
+            assert!(steering.as_mut().now_or_never().is_none());
+            drop(execution);
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_millis(100), steering)
+                    .await
+                    .unwrap(),
+                Err(SteeringError::AcceptanceUnknown { .. })
+            ));
+            assert!(matches!(
+                dispatcher
+                    .steer(
+                        "after cancellation",
+                        Instant::now() + Duration::from_secs(1)
+                    )
+                    .await,
+                Err(SteeringError::Rejected {
+                    code: "agent_exited",
+                    ..
+                })
+            ));
+        }
     }
 }
