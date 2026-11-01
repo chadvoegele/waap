@@ -75,8 +75,6 @@ Then run your agent with `waap agent run --agent-id aa-file-picker-implementer`.
 
 Steer a running agent with `waap agent steer --agent-id aa-file-picker-implementer --prompt "Focus on keyboard navigation"`.
 
-Steering currently supports Codex. Only one native steering acknowledgement may be outstanding; competing requests receive `busy`, including after an uncertain timeout until the earlier acknowledgement arrives. A single-threaded Tokio runtime drives backend startup, I/O, and at most eight concurrent async control handlers, with no application waiting queue; excess connections are closed without acceptance. Slow clients do not block other handlers; server frame reads and all frame writes have five-second deadlines. The CLI uses the same async socket transport through its own current-thread runtime and allows 35 seconds to read a response, covering the backend's 30-second acknowledgement deadline plus response I/O. Run completion drops the control-server future, cancelling its handlers and closing their sockets. Local children are terminated and reaped before worktree cleanup.
-
 ## `waap` Loop
 
 For more complex workflows, follow the same idea but with multiple tickets and use a `waap` loop:
