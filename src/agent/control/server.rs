@@ -28,7 +28,7 @@ impl ControlServer {
                     match connection {
                         Ok(stream) if handlers.len() < MAX_HANDLERS => {
                             handlers.push(std::panic::AssertUnwindSafe(
-                                handler.serve(SocketConnection::new(stream))
+                                handler.handle(SocketConnection::new(stream))
                             ).catch_unwind());
                         }
                         Ok(stream) => drop(stream),

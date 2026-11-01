@@ -124,7 +124,7 @@ pub(in crate::agent) mod tests {
             let (dispatcher, mut commands) = CommandDispatcher::channel();
             let handler = ControlRequestHandler::new(&dispatcher);
             tokio::select! {
-                result = handler.serve(SocketConnection::new(tokio::net::UnixStream::from_std(stream)?)) => result,
+                result = handler.handle(SocketConnection::new(tokio::net::UnixStream::from_std(stream)?)) => result,
                 Some(Command::Steer(request)) = commands.recv() => { (runner.steer)(&request.message, request.deadline).unwrap(); panic!("unexpected dispatch"); }
             }
         })

@@ -2,7 +2,7 @@ use std::io;
 use std::time::Instant;
 
 use super::super::commands::CommandDispatcher;
-use super::protocol::{build_rejection, build_response, parse_request, Request, Response};
+use super::protocol::{build_rejection, build_response, parse_request};
 use super::socket::SocketConnection;
 use super::{ACK_TIMEOUT, IO_TIMEOUT};
 
@@ -15,19 +15,15 @@ impl<'a> ControlRequestHandler<'a> {
         Self { dispatcher }
     }
 
-    async fn handle(&self, request: Request) -> Response {
-        build_response(
-            &request.request_id,
-            self.dispatcher
-                .steer(&request.prompt, Instant::now() + ACK_TIMEOUT)
-                .await,
-        )
-    }
-
-    pub(super) async fn serve(&self, mut connection: SocketConnection) -> io::Result<()> {
+    pub(super) async fn handle(&self, mut connection: SocketConnection) -> io::Result<()> {
         let response = match connection.read_frame(IO_TIMEOUT).await {
             Ok(frame) => match parse_request(&frame) {
-                Ok(request) => self.handle(request).await,
+                Ok(request) => build_response(
+                    &request.request_id,
+                    self.dispatcher
+                        .steer(&request.prompt, Instant::now() + ACK_TIMEOUT)
+                        .await,
+                ),
                 Err(response) => response,
             },
             Err(error) if error.kind() == io::ErrorKind::InvalidData => build_rejection(
@@ -45,15 +41,26 @@ impl<'a> ControlRequestHandler<'a> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::protocol::{Request, Response};
     use super::*;
     #[tokio::test(flavor = "current_thread")]
     async fn unsupported_backend_rejection_is_forwarded() {
         let request = Request::steer("steer");
         let id = request.request_id.clone();
         let dispatcher = CommandDispatcher::Unsupported("claude");
-        let response = ControlRequestHandler::new(&dispatcher)
-            .handle(request)
-            .await;
+        let handler = ControlRequestHandler::new(&dispatcher);
+        let (server, client) = tokio::net::UnixStream::pair().unwrap();
+        let mut client = SocketConnection::new(client);
+        let (result, response) =
+            tokio::join!(handler.handle(SocketConnection::new(server)), async {
+                client
+                    .write_frame(&serde_json::to_vec(&request).unwrap())
+                    .await
+                    .unwrap();
+                serde_json::from_slice::<Response>(&client.read_frame(IO_TIMEOUT).await.unwrap())
+                    .unwrap()
+            });
+        result.unwrap();
         assert_eq!(response.request_id.as_deref(), Some(id.as_str()));
         assert_eq!(response.accepted, Some(false));
         assert_eq!(response.error.unwrap().code, "not_implemented");
