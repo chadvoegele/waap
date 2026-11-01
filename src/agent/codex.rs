@@ -47,7 +47,11 @@ impl CodexBackend {
 }
 
 impl AgentSystemBackend for CodexBackend {
-    async fn start(&mut self, context: StartContext<'_>) -> io::Result<AgentSessionRun> {
+    async fn start(
+        &mut self,
+        context: StartContext<'_>,
+        receiver: Receiver<Command>,
+    ) -> io::Result<AgentSessionRun> {
         let mut interrupt =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let mut server = spawn_codex_app_server(&self.config, context.worktree_dir)?;
@@ -67,15 +71,16 @@ impl AgentSystemBackend for CodexBackend {
                 )
             }
         };
-        Ok(AgentSessionRun {
-            session_id: thread_id.clone(),
-            runner: Runner::Codex(Box::new(CodexRunner {
+        Ok(AgentSessionRun::new(
+            thread_id.clone(),
+            Runner::Codex(Box::new(CodexRunner {
                 server,
                 interrupt,
                 thread_id,
                 prompt: context.prompt.to_string(),
             })),
-        })
+            receiver,
+        ))
     }
     async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
         signal_codex_run(context.agent_id).await

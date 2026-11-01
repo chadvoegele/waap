@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::mpsc::Receiver;
 
 use reqwest::{Client, Response};
 use serde_json::{json, Value as JsonValue};
@@ -11,6 +12,7 @@ use serde_json::{json, Value as JsonValue};
 use super::backend::{
     AbortContext, AgentSessionRun, AgentSystemBackend, RunOutcome, Runner, StartContext,
 };
+use super::commands::Command;
 
 pub(super) struct OpencodeBackend {
     config: OpencodeRunConfig,
@@ -25,7 +27,11 @@ impl OpencodeBackend {
 }
 
 impl AgentSystemBackend for OpencodeBackend {
-    async fn start(&mut self, context: StartContext<'_>) -> io::Result<AgentSessionRun> {
+    async fn start(
+        &mut self,
+        context: StartContext<'_>,
+        receiver: Receiver<Command>,
+    ) -> io::Result<AgentSessionRun> {
         let repository_root = opencode_repository_root(context.repository_root)?;
         let client = opencode_client()?;
         let session_id = create_opencode_session(&client, &self.config, &repository_root).await?;
@@ -39,13 +45,14 @@ impl AgentSystemBackend for OpencodeBackend {
             context.prompt,
         )
         .await?;
-        Ok(AgentSessionRun {
-            session_id: session_id.clone(),
-            runner: Runner::Opencode(OpencodeRunner {
+        Ok(AgentSessionRun::new(
+            session_id.clone(),
+            Runner::Opencode(OpencodeRunner {
                 events: Some(events),
                 session_id,
             }),
-        })
+            receiver,
+        ))
     }
     async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
         let root = opencode_repository_root(context.waap_root)?;
@@ -659,12 +666,15 @@ mod tests {
         };
 
         let mut started = backend
-            .start(StartContext {
-                agent_id: "aa-00000001",
-                prompt: "complete the work",
-                repository_root: &repository_root,
-                worktree_dir: root.path(),
-            })
+            .start(
+                StartContext {
+                    agent_id: "aa-00000001",
+                    prompt: "complete the work",
+                    repository_root: &repository_root,
+                    worktree_dir: root.path(),
+                },
+                super::super::commands::CommandDispatcher::channel().1,
+            )
             .await
             .unwrap();
 
@@ -820,12 +830,15 @@ mod tests {
         };
 
         let error = match backend
-            .start(StartContext {
-                agent_id: "aa-00000001",
-                prompt: "complete the work",
-                repository_root: &repository_root,
-                worktree_dir: root.path(),
-            })
+            .start(
+                StartContext {
+                    agent_id: "aa-00000001",
+                    prompt: "complete the work",
+                    repository_root: &repository_root,
+                    worktree_dir: root.path(),
+                },
+                super::super::commands::CommandDispatcher::channel().1,
+            )
             .await
         {
             Ok(_) => panic!("event subscription unexpectedly succeeded"),

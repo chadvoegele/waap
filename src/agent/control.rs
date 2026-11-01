@@ -59,9 +59,10 @@ pub(in crate::agent) mod tests {
                     .map(|_| ())
                     .map_err(io::Error::other)
             });
-            let session = AgentSessionRun {
-                session_id: "test".into(),
-                runner: Runner::Fake(crate::agent::backend::fake::FakeRunner {
+            let (dispatcher, receiver) = CommandDispatcher::channel();
+            let session = AgentSessionRun::new(
+                "test".into(),
+                Runner::Fake(crate::agent::backend::fake::FakeRunner {
                     outcome: Some(RunOutcome::Completed),
                     error: None,
                     action: Some(action),
@@ -69,8 +70,12 @@ pub(in crate::agent) mod tests {
                     steer_calls: steer_calls.clone(),
                     steer_error: None,
                 }),
-            };
-            let mut app = crate::agent::run::AgentApp::new(session, self.listener);
+                receiver,
+            );
+            let mut app = crate::agent::run::AgentApp::new(
+                session,
+                ControlServer::new(self.listener, dispatcher),
+            );
             let result = app.run().await;
             for (message, deadline, owner) in observed.lock().unwrap().iter() {
                 assert_eq!(*owner, thread::current().id());
@@ -199,9 +204,10 @@ pub(in crate::agent) mod tests {
                 .map(|_| ())
                 .map_err(io::Error::other)
         });
-        let session = AgentSessionRun {
-            session_id: "test".into(),
-            runner: Runner::Fake(crate::agent::backend::fake::FakeRunner {
+        let (dispatcher, receiver) = CommandDispatcher::channel();
+        let session = AgentSessionRun::new(
+            "test".into(),
+            Runner::Fake(crate::agent::backend::fake::FakeRunner {
                 outcome: Some(RunOutcome::Completed),
                 error: None,
                 action: Some(wait_action),
@@ -209,8 +215,12 @@ pub(in crate::agent) mod tests {
                 steer_calls: Arc::new(Mutex::new(Vec::new())),
                 steer_error: None,
             }),
-        };
-        let mut app = crate::agent::run::AgentApp::new(session, fixture.listener);
+            receiver,
+        );
+        let mut app = crate::agent::run::AgentApp::new(
+            session,
+            ControlServer::new(fixture.listener, dispatcher),
+        );
         let (outcome, ()) = tokio::join!(app.run(), async {
             tokio::task::yield_now().await;
             complete.send(()).unwrap();

@@ -3,6 +3,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use tokio::process::Command as ProcessCommand;
+use tokio::sync::mpsc::Receiver;
 
 use super::process::AgentProcess;
 use uuid::Uuid;
@@ -10,6 +11,7 @@ use uuid::Uuid;
 use super::backend::{
     AbortContext, AgentSessionRun, AgentSystemBackend, RunOutcome, Runner, StartContext,
 };
+use super::commands::Command;
 
 pub(super) struct ClaudeBackend {
     config: ClaudeRunConfig,
@@ -24,7 +26,11 @@ impl ClaudeBackend {
 }
 
 impl AgentSystemBackend for ClaudeBackend {
-    async fn start(&mut self, context: StartContext<'_>) -> io::Result<AgentSessionRun> {
+    async fn start(
+        &mut self,
+        context: StartContext<'_>,
+        receiver: Receiver<Command>,
+    ) -> io::Result<AgentSessionRun> {
         let session_id = Uuid::new_v4().to_string();
         let command = build_claude_run_command(
             &self.config,
@@ -33,12 +39,13 @@ impl AgentSystemBackend for ClaudeBackend {
             context.worktree_dir,
             context.prompt,
         );
-        Ok(AgentSessionRun {
+        Ok(AgentSessionRun::new(
             session_id,
-            runner: Runner::Claude(ClaudeRunner {
+            Runner::Claude(ClaudeRunner {
                 child: spawn_claude_attached(&command)?,
             }),
-        })
+            receiver,
+        ))
     }
     async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
         kill_claude_session(context.session_id).await

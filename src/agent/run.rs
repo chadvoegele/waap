@@ -3,7 +3,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use super::backend::{AgentSessionRun, AgentSystemBackend, RunOutcome, StartContext};
-use super::commands::{Command, CommandDispatcher};
+use super::commands::CommandDispatcher;
 use super::control::{ControlServer, SocketListener, SocketPath};
 use super::worktree::{collapse_errors, AgentWorktree};
 use crate::agent::{
@@ -134,13 +134,17 @@ fn run_started_agent(
     let mut worktree = AgentWorktree::create(&repository_root, agent_id)?;
     let prompt = build_agent_goal(waap_root, agent_id);
     let run_result = runtime.block_on(async {
+        let (dispatcher, receiver) = CommandDispatcher::channel();
         let mut started = backend
-            .start(StartContext {
-                agent_id,
-                prompt: &prompt,
-                repository_root: &repository_root,
-                worktree_dir: worktree.dir(),
-            })
+            .start(
+                StartContext {
+                    agent_id,
+                    prompt: &prompt,
+                    repository_root: &repository_root,
+                    worktree_dir: worktree.dir(),
+                },
+                receiver,
+            )
             .await?;
         let publication = (|| {
             update_agent_session(
@@ -153,7 +157,11 @@ fn run_started_agent(
             SocketListener::bind(socket_path)
         })();
         match publication {
-            Ok(listener) => AgentApp::new(started, listener).run().await,
+            Ok(listener) => {
+                AgentApp::new(started, ControlServer::new(listener, dispatcher))
+                    .run()
+                    .await
+            }
             Err(error) => collapse_errors(Err(error), started.runner.cleanup().await),
         }
     });
@@ -164,24 +172,17 @@ fn run_started_agent(
 pub(super) struct AgentApp {
     run: AgentSessionRun,
     control: ControlServer,
-    receiver: Option<tokio::sync::mpsc::Receiver<Command>>,
 }
 
 impl AgentApp {
-    pub(super) fn new(run: AgentSessionRun, listener: SocketListener) -> Self {
-        let (dispatcher, receiver) = CommandDispatcher::channel();
-        Self {
-            run,
-            control: ControlServer::new(listener, dispatcher),
-            receiver: Some(receiver),
-        }
+    pub(super) fn new(run: AgentSessionRun, control: ControlServer) -> Self {
+        Self { run, control }
     }
 
     pub(super) async fn run(&mut self) -> io::Result<RunOutcome> {
         use futures_util::FutureExt;
         let outcome = {
-            let receiver = self.receiver.take().expect("agent app can only run once");
-            let wait = std::panic::AssertUnwindSafe(self.run.runner.run(receiver)).catch_unwind();
+            let wait = std::panic::AssertUnwindSafe(self.run.run()).catch_unwind();
             tokio::pin!(wait);
             let result = tokio::select! {
                 result = &mut wait => result,
