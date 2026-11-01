@@ -83,7 +83,7 @@ fn run_agent_with_backend(
             };
         }
     }
-    let result = run_started_agent(
+    let result = run_agent_app(
         repository_root,
         waap_root,
         control_root,
@@ -118,7 +118,7 @@ fn run_agent_with_backend(
     }
 }
 
-fn run_started_agent(
+fn run_agent_app(
     repository_root: &Path,
     waap_root: &Path,
     control_root: io::Result<ControlRoot>,
@@ -135,7 +135,7 @@ fn run_started_agent(
     let prompt = build_agent_goal(waap_root, agent_id);
     let run_result = runtime.block_on(async {
         let (dispatcher, receiver) = CommandDispatcher::channel();
-        let mut started = backend
+        let mut session_run = backend
             .start(
                 StartContext {
                     agent_id,
@@ -146,23 +146,23 @@ fn run_started_agent(
                 receiver,
             )
             .await?;
-        let publication = (|| {
+        let listener_result = (|| {
             update_agent_session(
                 waap_root,
                 output_format,
                 agent_id,
-                &started.session_id,
+                &session_run.session_id,
                 system.clone(),
             )?;
             SocketListener::bind(socket_path)
         })();
-        match publication {
+        match listener_result {
             Ok(listener) => {
-                AgentApp::new(started, ControlServer::new(listener, dispatcher))
+                AgentApp::new(session_run, ControlServer::new(listener, dispatcher))
                     .run()
                     .await
             }
-            Err(error) => collapse_errors(Err(error), started.runner.cleanup().await),
+            Err(error) => collapse_errors(Err(error), session_run.runner.cleanup().await),
         }
     });
     let cleanup_result = worktree.cleanup();
