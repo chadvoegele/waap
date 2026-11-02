@@ -20,16 +20,18 @@ use crate::toml::{datetime_string, toml_string};
 mod backend;
 mod claude;
 mod codex;
+mod commands;
 mod control;
 mod get;
 mod list;
 mod new;
 mod opencode;
 mod process;
-mod request_reply;
 mod run;
+mod runtime;
 mod steer;
 mod stop;
+mod unsupported_commands;
 mod update;
 mod worktree;
 
@@ -313,10 +315,7 @@ pub(crate) struct AgentRunOptions {
 }
 
 impl AgentSystem {
-    fn backend(
-        &self,
-        options: Option<&AgentRunOptions>,
-    ) -> io::Result<Box<dyn backend::AgentSystemBackend>> {
+    fn backend(&self, options: Option<&AgentRunOptions>) -> io::Result<backend::Backend> {
         if let Some(options) = options {
             if options
                 .model
@@ -346,11 +345,15 @@ impl AgentSystem {
         }
 
         match self {
-            AgentSystem::Opencode => Ok(Box::new(opencode::OpencodeBackend::from_env()?)),
-            AgentSystem::Claude => Ok(Box::new(claude::ClaudeBackend::from_env())),
+            AgentSystem::Opencode => Ok(backend::Backend::Opencode(
+                opencode::OpencodeBackend::from_env()?,
+            )),
+            AgentSystem::Claude => Ok(backend::Backend::Claude(claude::ClaudeBackend::from_env())),
             AgentSystem::Codex => match options {
-                Some(options) => Ok(Box::new(codex::CodexBackend::from_env(options)?)),
-                None => Ok(Box::new(codex::CodexBackend::default())),
+                Some(options) => Ok(backend::Backend::Codex(codex::CodexBackend::from_env(
+                    options,
+                )?)),
+                None => Ok(backend::Backend::Codex(codex::CodexBackend::default())),
             },
         }
     }

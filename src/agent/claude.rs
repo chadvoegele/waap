@@ -1,17 +1,15 @@
 use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, ExitStatus, Stdio};
-use std::sync::Mutex;
-use std::time::Instant;
+use std::process::{ExitStatus, Stdio};
+use tokio::process::Command as ProcessCommand;
+use tokio::sync::mpsc::Receiver;
 
 use super::process::AgentProcess;
 use uuid::Uuid;
 
-use super::backend::{
-    AbortContext, AgentSystemBackend, RunHandle, RunOutcome, StartContext, StartedRun,
-    SteeringError,
-};
+use super::backend::{AbortContext, AgentSessionRun, RunOutcome, Runner, StartContext};
+use super::commands::Command;
 
 pub(super) struct ClaudeBackend {
     config: ClaudeRunConfig,
@@ -23,10 +21,12 @@ impl ClaudeBackend {
             config: claude_run_config_from_env(),
         }
     }
-}
 
-impl AgentSystemBackend for ClaudeBackend {
-    fn start(&mut self, context: StartContext<'_>) -> io::Result<StartedRun> {
+    pub(super) async fn start(
+        &mut self,
+        context: StartContext<'_>,
+        receiver: Receiver<Command>,
+    ) -> io::Result<AgentSessionRun> {
         let session_id = Uuid::new_v4().to_string();
         let command = build_claude_run_command(
             &self.config,
@@ -35,34 +35,33 @@ impl AgentSystemBackend for ClaudeBackend {
             context.worktree_dir,
             context.prompt,
         );
-        Ok(StartedRun {
+        Ok(AgentSessionRun::new(
             session_id,
-            handle: Box::new(ClaudeRun {
-                child: Mutex::new(spawn_claude_attached(&command)?),
+            Runner::Claude(ClaudeRunner {
+                child: spawn_claude_attached(&command)?,
             }),
-        })
+            receiver,
+        ))
     }
-
-    fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
-        kill_claude_session(context.session_id)
+    pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
+        kill_claude_session(context.session_id).await
     }
 }
 
-struct ClaudeRun {
-    child: Mutex<AgentProcess>,
+pub(super) struct ClaudeRunner {
+    child: AgentProcess,
 }
-
-impl RunHandle for ClaudeRun {
-    fn wait(&self) -> io::Result<RunOutcome> {
-        let mut child = self
-            .child
-            .lock()
-            .map_err(|_| io::Error::other("Claude process lock poisoned"))?;
-        Ok(RunOutcome::from_exit_status(child.wait()?))
+impl ClaudeRunner {
+    pub(super) async fn run(&mut self, receiver: Receiver<Command>) -> io::Result<RunOutcome> {
+        super::unsupported_commands::await_with_unsupported_commands(
+            async { Ok(RunOutcome::from_exit_status(self.child.wait().await?)) },
+            receiver,
+            "claude",
+        )
+        .await
     }
-
-    fn steer(&self, _prompt: &str, _deadline: Instant) -> Result<(), SteeringError> {
-        Err(SteeringError::not_implemented("claude"))
+    pub(super) async fn cleanup(&mut self) -> io::Result<()> {
+        self.child.terminate().await
     }
 }
 
@@ -86,12 +85,13 @@ fn claude_run_config_from_env() -> ClaudeRunConfig {
     }
 }
 
-fn kill_claude_session(session_id: &str) -> io::Result<()> {
+async fn kill_claude_session(session_id: &str) -> io::Result<()> {
     let status = ProcessCommand::new("pkill")
         .arg("-TERM")
         .arg("-f")
         .arg(session_id)
-        .status()?;
+        .status()
+        .await?;
     map_pkill_status(status)
 }
 
@@ -159,37 +159,131 @@ mod tests {
         ClaudeRunConfig,
     };
 
-    #[test]
-    fn steering_rejection_does_not_acquire_the_process_wait_lock() {
-        use super::{ClaudeRun, RunHandle, SteeringError};
-        use std::sync::Mutex;
-        use std::time::Instant;
+    use crate::agent::backend::{RunOutcome, SteeringError};
+    use crate::agent::commands::CommandDispatcher;
+    use futures_util::FutureExt;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    use tokio::io::AsyncWriteExt;
 
-        let command = ClaudeRunCommand {
-            program: "sh".to_string(),
-            args: vec!["-c".to_string(), "exit 0".to_string()],
-            working_dir: std::env::temp_dir(),
-        };
-        let run = ClaudeRun {
-            child: Mutex::new(spawn_claude_attached(&command).unwrap()),
-        };
-        let wait_lock = run.child.lock().unwrap();
-        crate::agent::control::tests::assert_backend_socket_rejection(
-            |prompt, deadline| run.steer(prompt, deadline),
-            "claude",
-        );
-        let error = run.steer("steer", Instant::now()).unwrap_err();
-        assert_eq!(error, SteeringError::not_implemented("claude"));
-        assert_eq!(
-            error.to_string(),
-            "steering not implemented for backend claude"
-        );
-        drop(wait_lock);
-        assert_eq!(run.wait().unwrap(), super::RunOutcome::Completed);
+    fn pending_runner() -> (super::ClaudeRunner, tokio::process::ChildStdin) {
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .args(["-c", "read release; exit 7"])
+            .stdin(Stdio::piped());
+        let mut child = super::AgentProcess::spawn(&mut command).unwrap();
+        let release = child.take_stdin().unwrap();
+        (super::ClaudeRunner { child }, release)
     }
 
-    #[test]
-    fn spawn_claude_attached_returns_child_with_exit_code() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn concrete_runner_rejects_steering_then_finishes_the_same_process_wait() {
+        let (mut runner, mut release) = pending_runner();
+        let (dispatcher, receiver) = CommandDispatcher::channel();
+        let mut execution = Box::pin(runner.run(receiver));
+        assert!(execution.as_mut().now_or_never().is_none());
+        let ((), result) = tokio::join!(
+            async {
+                assert_eq!(
+                    dispatcher
+                        .steer("pending", Instant::now() + Duration::from_secs(2))
+                        .await,
+                    Err(SteeringError::not_implemented("claude"))
+                );
+                release.write_all(b"finish\n").await.unwrap();
+            },
+            tokio::time::timeout(Duration::from_secs(2), &mut execution)
+        );
+        assert_eq!(
+            result.unwrap().unwrap(),
+            RunOutcome::Failed(std::process::ExitCode::from(7))
+        );
+        drop(execution);
+        assert_eq!(runner.child.wait().await.unwrap().code(), Some(7));
+        runner.cleanup().await.unwrap();
+        assert!(matches!(
+            dispatcher
+                .steer("completed", Instant::now() + Duration::from_secs(2))
+                .await,
+            Err(SteeringError::Rejected {
+                code: "agent_exited",
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn concrete_runner_completion_releases_queued_replies() {
+        let (mut runner, mut release) = pending_runner();
+        release.write_all(b"finish\n").await.unwrap();
+        assert_eq!(runner.child.wait().await.unwrap().code(), Some(7));
+        let (dispatcher, receiver) = CommandDispatcher::channel();
+        let steering = dispatcher.steer("queued", Instant::now() + Duration::from_secs(30));
+        tokio::pin!(steering);
+        assert!(steering.as_mut().now_or_never().is_none());
+        assert_eq!(
+            runner.run(receiver).await.unwrap(),
+            RunOutcome::Failed(std::process::ExitCode::from(7))
+        );
+        let result = tokio::time::timeout(Duration::from_millis(100), steering)
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, Err(SteeringError::AcceptanceUnknown { .. }))
+                || result == Err(SteeringError::not_implemented("claude"))
+        );
+        runner.cleanup().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn concrete_runner_cancellation_releases_queued_replies_before_or_after_polling() {
+        for polled in [false, true] {
+            let (mut runner, _release) = pending_runner();
+            let (dispatcher, receiver) = CommandDispatcher::channel();
+            let mut execution = Box::pin(runner.run(receiver));
+            if polled {
+                assert!(execution.as_mut().now_or_never().is_none());
+            }
+            let steering = dispatcher.steer("queued", Instant::now() + Duration::from_secs(30));
+            tokio::pin!(steering);
+            assert!(steering.as_mut().now_or_never().is_none());
+            drop(execution);
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_millis(100), steering)
+                    .await
+                    .unwrap(),
+                Err(SteeringError::AcceptanceUnknown { .. })
+            ));
+            assert!(matches!(
+                dispatcher
+                    .steer("cancelled", Instant::now() + Duration::from_secs(2))
+                    .await,
+                Err(SteeringError::Rejected {
+                    code: "agent_exited",
+                    ..
+                })
+            ));
+            runner.cleanup().await.unwrap();
+            assert!(!runner.child.wait().await.unwrap().success());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unsupported_steering_does_not_need_to_wait_for_the_process() {
+        let command = ClaudeRunCommand {
+            program: "sh".into(),
+            args: vec!["-c".into(), "while :; do :; done".into()],
+            working_dir: std::env::temp_dir(),
+        };
+        let mut runner = super::super::backend::Runner::Claude(super::ClaudeRunner {
+            child: spawn_claude_attached(&command).unwrap(),
+        });
+        crate::agent::control::tests::assert_backend_socket_rejection(&mut runner, "claude").await;
+        runner.cleanup().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn spawn_claude_attached_returns_child_with_exit_code() {
         let command = ClaudeRunCommand {
             program: "sh".to_string(),
             args: vec!["-c".to_string(), "exit 5".to_string()],
@@ -197,20 +291,24 @@ mod tests {
         };
 
         let mut child = spawn_claude_attached(&command).unwrap();
-        let status = child.wait().unwrap();
+        let status = child.wait().await.unwrap();
 
         assert_eq!(status.code(), Some(5));
     }
 
-    #[test]
-    fn spawn_claude_attached_connects_stdin_to_null() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn spawn_claude_attached_connects_stdin_to_null() {
         let command = ClaudeRunCommand {
             program: "sh".to_string(),
             args: vec!["-c".to_string(), "read value; test $? -ne 0".to_string()],
             working_dir: std::env::temp_dir(),
         };
 
-        let status = spawn_claude_attached(&command).unwrap().wait().unwrap();
+        let status = spawn_claude_attached(&command)
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
 
         assert!(status.success());
     }

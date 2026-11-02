@@ -1,16 +1,16 @@
+use futures_util::TryStreamExt;
 use std::env;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::mpsc::Receiver;
 
-use reqwest::blocking::{Client, Response};
+use reqwest::{Client, Response};
 use serde_json::{json, Value as JsonValue};
 
-use super::backend::{
-    AbortContext, AgentSystemBackend, RunHandle, RunOutcome, StartContext, StartedRun,
-    SteeringError,
-};
+use super::backend::{AbortContext, AgentSessionRun, RunOutcome, Runner, StartContext};
+use super::commands::Command;
 
 pub(super) struct OpencodeBackend {
     config: OpencodeRunConfig,
@@ -22,59 +22,58 @@ impl OpencodeBackend {
             config: opencode_run_config_from_env()?,
         })
     }
-}
 
-impl AgentSystemBackend for OpencodeBackend {
-    fn start(&mut self, context: StartContext<'_>) -> io::Result<StartedRun> {
+    pub(super) async fn start(
+        &mut self,
+        context: StartContext<'_>,
+        receiver: Receiver<Command>,
+    ) -> io::Result<AgentSessionRun> {
         let repository_root = opencode_repository_root(context.repository_root)?;
         let client = opencode_client()?;
-        let session_id = create_opencode_session(&client, &self.config, &repository_root)?;
-
-        // Open the repository-wide stream before submitting work so a fast agent cannot finish
-        // before the monitor is listening for its session events.
-        let events = subscribe_opencode_events(&client, &self.config, &repository_root)?;
+        let session_id = create_opencode_session(&client, &self.config, &repository_root).await?;
+        // Subscribe first so a fast agent cannot finish before monitoring begins.
+        let events = subscribe_opencode_events(&client, &self.config, &repository_root).await?;
         submit_opencode_prompt(
             &client,
             &self.config,
             &session_id,
             &repository_root,
             context.prompt,
-        )?;
-
-        Ok(StartedRun {
-            session_id: session_id.clone(),
-            handle: Box::new(OpencodeRun {
-                events: Mutex::new(Some(events)),
+        )
+        .await?;
+        Ok(AgentSessionRun::new(
+            session_id.clone(),
+            Runner::Opencode(OpencodeRunner {
+                events: Some(events),
                 session_id,
             }),
-        })
+            receiver,
+        ))
     }
-
-    fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
-        let repository_root = opencode_repository_root(context.waap_root)?;
-        abort_opencode_session(&self.config, context.session_id, &repository_root)
+    pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
+        let root = opencode_repository_root(context.waap_root)?;
+        abort_opencode_session(&self.config, context.session_id, &root).await
     }
 }
 
-struct OpencodeRun {
-    events: Mutex<Option<Response>>,
+pub(super) struct OpencodeRunner {
+    events: Option<Response>,
     session_id: String,
 }
-
-impl RunHandle for OpencodeRun {
-    fn wait(&self) -> io::Result<RunOutcome> {
+impl OpencodeRunner {
+    pub(super) async fn run(&mut self, receiver: Receiver<Command>) -> io::Result<RunOutcome> {
         let events = self
             .events
-            .lock()
-            .map_err(|_| io::Error::other("OpenCode event stream lock poisoned"))?
             .take()
             .ok_or_else(|| io::Error::other("OpenCode run already waited"))?;
-        let stdout = io::stdout();
-        monitor_opencode_events(BufReader::new(events), &self.session_id, &mut stdout.lock())
-    }
-
-    fn steer(&self, _prompt: &str, _deadline: Instant) -> Result<(), SteeringError> {
-        Err(SteeringError::not_implemented("opencode"))
+        let stream = events.bytes_stream().map_err(io::Error::other);
+        let reader = tokio::io::BufReader::new(tokio_util::io::StreamReader::new(stream));
+        super::unsupported_commands::await_with_unsupported_commands(
+            monitor_opencode_events(reader, &self.session_id, &mut tokio::io::stdout()),
+            receiver,
+            "opencode",
+        )
+        .await
     }
 }
 
@@ -164,13 +163,10 @@ fn parse_opencode_model(model: &str) -> io::Result<OpencodeModel> {
 }
 
 fn opencode_client() -> io::Result<Client> {
-    Client::builder()
-        .timeout(None)
-        .build()
-        .map_err(opencode_http_error)
+    Client::builder().build().map_err(opencode_http_error)
 }
 
-fn create_opencode_session(
+async fn create_opencode_session(
     client: &Client,
     config: &OpencodeRunConfig,
     repository_root: &Path,
@@ -181,9 +177,11 @@ fn create_opencode_session(
         .query(&opencode_directory_query(repository_root))
         .json(&create_session_payload())
         .send()
+        .await
         .and_then(Response::error_for_status)
         .map_err(opencode_http_error)?
         .json()
+        .await
         .map_err(opencode_http_error)?;
 
     response
@@ -198,7 +196,7 @@ fn create_opencode_session(
         })
 }
 
-fn subscribe_opencode_events(
+async fn subscribe_opencode_events(
     client: &Client,
     config: &OpencodeRunConfig,
     repository_root: &Path,
@@ -209,11 +207,12 @@ fn subscribe_opencode_events(
         .query(&opencode_directory_query(repository_root))
         .header(reqwest::header::ACCEPT, "text/event-stream")
         .send()
+        .await
         .and_then(Response::error_for_status)
         .map_err(opencode_http_error)
 }
 
-fn submit_opencode_prompt(
+async fn submit_opencode_prompt(
     client: &Client,
     config: &OpencodeRunConfig,
     session_id: &str,
@@ -229,12 +228,13 @@ fn submit_opencode_prompt(
         .query(&opencode_directory_query(repository_root))
         .json(&prompt_payload(config, prompt))
         .send()
+        .await
         .and_then(Response::error_for_status)
         .map_err(opencode_http_error)?;
     Ok(())
 }
 
-fn abort_opencode_session(
+async fn abort_opencode_session(
     config: &OpencodeRunConfig,
     session_id: &str,
     repository_root: &Path,
@@ -247,6 +247,7 @@ fn abort_opencode_session(
         .basic_auth(&config.username, Some(&config.password))
         .query(&opencode_directory_query(repository_root))
         .send()
+        .await
         .and_then(Response::error_for_status)
         .map_err(opencode_http_error)?;
     Ok(())
@@ -289,7 +290,7 @@ fn opencode_url(config: &OpencodeRunConfig, path: &str) -> String {
     format!("{}{}", config.server_url.trim_end_matches('/'), path)
 }
 
-fn monitor_opencode_events<R: BufRead, W: Write>(
+async fn monitor_opencode_events<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
     mut reader: R,
     session_id: &str,
     output: &mut W,
@@ -297,7 +298,7 @@ fn monitor_opencode_events<R: BufRead, W: Write>(
     let mut data_lines = Vec::new();
     loop {
         let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
+        if reader.read_line(&mut line).await? == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "opencode event stream ended before the session became idle",
@@ -307,7 +308,11 @@ fn monitor_opencode_events<R: BufRead, W: Write>(
         let line = line.strip_suffix('\n').unwrap_or(&line);
         let line = line.strip_suffix('\r').unwrap_or(line);
         if line.is_empty() {
-            if let Some(outcome) = handle_sse_event(&data_lines.join("\n"), session_id, output)? {
+            let mut rendered = Vec::new();
+            let outcome = handle_sse_event(&data_lines.join("\n"), session_id, &mut rendered)?;
+            output.write_all(&rendered).await?;
+            output.flush().await?;
+            if let Some(outcome) = outcome {
                 return Ok(outcome);
             }
             data_lines.clear();
@@ -490,9 +495,162 @@ mod tests {
     use super::{
         abort_opencode_session, create_session_payload, monitor_opencode_events,
         opencode_directory_query, opencode_repository_root, opencode_url, parse_opencode_model,
-        prompt_payload, AgentSystemBackend, OpencodeBackend, OpencodeRunConfig, RunOutcome,
-        StartContext,
+        prompt_payload, OpencodeBackend, OpencodeRunConfig, RunOutcome, StartContext,
     };
+
+    use crate::agent::backend::SteeringError;
+    use crate::agent::commands::CommandDispatcher;
+    use futures_util::FutureExt;
+    use std::time::{Duration, Instant};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn pending_runner() -> (super::OpencodeRunner, tokio::net::TcpStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (response, socket) = tokio::join!(
+            super::opencode_client()
+                .unwrap()
+                .get(format!("http://{address}/event"))
+                .send(),
+            async {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(socket.read_u8().await.unwrap());
+                }
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n: connected\n\n").await.unwrap();
+                socket
+            }
+        );
+        (
+            super::OpencodeRunner {
+                events: Some(response.unwrap()),
+                session_id: "ses_test".into(),
+            },
+            socket,
+        )
+    }
+
+    async fn finish_events(socket: &mut tokio::net::TcpStream) {
+        socket.write_all(b"data: {\"type\":\"session.status\",\"properties\":{\"sessionID\":\"ses_test\",\"status\":{\"type\":\"idle\"}}}\n\n").await.unwrap();
+        socket.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn concrete_runner_rejects_steering_then_finishes_the_same_event_wait() {
+        let (mut runner, mut socket) = pending_runner().await;
+        let (dispatcher, receiver) = CommandDispatcher::channel();
+        let mut execution = Box::pin(runner.run(receiver));
+        assert!(execution.as_mut().now_or_never().is_none());
+        let ((), result) = tokio::join!(
+            async {
+                assert_eq!(
+                    dispatcher
+                        .steer("pending", Instant::now() + Duration::from_secs(2))
+                        .await,
+                    Err(SteeringError::not_implemented("opencode"))
+                );
+                finish_events(&mut socket).await;
+            },
+            tokio::time::timeout(Duration::from_secs(2), &mut execution)
+        );
+        assert_eq!(result.unwrap().unwrap(), RunOutcome::Completed);
+        drop(execution);
+        assert!(runner.events.is_none());
+        assert!(matches!(
+            dispatcher
+                .steer("completed", Instant::now() + Duration::from_secs(2))
+                .await,
+            Err(SteeringError::Rejected {
+                code: "agent_exited",
+                ..
+            })
+        ));
+        let mut byte = [0];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), socket.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn concrete_runner_completion_releases_queued_replies() {
+        let (mut runner, mut socket) = pending_runner().await;
+        finish_events(&mut socket).await;
+        let (dispatcher, receiver) = CommandDispatcher::channel();
+        let steering = dispatcher.steer("queued", Instant::now() + Duration::from_secs(30));
+        tokio::pin!(steering);
+        assert!(steering.as_mut().now_or_never().is_none());
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), runner.run(receiver))
+                .await
+                .unwrap()
+                .unwrap(),
+            RunOutcome::Completed
+        );
+        let result = tokio::time::timeout(Duration::from_millis(100), steering)
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, Err(SteeringError::AcceptanceUnknown { .. }))
+                || result == Err(SteeringError::not_implemented("opencode"))
+        );
+        assert!(runner.events.is_none());
+        let mut byte = [0];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), socket.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn concrete_runner_cancellation_releases_queued_replies_before_or_after_polling() {
+        for polled in [false, true] {
+            let (mut runner, mut socket) = pending_runner().await;
+            let (dispatcher, receiver) = CommandDispatcher::channel();
+            let mut execution = Box::pin(runner.run(receiver));
+            if polled {
+                assert!(execution.as_mut().now_or_never().is_none());
+            }
+            let steering = dispatcher.steer("queued", Instant::now() + Duration::from_secs(30));
+            tokio::pin!(steering);
+            assert!(steering.as_mut().now_or_never().is_none());
+            drop(execution);
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_millis(100), steering)
+                    .await
+                    .unwrap(),
+                Err(SteeringError::AcceptanceUnknown { .. })
+            ));
+            assert!(matches!(
+                dispatcher
+                    .steer("cancelled", Instant::now() + Duration::from_secs(2))
+                    .await,
+                Err(SteeringError::Rejected {
+                    code: "agent_exited",
+                    ..
+                })
+            ));
+            if polled {
+                assert!(runner.events.is_none());
+            }
+            drop(runner);
+            let mut byte = [0];
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), socket.read(&mut byte))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                0
+            );
+        }
+    }
 
     #[test]
     fn opencode_create_session_payload_matches_api() {
@@ -600,13 +758,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn async_runner_subscribes_before_prompt_and_scopes_every_request() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runner_subscribes_before_prompt_and_scopes_every_request() {
         let root = tempdir().unwrap();
         let repository_root = root.path().canonicalize().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let expected_root = repository_root.clone();
+        let (release, completion) = std::sync::mpsc::channel();
         let server = thread::spawn(move || {
             let mut create = listener.accept().unwrap().0;
             let request = read_request(&mut create);
@@ -644,6 +803,9 @@ mod tests {
             write_response(&mut prompt, "HTTP/1.1 204 No Content", None);
             drop(prompt);
 
+            completion
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
             events
                 .write_all(
                     b"data: {\"type\":\"session.status\",\"properties\":{\"sessionID\":\"ses_123\",\"status\":{\"type\":\"idle\"}}}\n\n",
@@ -657,35 +819,32 @@ mod tests {
             },
         };
 
-        let started = backend
-            .start(StartContext {
-                agent_id: "aa-00000001",
-                prompt: "complete the work",
-                repository_root: &repository_root,
-                worktree_dir: root.path(),
-            })
+        let mut started = backend
+            .start(
+                StartContext {
+                    agent_id: "aa-00000001",
+                    prompt: "complete the work",
+                    repository_root: &repository_root,
+                    worktree_dir: root.path(),
+                },
+                super::super::commands::CommandDispatcher::channel().1,
+            )
+            .await
             .unwrap();
 
         assert_eq!(started.session_id, "ses_123");
         crate::agent::control::tests::assert_backend_socket_rejection(
-            |prompt, deadline| started.handle.steer(prompt, deadline),
+            &mut started.runner,
             "opencode",
-        );
-        let error = started
-            .handle
-            .steer("steer", std::time::Instant::now())
-            .unwrap_err();
-        assert_eq!(error, super::SteeringError::not_implemented("opencode"));
-        assert_eq!(
-            error.to_string(),
-            "steering not implemented for backend opencode"
-        );
-        assert_eq!(started.handle.wait().unwrap(), RunOutcome::Completed);
+        )
+        .await;
+        release.send(()).unwrap();
+        started.runner.cleanup().await.unwrap();
         server.join().unwrap();
     }
 
-    #[test]
-    fn abort_request_is_authenticated_and_scoped_to_repository_root() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn abort_request_is_authenticated_and_scoped_to_repository_root() {
         let root = tempdir().unwrap();
         let repository_root = root.path().canonicalize().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -702,12 +861,14 @@ mod tests {
             ..OpencodeRunConfig::for_test()
         };
 
-        abort_opencode_session(&config, "ses_123", &repository_root).unwrap();
+        abort_opencode_session(&config, "ses_123", &repository_root)
+            .await
+            .unwrap();
         server.join().unwrap();
     }
 
-    #[test]
-    fn monitor_parses_sse_framing_and_emits_cli_compatible_json_lines() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn monitor_parses_sse_framing_and_emits_cli_compatible_json_lines() {
         let input = concat!(
             ": connected\n\n",
             "event: message.part.updated\n",
@@ -723,8 +884,13 @@ mod tests {
         let mut output = Vec::new();
 
         assert_eq!(
-            monitor_opencode_events(BufReader::new(input.as_bytes()), "ses_123", &mut output)
-                .unwrap(),
+            monitor_opencode_events(
+                tokio::io::BufReader::new(input.as_bytes()),
+                "ses_123",
+                &mut output
+            )
+            .await
+            .unwrap(),
             RunOutcome::Completed
         );
         let lines = String::from_utf8(output)
@@ -744,14 +910,19 @@ mod tests {
         assert!(lines.iter().all(|line| line["timestamp"].is_u64()));
     }
 
-    #[test]
-    fn monitor_reports_matching_session_errors_as_failed_output() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn monitor_reports_matching_session_errors_as_failed_output() {
         let input = "data: {\"type\":\"session.error\",\"properties\":{\"sessionID\":\"ses_123\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"failed\"}}}}\n\n";
         let mut output = Vec::new();
 
         assert_eq!(
-            monitor_opencode_events(BufReader::new(input.as_bytes()), "ses_123", &mut output)
-                .unwrap(),
+            monitor_opencode_events(
+                tokio::io::BufReader::new(input.as_bytes()),
+                "ses_123",
+                &mut output
+            )
+            .await
+            .unwrap(),
             RunOutcome::Failed(std::process::ExitCode::from(1))
         );
         let event = serde_json::from_slice::<serde_json::Value>(&output).unwrap();
@@ -764,15 +935,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn monitor_rejects_malformed_events_and_premature_disconnects() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn monitor_rejects_malformed_events_and_premature_disconnects() {
         for input in [
             "data: not json\n\n",
             "data: {\"type\":\"session.status\",\"properties\":{\"sessionID\":\"ses_123\"}}\n\n",
             "data: {\"type\":\"session.status\",\"properties\":{\"sessionID\":\"ses_other\",\"status\":{\"type\":\"idle\"}}}\n\n",
             "bad field\n",
         ] {
-            let error = monitor_opencode_events(BufReader::new(input.as_bytes()), "ses_123", &mut Vec::new())
+            let error = monitor_opencode_events(tokio::io::BufReader::new(input.as_bytes()), "ses_123", &mut Vec::new()).await
                 .unwrap_err();
             assert!(
                 matches!(error.kind(), std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof),
@@ -782,8 +953,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn rejected_event_subscription_fails_before_prompt_submission() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejected_event_subscription_fails_before_prompt_submission() {
         let root = tempdir().unwrap();
         let repository_root = root.path().canonicalize().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -812,12 +983,18 @@ mod tests {
             },
         };
 
-        let error = match backend.start(StartContext {
-            agent_id: "aa-00000001",
-            prompt: "complete the work",
-            repository_root: &repository_root,
-            worktree_dir: root.path(),
-        }) {
+        let error = match backend
+            .start(
+                StartContext {
+                    agent_id: "aa-00000001",
+                    prompt: "complete the work",
+                    repository_root: &repository_root,
+                    worktree_dir: root.path(),
+                },
+                super::super::commands::CommandDispatcher::channel().1,
+            )
+            .await
+        {
             Ok(_) => panic!("event subscription unexpectedly succeeded"),
             Err(error) => error,
         };

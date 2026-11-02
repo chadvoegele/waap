@@ -2,7 +2,7 @@ mod connection;
 mod listener;
 mod path;
 
-pub(in crate::agent) use connection::SocketConnection;
+pub(super) use connection::SocketConnection;
 pub(in crate::agent) use listener::SocketListener;
 pub(in crate::agent) use path::SocketPath;
 
