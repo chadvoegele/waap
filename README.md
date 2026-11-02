@@ -124,3 +124,43 @@ cargo test
 To run the end-to-end test:
 
 Ask an agent to run `.agents/skills/waap-heat-equation-e2e-test/SKILL.md`.
+
+## Stopping agents
+
+Use `waap agent stop --agent-id <id>` to stop one agent, or `waap agent stop`
+to select all running agents. An explicitly selected ready agent is cancelled
+locally; stop-all leaves ready agents alone.
+
+Running Codex agents receive stop through their existing control socket under
+`XDG_RUNTIME_DIR`, using native `turn/interrupt` on the current turn. SIGINT and
+SIGTERM use the same interruption mechanism. The run owner cleans up its socket,
+owned app-server child and worktree, then records `aborted` after successful
+interruption. Rejected or failed interruption remains a failure. Claude and
+OpenCode keep their existing backend stop behavior.
+
+For Codex, successful CLI output confirms native acceptance; cleanup and terminal
+persistence may still be in progress. The JSON shape remains `stopped_agents`
+and `commit`: a reported agent may still be `running`, and a Codex-only stop has
+`commit: null` because the owner commits its final status. Human output says
+`Stop accepted for agent` while that agent remains running. Inspect `waap agent get`
+for its final state.
+
+Connect and frame I/O each allow five seconds; native acknowledgement allows
+30 seconds, plus five seconds for response delivery. The owner also bounds
+interrupted completion to 30 seconds after acknowledgement. Shutdown drains
+bounded in-flight handlers before removing the socket. Missing/stale sockets,
+startup before socket publication, or older runners lacking stop support return
+errors without changing state. Lost delivery or acknowledgement reports unknown
+acceptance; waap does not retry, discover processes, repair state, or fall back to
+signals for Codex.
+
+```mermaid
+flowchart LR
+    CLI[Stop CLI] --> Selection[Locked selection]
+    Selection --> Client[Unlocked control client]
+    Client --> Server[Control server]
+    Server --> Driver[Codex driver]
+    Signals[SIGINT / SIGTERM] --> Driver
+    Driver --> Native[Native interrupt acknowledgement]
+    Native --> Owner[Owner cleanup and aborted commit]
+```

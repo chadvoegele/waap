@@ -21,7 +21,16 @@ impl ControlServer {
         }
     }
 
+    #[cfg(test)]
     pub(in crate::agent) async fn run(&self) -> io::Result<()> {
+        self.run_until(std::future::pending()).await
+    }
+
+    pub(in crate::agent) async fn run_until(
+        &self,
+        shutdown: impl std::future::Future<Output = ()>,
+    ) -> io::Result<()> {
+        tokio::pin!(shutdown);
         let mut handlers = FuturesUnordered::new();
         loop {
             tokio::select! {
@@ -29,6 +38,7 @@ impl ControlServer {
                 result = handlers.next(), if !handlers.is_empty() => {
                     if matches!(result, Some(Err(_))) { log::error!("control handler panicked"); }
                 },
+                _ = &mut shutdown => break,
                 connection = self.listener.accept() => {
                     match connection {
                         Ok(stream) if handlers.len() < MAX_HANDLERS => {
@@ -43,16 +53,23 @@ impl ControlServer {
                 }
             }
         }
+        // Each handler already has bounded read, dispatch, and write deadlines.
+        while handlers.next().await.is_some() {}
+        Ok(())
     }
 
     async fn handle(&self, mut connection: SocketConnection) -> io::Result<()> {
         let response = match connection.read_frame(IO_TIMEOUT).await {
             Ok(frame) => match parse_request(&frame) {
                 Ok(request) => {
-                    let steering_result = self
-                        .dispatcher
-                        .steer(&request.prompt, Instant::now() + ACK_TIMEOUT)
-                        .await;
+                    let deadline = Instant::now() + ACK_TIMEOUT;
+                    let steering_result = if request.method == "stop" {
+                        self.dispatcher.stop(deadline).await
+                    } else {
+                        self.dispatcher
+                            .steer(request.prompt.as_deref().unwrap(), deadline)
+                            .await
+                    };
                     build_response(&request.request_id, steering_result)
                 }
                 Err(response) => response,
@@ -91,6 +108,32 @@ mod tests {
     use tokio::net::UnixStream;
 
     #[tokio::test(flavor = "current_thread")]
+    async fn completion_drains_correlated_stop_response_before_closing_connection() {
+        let (_repo, _runtime, control, path, mut commands) = fixture().await;
+        let (shutdown, stopped) = tokio::sync::oneshot::channel();
+        let (server, client, ()) = tokio::join!(
+            control.run_until(async {
+                let _ = stopped.await;
+            }),
+            async {
+                let mut client = crate::agent::control::client::ControlClient::connect(&path)
+                    .await
+                    .unwrap();
+                client.stop().await
+            },
+            async {
+                let Command::Stop(mut request) = commands.recv().await.unwrap() else {
+                    panic!("expected stop")
+                };
+                request.respond(Ok(()));
+                shutdown.send(()).unwrap();
+            }
+        );
+        server.unwrap();
+        client.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn unsupported_backend_rejection_is_forwarded() {
         let request = Request::steer("steer");
         let id = request.request_id.clone();
@@ -109,7 +152,10 @@ mod tests {
             },
             async {
                 let crate::agent::commands::Command::Steer(mut request) =
-                    commands.recv().await.unwrap();
+                    commands.recv().await.unwrap()
+                else {
+                    panic!("expected steering command")
+                };
                 request.respond(Err(crate::agent::backend::SteeringError::not_implemented(
                     "claude",
                 )));
@@ -246,16 +292,16 @@ mod tests {
                     slow.write_all(b"{").await.unwrap();
                     clients.push(SocketConnection::new(slow));
                     let (request, mut fast) = send_request(&path, "fast").await;
-                    let Command::Steer(mut command) = commands.recv().await.unwrap();
-                    assert_eq!(command.message, request.prompt);
+                    let Command::Steer(mut command) = commands.recv().await.unwrap() else { panic!("expected steering command") };
+                    assert_eq!(Some(command.message.as_str()), request.prompt.as_deref());
                     command.respond(Ok(()));
                     let response = read_response(&mut fast).await;
                     assert_eq!(response.request_id, Some(request.request_id));
                     assert_eq!(response.accepted, Some(true));
                     for index in 1..MAX_HANDLERS {
                         let (request, client) = send_request(&path, &format!("held {index}")).await;
-                        let Command::Steer(command) = commands.recv().await.unwrap();
-                        assert_eq!(command.message, request.prompt);
+                        let Command::Steer(command) = commands.recv().await.unwrap() else { panic!("expected steering command") };
+                        assert_eq!(Some(command.message.as_str()), request.prompt.as_deref());
                         pending.push(command);
                         clients.push(client);
                     }
@@ -293,7 +339,7 @@ mod tests {
                 _ = async {
                     for _ in 0..MAX_HANDLERS {
                         let (_, client) = send_request(&path, "held").await;
-                        let Command::Steer(command) = commands.recv().await.unwrap();
+                        let Command::Steer(command) = commands.recv().await.unwrap() else { panic!("expected steering command") };
                         clients.push(client);
                         pending.push(command);
                     }
@@ -304,8 +350,8 @@ mod tests {
             tokio::select! {
                 result = &mut future => panic!("server exited: {result:?}"),
                 _ = async {
-                    let Command::Steer(mut command) = commands.recv().await.unwrap();
-                    assert_eq!(command.message, request.prompt);
+                    let Command::Steer(mut command) = commands.recv().await.unwrap() else { panic!("expected steering command") };
+                    assert_eq!(Some(command.message.as_str()), request.prompt.as_deref());
                     command.respond(Ok(()));
                     let response = read_response(&mut backlogged).await;
                     assert_eq!(response.request_id, Some(request.request_id));
@@ -328,8 +374,8 @@ mod tests {
                 _ = async {
                     for index in 0..MAX_HANDLERS * 2 {
                         let (request, mut client) = send_request(&path, &format!("request {index}")).await;
-                        let Command::Steer(mut command) = commands.recv().await.unwrap();
-                        assert_eq!(command.message, request.prompt);
+                        let Command::Steer(mut command) = commands.recv().await.unwrap() else { panic!("expected steering command") };
+                        assert_eq!(Some(command.message.as_str()), request.prompt.as_deref());
                         let (reply, accepted, code) = match index % 3 {
                             0 => (Ok(()), Some(true), None),
                             1 => (

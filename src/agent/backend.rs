@@ -10,6 +10,7 @@ use tokio::sync::mpsc::Receiver;
 #[derive(Debug, PartialEq)]
 pub(super) enum RunOutcome {
     Completed,
+    Aborted,
     Failed(ExitCode),
 }
 
@@ -119,7 +120,6 @@ impl std::error::Error for SteeringError {}
 
 pub(super) struct AbortContext<'a> {
     pub(super) waap_root: &'a Path,
-    pub(super) agent_id: &'a str,
     pub(super) session_id: &'a str,
 }
 
@@ -147,7 +147,9 @@ impl Backend {
     pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
         match self {
             Self::Claude(b) => b.abort(context).await,
-            Self::Codex(b) => b.abort(context).await,
+            Self::Codex(_) => Err(io::Error::other(
+                "running Codex agents must be stopped through their control socket",
+            )),
             Self::Opencode(b) => b.abort(context).await,
             #[cfg(test)]
             Self::Fake(b) => b.abort(context).await,
@@ -194,7 +196,6 @@ pub(super) mod fake {
     #[derive(Debug, PartialEq, Eq)]
     pub(crate) struct AbortCall {
         pub(crate) waap_root: PathBuf,
-        pub(crate) agent_id: String,
         pub(crate) session_id: String,
     }
 
@@ -259,7 +260,7 @@ pub(super) mod fake {
                         }
                         return if let Some(error) = self.error.take() { Err(io::Error::other(error)) } else { Ok(self.outcome.take().unwrap()) };
                     }
-                    Some(Command::Steer(mut request)) = commands.recv() => {
+                    Some(Command::Steer(mut request) | Command::Stop(mut request)) = commands.recv() => {
                         self.steer_calls.lock().unwrap().push((request.message.clone(), request.deadline, std::thread::current().id()));
                         request.respond(self.steer_error.clone().map_or(Ok(()), Err));
                     }
@@ -299,7 +300,6 @@ pub(super) mod fake {
         pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
             self.abort_calls.push(AbortCall {
                 waap_root: context.waap_root.into(),
-                agent_id: context.agent_id.into(),
                 session_id: context.session_id.into(),
             });
             self.abort_error

@@ -4,14 +4,16 @@ use std::path::Path;
 use serde_json::json;
 
 use super::backend::{AbortContext, Backend};
+use super::control::{client::ControlClient, SocketPath};
 use crate::agent::get::load_agent_report;
 use crate::agent::{
     agent_report_json, print_agent_report_human, read_agent_record, transition_agent_status,
-    write_agent_record, AgentReport, AgentStatus,
+    write_agent_record, AgentReport, AgentStatus, AgentSystem,
 };
 use crate::cli::OutputFormat;
 use crate::git::commit_paths;
 use crate::record::{list_record_ids, WaapRecordKind};
+use crate::root::ControlRoot;
 
 #[derive(Debug)]
 pub(crate) struct AgentStopReport {
@@ -24,7 +26,14 @@ pub(crate) fn print_agent_stop_report(output_format: &OutputFormat, report: &Age
         OutputFormat::Json => println!("{}", agent_stop_json(report)),
         OutputFormat::HumanReadable => {
             for agent in &report.stopped_agents {
-                print_agent_report_human("Stopped agent", agent);
+                let header = if agent.metadata.system == Some(AgentSystem::Codex)
+                    && agent.metadata.status == AgentStatus::Running.as_str()
+                {
+                    "Stop accepted for agent"
+                } else {
+                    "Stopped agent"
+                };
+                print_agent_report_human(header, agent);
             }
             if let Some(commit) = &report.commit {
                 println!("Commit: {commit}");
@@ -42,89 +51,122 @@ fn agent_stop_json(report: &AgentStopReport) -> serde_json::Value {
 
 pub(crate) fn stop_agents_with_systems(
     waap_root: &Path,
+    control_root: io::Result<ControlRoot>,
     agent_id: Option<&str>,
 ) -> io::Result<AgentStopReport> {
-    let _lock = crate::state::StateLock::acquire(waap_root)?;
-    let stopped_agents = stop_agents(waap_root, agent_id)?;
-
-    let commit = if stopped_agents.is_empty() {
-        None
-    } else {
-        let paths: Vec<&Path> = stopped_agents
-            .iter()
-            .map(|report| report.path.as_path())
-            .collect();
-        let ids: Vec<&str> = stopped_agents
-            .iter()
-            .map(|report| report.agent_id.as_str())
-            .collect();
-        Some(
-            commit_paths(
-                waap_root,
-                &paths,
-                &format!("waap agent stop {}", ids.join(" ")),
-            )
-            .map_err(|error| {
-                io::Error::new(
-                    error.kind(),
-                    format!("failed to commit waap state change: {error}"),
-                )
-            })?,
-        )
-    };
-
+    let selected = select_agents_to_stop(waap_root, agent_id)?;
+    let mut stopped_agents = Vec::new();
+    let mut commit = None;
+    for report in selected {
+        let id = &report.agent_id;
+        if report.metadata.status == AgentStatus::Running.as_str()
+            && report.metadata.system == Some(AgentSystem::Codex)
+        {
+            let root = control_root
+                .as_ref()
+                .map_err(|error| io::Error::new(error.kind(), error.to_string()))?;
+            let path = SocketPath::for_agent(root, id)?;
+            super::runtime::new()?
+                .block_on(async { ControlClient::connect(path.as_path()).await?.stop().await })
+                .map_err(|error| io::Error::new(error.kind(), format!("agent {id}: {error}")))?;
+            // Native acceptance precedes owner cleanup and terminal persistence.
+            stopped_agents.push(load_agent_report(waap_root, id)?);
+            continue;
+        }
+        if report.metadata.status == AgentStatus::Running.as_str()
+            && report.metadata.session_id.is_some()
+        {
+            let mut backend = report
+                .metadata
+                .system
+                .clone()
+                .unwrap_or_default()
+                .backend(None)?;
+            abort_agent_session(waap_root, &report, &mut backend)?;
+        }
+        let (stopped, state_commit) = persist_stopped_agent(waap_root, &report)?;
+        commit = state_commit.or(commit);
+        stopped_agents.push(stopped);
+    }
     Ok(AgentStopReport {
         stopped_agents,
         commit,
     })
 }
 
-pub(super) fn stop_agents(
-    waap_root: &Path,
-    agent_id: Option<&str>,
-) -> io::Result<Vec<AgentReport>> {
+fn select_agents_to_stop(waap_root: &Path, agent_id: Option<&str>) -> io::Result<Vec<AgentReport>> {
+    let _lock = crate::state::StateLock::acquire(waap_root)?;
     match agent_id {
-        Some(agent_id) => stop_explicit_agent(waap_root, agent_id)
-            .map(|report| report.into_iter().collect::<Vec<AgentReport>>()),
-        None => {
-            let mut reports = Vec::new();
-            for agent_id in list_record_ids(waap_root, WaapRecordKind::Agent)? {
-                if let Some(report) = stop_agent_if_running(waap_root, &agent_id)? {
-                    reports.push(report);
-                }
-            }
-            Ok(reports)
+        Some(id) => {
+            let report = load_agent_report(waap_root, id)?;
+            AgentStatus::parse(&report.metadata.status)
+                .expect("validated agent status")
+                .validate_transition(AgentStatus::Aborted)?;
+            Ok(vec![report])
         }
+        None => Ok(list_record_ids(waap_root, WaapRecordKind::Agent)?
+            .iter()
+            .map(|id| load_agent_report(waap_root, id))
+            .collect::<io::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|report| report.metadata.status == AgentStatus::Running.as_str())
+            .collect()),
     }
 }
 
-fn stop_explicit_agent(waap_root: &Path, agent_id: &str) -> io::Result<Option<AgentReport>> {
-    let report = load_agent_report(waap_root, agent_id)?;
-    match AgentStatus::parse(&report.metadata.status).expect("validated agent status") {
-        AgentStatus::Ready => mark_agent_aborted(waap_root, agent_id),
-        AgentStatus::Running => stop_agent_if_running(waap_root, agent_id),
-        status => {
-            status.validate_transition(AgentStatus::Aborted)?;
-            unreachable!("terminal agent transition unexpectedly allowed")
-        }
-    }
-}
-
-fn stop_agent_if_running(waap_root: &Path, agent_id: &str) -> io::Result<Option<AgentReport>> {
-    let report = load_agent_report(waap_root, agent_id)?;
+fn abort_agent_session(
+    waap_root: &Path,
+    report: &AgentReport,
+    backend: &mut Backend,
+) -> io::Result<()> {
     if report.metadata.status != AgentStatus::Running.as_str() {
-        return Ok(None);
+        return Ok(());
     }
-
-    if report.metadata.session_id.is_some() {
-        let system = report.metadata.system.clone().unwrap_or_default();
-        let mut backend = system.backend(None)?;
-        return stop_agent_with_backend(waap_root, agent_id, &mut backend);
+    if let Some(session_id) = &report.metadata.session_id {
+        super::runtime::new()?.block_on(backend.abort(AbortContext {
+            waap_root,
+            session_id,
+        }))?;
     }
-
-    mark_agent_aborted(waap_root, agent_id)
+    Ok(())
 }
 
+fn persist_stopped_agent(
+    waap_root: &Path,
+    expected: &AgentReport,
+) -> io::Result<(AgentReport, Option<String>)> {
+    let _lock = crate::state::StateLock::acquire(waap_root)?;
+    let id = &expected.agent_id;
+    let current = load_agent_report(waap_root, id)?;
+    if current.metadata != expected.metadata {
+        return Ok((current, None));
+    }
+    let stopped = mark_agent_aborted(waap_root, id)?;
+    let commit = commit_paths(
+        waap_root,
+        &[stopped.path.as_path()],
+        &format!("waap agent stop {id}"),
+    )
+    .map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("failed to commit waap state change: {error}"),
+        )
+    })?;
+    Ok((stopped, Some(commit)))
+}
+
+#[cfg(test)]
+fn stop_agents(waap_root: &Path, agent_id: Option<&str>) -> io::Result<Vec<AgentReport>> {
+    stop_agents_with_systems(
+        waap_root,
+        Err(io::Error::other("control root required for Codex")),
+        agent_id,
+    )
+    .map(|report| report.stopped_agents)
+}
+
+#[cfg(test)]
 fn stop_agent_with_backend(
     waap_root: &Path,
     agent_id: &str,
@@ -135,23 +177,16 @@ fn stop_agent_with_backend(
         return Ok(None);
     }
 
-    if let Some(session_id) = &report.metadata.session_id {
-        super::runtime::new()?.block_on(backend.abort(AbortContext {
-            waap_root,
-            agent_id,
-            session_id,
-        }))?;
-    }
-
-    mark_agent_aborted(waap_root, agent_id)
+    abort_agent_session(waap_root, &report, backend)?;
+    persist_stopped_agent(waap_root, &report).map(|(report, _)| Some(report))
 }
 
-fn mark_agent_aborted(waap_root: &Path, agent_id: &str) -> io::Result<Option<AgentReport>> {
+fn mark_agent_aborted(waap_root: &Path, agent_id: &str) -> io::Result<AgentReport> {
     let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
     transition_agent_status(&mut metadata, AgentStatus::Aborted)?;
     write_agent_record(waap_root, agent_id, &metadata, &body)?;
 
-    load_agent_report(waap_root, agent_id).map(Some)
+    load_agent_report(waap_root, agent_id)
 }
 
 #[cfg(test)]
@@ -171,6 +206,7 @@ mod tests {
     #[test]
     fn agent_stop_stops_one_running_agent() {
         let dir = tempdir().unwrap();
+        crate::test_git::init_repo_with_commit(dir.path());
         write_agent_with_session(dir.path(), "aa-3881fda0", "running", Some("ses_123"));
         write_agent(dir.path(), "aa-00000001", "running");
 
@@ -202,6 +238,7 @@ mod tests {
     #[test]
     fn agent_stop_all_stops_all_running_agents() {
         let dir = tempdir().unwrap();
+        crate::test_git::init_repo_with_commit(dir.path());
         write_agent(dir.path(), "aa-00000003", "running");
         write_agent(dir.path(), "aa-00000001", "running");
 
@@ -227,6 +264,7 @@ mod tests {
     #[test]
     fn agent_stop_filters_only_running_agents() {
         let dir = tempdir().unwrap();
+        crate::test_git::init_repo_with_commit(dir.path());
         write_agent(dir.path(), "aa-00000001", "ready");
         write_agent(dir.path(), "aa-00000002", "running");
         write_agent(dir.path(), "aa-00000003", "completed");
@@ -276,6 +314,7 @@ mod tests {
     #[test]
     fn agent_stop_rejects_explicit_terminal_agent() {
         let dir = tempdir().unwrap();
+        crate::test_git::init_repo_with_commit(dir.path());
         write_agent(dir.path(), "aa-3881fda0", "completed");
 
         let error = stop_agents(dir.path(), Some("aa-3881fda0")).unwrap_err();
@@ -297,6 +336,7 @@ mod tests {
     #[test]
     fn agent_stop_explicitly_cancels_ready_agent() {
         let dir = tempdir().unwrap();
+        crate::test_git::init_repo_with_commit(dir.path());
         write_agent(dir.path(), "aa-3881fda0", "ready");
 
         let reports = stop_agents(dir.path(), Some("aa-3881fda0")).unwrap();
@@ -308,6 +348,7 @@ mod tests {
     #[test]
     fn agent_stop_reports_invalid_agent_id() {
         let dir = tempdir().unwrap();
+        crate::test_git::init_repo_with_commit(dir.path());
 
         let error = stop_agents(dir.path(), Some("not an agent")).unwrap_err();
 
@@ -318,6 +359,7 @@ mod tests {
     #[test]
     fn agent_stop_reports_missing_agent() {
         let dir = tempdir().unwrap();
+        crate::test_git::init_repo_with_commit(dir.path());
 
         let error = stop_agents(dir.path(), Some("aa-3881fda0")).unwrap_err();
 
@@ -328,6 +370,7 @@ mod tests {
     #[test]
     fn agent_stop_aborts_opencode_sessions_for_running_agents() {
         let dir = tempdir().unwrap();
+        crate::test_git::init_repo_with_commit(dir.path());
         write_agent_with_session(dir.path(), "aa-00000001", "running", Some("ses_123"));
         write_agent_with_session(dir.path(), "aa-00000002", "ready", Some("ses_ready"));
         let mut backend = Backend::Fake(FakeBackend::default());
@@ -341,13 +384,13 @@ mod tests {
         assert_eq!(backend.fake().abort_calls.len(), 1);
         let call = &backend.fake().abort_calls[0];
         assert_eq!(call.waap_root, dir.path());
-        assert_eq!(call.agent_id, "aa-00000001");
         assert_eq!(call.session_id, "ses_123");
     }
 
     #[test]
     fn agent_stop_kills_claude_process_instead_of_opencode_abort() {
         let dir = tempdir().unwrap();
+        crate::test_git::init_repo_with_commit(dir.path());
         write_claude_agent_with_session(dir.path(), "aa-00000001", "running", "ses_claude");
         let mut backend = Backend::Fake(FakeBackend::default());
 
@@ -370,34 +413,29 @@ mod tests {
     #[test]
     fn agent_stop_direct_backends_handle_mixed_system_sessions() {
         let dir = tempdir().unwrap();
+        crate::test_git::init_repo_with_commit(dir.path());
         write_agent_with_session(dir.path(), "aa-00000001", "running", Some("ses_open"));
         write_claude_agent_with_session(dir.path(), "aa-00000002", "running", "ses_claude");
-        write_codex_agent_with_session(dir.path(), "aa-00000003", "running", "th_codex");
         let mut opencode = Backend::Fake(FakeBackend::default());
         let mut claude = Backend::Fake(FakeBackend::default());
-        let mut codex = Backend::Fake(FakeBackend::default());
 
         let reports = [
             stop_agent_with_backend(dir.path(), "aa-00000001", &mut opencode).unwrap(),
             stop_agent_with_backend(dir.path(), "aa-00000002", &mut claude).unwrap(),
-            stop_agent_with_backend(dir.path(), "aa-00000003", &mut codex).unwrap(),
         ]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
 
-        assert_eq!(
-            agent_ids(&reports),
-            vec!["aa-00000001", "aa-00000002", "aa-00000003"]
-        );
+        assert_eq!(agent_ids(&reports), vec!["aa-00000001", "aa-00000002"]);
         assert_eq!(opencode.fake().abort_calls[0].session_id, "ses_open");
         assert_eq!(claude.fake().abort_calls[0].session_id, "ses_claude");
-        assert_eq!(codex.fake().abort_calls[0].session_id, "th_codex");
     }
 
     #[test]
     fn agent_stop_does_not_mark_aborted_when_claude_kill_fails() {
         let dir = tempdir().unwrap();
+        crate::test_git::init_repo_with_commit(dir.path());
         write_claude_agent_with_session(dir.path(), "aa-00000001", "running", "ses_claude");
         let mut backend = Backend::Fake(FakeBackend {
             abort_error: Some("kill failed".to_string()),
@@ -417,52 +455,9 @@ mod tests {
     }
 
     #[test]
-    fn agent_stop_signals_codex_run_with_agent_id_not_session_id() {
-        let dir = tempdir().unwrap();
-        write_codex_agent_with_session(dir.path(), "aa-00000001", "running", "th_codex");
-        let mut backend = Backend::Fake(FakeBackend::default());
-
-        let reports = stop_agent_with_backend(dir.path(), "aa-00000001", &mut backend)
-            .unwrap()
-            .into_iter()
-            .collect::<Vec<_>>();
-
-        assert_eq!(agent_ids(&reports), vec!["aa-00000001"]);
-        assert_eq!(backend.fake().abort_calls[0].agent_id, "aa-00000001");
-        assert_eq!(backend.fake().abort_calls[0].session_id, "th_codex");
-        assert_eq!(
-            load_agent_report(dir.path(), "aa-00000001")
-                .unwrap()
-                .metadata
-                .status,
-            "aborted"
-        );
-    }
-
-    #[test]
-    fn agent_stop_does_not_mark_aborted_when_codex_signal_fails() {
-        let dir = tempdir().unwrap();
-        write_codex_agent_with_session(dir.path(), "aa-00000001", "running", "th_codex");
-        let mut backend = Backend::Fake(FakeBackend {
-            abort_error: Some("signal failed".to_string()),
-            ..FakeBackend::default()
-        });
-
-        let error = stop_agent_with_backend(dir.path(), "aa-00000001", &mut backend).unwrap_err();
-
-        assert_eq!(error.kind(), io::ErrorKind::Other);
-        assert_eq!(
-            load_agent_report(dir.path(), "aa-00000001")
-                .unwrap()
-                .metadata
-                .status,
-            "running"
-        );
-    }
-
-    #[test]
     fn agent_stop_does_not_mark_aborted_when_opencode_abort_fails() {
         let dir = tempdir().unwrap();
+        crate::test_git::init_repo_with_commit(dir.path());
         write_agent_with_session(dir.path(), "aa-3881fda0", "running", Some("ses_123"));
         let mut backend = Backend::Fake(FakeBackend {
             abort_error: Some("abort failed".to_string()),
@@ -558,20 +553,6 @@ mod tests {
             &waap_root.join(format!("agents/{agent_id}/agent.md")),
             &format!(
                 "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"{status}\"\nsession_id = \"{session_id}\"\nsystem = \"claude\"\n+++\n\n# Purpose\n"
-            ),
-        );
-    }
-
-    fn write_codex_agent_with_session(
-        waap_root: &Path,
-        agent_id: &str,
-        status: &str,
-        session_id: &str,
-    ) {
-        write_file(
-            &waap_root.join(format!("agents/{agent_id}/agent.md")),
-            &format!(
-                "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"{status}\"\nsession_id = \"{session_id}\"\nsystem = \"codex\"\n+++\n\n# Purpose\n"
             ),
         );
     }
