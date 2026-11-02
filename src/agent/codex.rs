@@ -1063,7 +1063,7 @@ mod steering_tests {
                 while output.0.lock().unwrap().is_empty() {
                     tokio::task::yield_now().await;
                 }
-                let (request, replies) = SteerRequest::new(
+                let (request, reply_receiver) = SteerRequest::new(
                     "expires".to_string(),
                     Instant::now() + Duration::from_millis(100),
                 );
@@ -1075,7 +1075,7 @@ mod steering_tests {
                     METHOD_TURN_STEER
                 );
                 assert!(matches!(
-                    tokio::time::timeout(Duration::from_secs(2), replies)
+                    tokio::time::timeout(Duration::from_secs(2), reply_receiver)
                         .await
                         .unwrap()
                         .unwrap(),
@@ -1490,7 +1490,7 @@ mod steering_tests {
         use futures_util::FutureExt;
         for allowance in [0, 7] {
             let expires = deadline();
-            let (request, mut replies) = SteerRequest::new("prompt".to_string(), expires);
+            let (request, mut reply_receiver) = SteerRequest::new("prompt".to_string(), expires);
             let mut client = CodexClient {
                 reader: io::Cursor::new(Vec::<u8>::new()),
                 writer: LimitedWriter {
@@ -1524,7 +1524,7 @@ mod steering_tests {
                 allowance > 0
             );
             turn.pending_steer.as_mut().unwrap().expire(expires);
-            let result = replies.try_recv().unwrap();
+            let result = reply_receiver.try_recv().unwrap();
             if allowance == 0 {
                 assert_rejected(result, "timeout");
             } else {

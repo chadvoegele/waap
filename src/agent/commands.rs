@@ -12,7 +12,7 @@ pub(super) enum Command {
 pub(super) struct SteerRequest {
     pub(super) message: String,
     pub(super) deadline: Instant,
-    reply: Option<oneshot::Sender<SteeringResult>>,
+    reply_sender: Option<oneshot::Sender<SteeringResult>>,
 }
 
 impl SteerRequest {
@@ -20,24 +20,24 @@ impl SteerRequest {
         message: String,
         deadline: Instant,
     ) -> (Self, oneshot::Receiver<SteeringResult>) {
-        let (reply, replies) = oneshot::channel();
+        let (reply_sender, reply_receiver) = oneshot::channel();
         (
             Self {
                 message,
                 deadline,
-                reply: Some(reply),
+                reply_sender: Some(reply_sender),
             },
-            replies,
+            reply_receiver,
         )
     }
 
     pub(super) fn has_reply_sender(&self) -> bool {
-        self.reply.is_some()
+        self.reply_sender.is_some()
     }
 
     pub(super) fn respond(&mut self, result: SteeringResult) {
-        if let Some(reply) = self.reply.take() {
-            let _ = reply.send(result);
+        if let Some(reply_sender) = self.reply_sender.take() {
+            let _ = reply_sender.send(result);
         }
     }
 }
@@ -60,7 +60,7 @@ impl CommandDispatcher {
                 message: "Steering request expired before dispatch".into(),
             });
         }
-        let (request, replies) = SteerRequest::new(prompt.to_string(), deadline);
+        let (request, reply_receiver) = SteerRequest::new(prompt.to_string(), deadline);
         self.sender
             .try_send(Command::Steer(request))
             .map_err(|error| match error {
@@ -73,7 +73,7 @@ impl CommandDispatcher {
                     message: "Backend exited before steering dispatch".into(),
                 },
             })?;
-        match tokio::time::timeout_at(deadline.into(), replies).await {
+        match tokio::time::timeout_at(deadline.into(), reply_receiver).await {
             Ok(Ok(result)) => result,
             _ => Err(SteeringError::acceptance_unknown(
                 "no reply received before the deadline or driver exit",
@@ -109,7 +109,7 @@ mod tests {
     async fn queue_is_bounded_and_runner_exit_is_distinguished_from_uncertain_delivery() {
         let (dispatcher, mut requests) = CommandDispatcher::channel();
         let sender = dispatcher.sender.clone();
-        let (request, _reply) = SteerRequest::new("first".into(), deadline());
+        let (request, _reply_receiver) = SteerRequest::new("first".into(), deadline());
         sender.try_send(Command::Steer(request)).ok().unwrap();
         assert!(matches!(
             dispatcher.steer("second", deadline()).await,
