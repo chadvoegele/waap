@@ -160,7 +160,11 @@ pub(crate) fn run() -> ExitCode {
                 }
             }
             AgentCommand::Stop { agent_id } => {
-                match stop_agents_with_systems(waap_root, agent_id.as_deref()) {
+                match stop_agents_with_systems(
+                    waap_root,
+                    find_control_root(repository_root),
+                    agent_id.as_deref(),
+                ) {
                     Ok(report) => {
                         print_agent_stop_report(&cli.output_format, &report);
                         ExitCode::SUCCESS

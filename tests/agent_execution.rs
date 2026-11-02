@@ -83,6 +83,8 @@ for line in sys.stdin:
         result = {'turn': {'id': 'tu_test'}}
     if method == 'turn/steer':
         steers += 1
+        if mode == 'steering-pending':
+            continue
         if mode == 'steering-held':
             while not os.path.exists(os.path.join(root, 'release-steer')):
                 if os.path.exists(os.path.join(root, 'complete')):
@@ -104,6 +106,11 @@ for line in sys.stdin:
         result = {'turnId': 'tu_test'}
         emit({'method': 'item/agentMessage/delta', 'params': {
             'threadId': 'th_test', 'turnId': 'tu_test', 'delta': 'steered output\n'}})
+    if method == 'turn/interrupt' and mode == 'steering-stop-rejected':
+        emit({'id': request['id'], 'error': {'code': -32000, 'message': 'interrupt rejected'}})
+        time.sleep(60)
+    if method == 'turn/interrupt' and mode == 'steering-stop-eof':
+        sys.exit(0)
     emit({'id': request['id'], 'result': result})
     if method == 'turn/interrupt':
         emit({'method': 'turn/completed', 'params': {
@@ -130,6 +137,16 @@ for line in sys.stdin:
     )
     .unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    let pkill = root.join("bin/pkill");
+    fs::write(
+        &pkill,
+        r#"#!/bin/sh
+touch "$(dirname "$0")/../pkill-used"
+exit 99
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(pkill, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 #[test]
@@ -494,6 +511,7 @@ impl SteeringRun {
             snapshot.2.is_empty(),
             "unexpected persisted files: {snapshot:?}"
         );
+        assert!(!self.repo.path().join("pkill-used").exists());
         assert!(!self.socket.exists());
         assert!(!self
             .repo
@@ -675,4 +693,124 @@ fn completion_during_native_submission_reports_uncertainty_without_retry() {
         "pending calls must not dispatch after completion"
     );
     run.finish("completed", true);
+}
+
+#[test]
+fn stop_all_routes_mixed_backends_and_preserves_ready_agents() {
+    let mut run = SteeringRun::start("steering-lifecycle");
+    let root = run.repo.path();
+    let state = root.join(".state");
+    fs::write(root.join("bin/pkill"), "#!/bin/sh\n[ \"$1\" = -TERM ] && [ \"$2\" = -f ] && [ \"$3\" = ses_claude ] || exit 99\ntouch \"$(dirname \"$0\")/../claude-stopped\"\n").unwrap();
+    for (id, status, system) in [
+        ("aa-000legacy", "running", "claude"),
+        ("aa-ready", "ready", "codex"),
+    ] {
+        let dir = state.join("agents").join(id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("agent.md"), format!("+++\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"{status}\"\nsystem = \"{system}\"\n+++\n")).unwrap();
+    }
+    let legacy = state.join("agents/aa-000legacy/agent.md");
+    let contents = fs::read_to_string(&legacy).unwrap().replace(
+        "status = \"running\"",
+        "status = \"running\"\nsession_id = \"ses_claude\"",
+    );
+    fs::write(legacy, contents).unwrap();
+    git(&state, &["add", "agents"]);
+    git(&state, &["commit", "-qm", "seed mixed agents"]);
+    let output = waap_command(root, run.mode, run.runtime.path())
+        .args(["--output-format", "json", "agent", "stop"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["stopped_agents"].as_array().unwrap().len(), 2);
+    assert!(
+        fs::read_to_string(state.join("agents/aa-000legacy/agent.md"))
+            .unwrap()
+            .contains("status = \"aborted\"")
+    );
+    assert!(fs::read_to_string(state.join("agents/aa-ready/agent.md"))
+        .unwrap()
+        .contains("status = \"ready\""));
+    assert!(root.join("claude-stopped").exists());
+    run.finish("aborted", true);
+    let interrupts: Vec<_> = run
+        .requests()
+        .into_iter()
+        .filter(|r| r["method"] == "turn/interrupt")
+        .collect();
+    assert_eq!(interrupts.len(), 1);
+}
+
+#[test]
+fn failed_native_stop_remains_failed_and_cleans_up() {
+    for mode in ["steering-stop-rejected", "steering-stop-eof"] {
+        let mut run = SteeringRun::start(mode);
+        let output = waap_command(run.repo.path(), mode, run.runtime.path())
+            .args(["agent", "stop", "--agent-id", &run.agent_id])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(output.stdout.is_empty());
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            diagnostic.contains(if mode.ends_with("rejected") {
+                "backend_rejected"
+            } else {
+                "acceptance is unknown"
+            }),
+            "{diagnostic}"
+        );
+        run.finish("failed", false);
+    }
+}
+
+#[test]
+fn stop_before_turn_id_waits_for_native_acceptance() {
+    let mut run = SteeringRun::start("steering-startup");
+    let mut stop = RunningChild(Some(
+        waap_command(run.repo.path(), run.mode, run.runtime.path())
+            .args(["agent", "stop", "--agent-id", &run.agent_id])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    ));
+    thread::sleep(Duration::from_millis(50));
+    assert!(stop.0.as_mut().unwrap().try_wait().unwrap().is_none());
+    assert!(!run
+        .requests()
+        .iter()
+        .any(|r| r["method"] == "turn/interrupt"));
+    fs::write(run.repo.path().join("release-start"), "go").unwrap();
+    wait_until(|| stop.0.as_mut().unwrap().try_wait().unwrap().is_some());
+    let output = stop.0.take().unwrap().wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    run.finish("aborted", true);
+}
+
+#[test]
+fn stop_does_not_wait_for_pending_steering_acknowledgement() {
+    let mut run = SteeringRun::start("steering-pending");
+    let mut steer = RunningChild(Some(
+        run.steer("pending")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    ));
+    wait_until(|| run.steering_requests().len() == 1);
+    run.stop();
+    run.finish("aborted", true);
+    wait_until(|| steer.0.as_mut().unwrap().try_wait().unwrap().is_some());
+    let output = steer.0.take().unwrap().wait_with_output().unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("acceptance is unknown"));
+    assert_eq!(
+        run.requests()
+            .iter()
+            .filter(|r| r["method"] == "turn/start")
+            .count(),
+        1
+    );
 }

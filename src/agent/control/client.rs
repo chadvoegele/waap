@@ -19,7 +19,6 @@ impl ControlClient {
         self.exchange(Request::steer(prompt)).await
     }
 
-    #[allow(dead_code)] // Used by the stop CLI integration in the dependent ticket.
     pub(in crate::agent) async fn stop(&mut self) -> io::Result<()> {
         self.exchange(Request::stop()).await
     }
