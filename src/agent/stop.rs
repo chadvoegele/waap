@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde_json::json;
 
-use super::backend::{AbortContext, AgentSystemBackend};
+use super::backend::{AbortContext, Backend};
 use crate::agent::get::load_agent_report;
 use crate::agent::{
     agent_report_json, print_agent_report_human, read_agent_record, transition_agent_status,
@@ -128,7 +128,7 @@ fn stop_agent_if_running(waap_root: &Path, agent_id: &str) -> io::Result<Option<
 fn stop_agent_with_backend(
     waap_root: &Path,
     agent_id: &str,
-    backend: &mut impl AgentSystemBackend,
+    backend: &mut Backend,
 ) -> io::Result<Option<AgentReport>> {
     let report = load_agent_report(waap_root, agent_id)?;
     if report.metadata.status != AgentStatus::Running.as_str() {
@@ -164,7 +164,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{agent_stop_json, stop_agent_with_backend, stop_agents, AgentStopReport};
-    use crate::agent::backend::fake::FakeBackend;
+    use crate::agent::backend::{fake::FakeBackend, Backend};
     use crate::agent::get::load_agent_report;
     use crate::agent::{AgentMetadata, AgentReport};
 
@@ -174,7 +174,7 @@ mod tests {
         write_agent_with_session(dir.path(), "aa-3881fda0", "running", Some("ses_123"));
         write_agent(dir.path(), "aa-00000001", "running");
 
-        let mut backend = FakeBackend::default();
+        let mut backend = Backend::Fake(FakeBackend::default());
         let reports = stop_agent_with_backend(dir.path(), "aa-3881fda0", &mut backend)
             .unwrap()
             .into_iter()
@@ -330,7 +330,7 @@ mod tests {
         let dir = tempdir().unwrap();
         write_agent_with_session(dir.path(), "aa-00000001", "running", Some("ses_123"));
         write_agent_with_session(dir.path(), "aa-00000002", "ready", Some("ses_ready"));
-        let mut backend = FakeBackend::default();
+        let mut backend = Backend::Fake(FakeBackend::default());
 
         let reports = stop_agent_with_backend(dir.path(), "aa-00000001", &mut backend)
             .unwrap()
@@ -338,8 +338,8 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(agent_ids(&reports), vec!["aa-00000001"]);
-        assert_eq!(backend.abort_calls.len(), 1);
-        let call = &backend.abort_calls[0];
+        assert_eq!(backend.fake().abort_calls.len(), 1);
+        let call = &backend.fake().abort_calls[0];
         assert_eq!(call.waap_root, dir.path());
         assert_eq!(call.agent_id, "aa-00000001");
         assert_eq!(call.session_id, "ses_123");
@@ -349,7 +349,7 @@ mod tests {
     fn agent_stop_kills_claude_process_instead_of_opencode_abort() {
         let dir = tempdir().unwrap();
         write_claude_agent_with_session(dir.path(), "aa-00000001", "running", "ses_claude");
-        let mut backend = FakeBackend::default();
+        let mut backend = Backend::Fake(FakeBackend::default());
 
         let reports = stop_agent_with_backend(dir.path(), "aa-00000001", &mut backend)
             .unwrap()
@@ -357,7 +357,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(agent_ids(&reports), vec!["aa-00000001"]);
-        assert_eq!(backend.abort_calls[0].session_id, "ses_claude");
+        assert_eq!(backend.fake().abort_calls[0].session_id, "ses_claude");
         assert_eq!(
             load_agent_report(dir.path(), "aa-00000001")
                 .unwrap()
@@ -373,9 +373,9 @@ mod tests {
         write_agent_with_session(dir.path(), "aa-00000001", "running", Some("ses_open"));
         write_claude_agent_with_session(dir.path(), "aa-00000002", "running", "ses_claude");
         write_codex_agent_with_session(dir.path(), "aa-00000003", "running", "th_codex");
-        let mut opencode = FakeBackend::default();
-        let mut claude = FakeBackend::default();
-        let mut codex = FakeBackend::default();
+        let mut opencode = Backend::Fake(FakeBackend::default());
+        let mut claude = Backend::Fake(FakeBackend::default());
+        let mut codex = Backend::Fake(FakeBackend::default());
 
         let reports = [
             stop_agent_with_backend(dir.path(), "aa-00000001", &mut opencode).unwrap(),
@@ -390,19 +390,19 @@ mod tests {
             agent_ids(&reports),
             vec!["aa-00000001", "aa-00000002", "aa-00000003"]
         );
-        assert_eq!(opencode.abort_calls[0].session_id, "ses_open");
-        assert_eq!(claude.abort_calls[0].session_id, "ses_claude");
-        assert_eq!(codex.abort_calls[0].session_id, "th_codex");
+        assert_eq!(opencode.fake().abort_calls[0].session_id, "ses_open");
+        assert_eq!(claude.fake().abort_calls[0].session_id, "ses_claude");
+        assert_eq!(codex.fake().abort_calls[0].session_id, "th_codex");
     }
 
     #[test]
     fn agent_stop_does_not_mark_aborted_when_claude_kill_fails() {
         let dir = tempdir().unwrap();
         write_claude_agent_with_session(dir.path(), "aa-00000001", "running", "ses_claude");
-        let mut backend = FakeBackend {
+        let mut backend = Backend::Fake(FakeBackend {
             abort_error: Some("kill failed".to_string()),
             ..FakeBackend::default()
-        };
+        });
 
         let error = stop_agent_with_backend(dir.path(), "aa-00000001", &mut backend).unwrap_err();
 
@@ -420,7 +420,7 @@ mod tests {
     fn agent_stop_signals_codex_run_with_agent_id_not_session_id() {
         let dir = tempdir().unwrap();
         write_codex_agent_with_session(dir.path(), "aa-00000001", "running", "th_codex");
-        let mut backend = FakeBackend::default();
+        let mut backend = Backend::Fake(FakeBackend::default());
 
         let reports = stop_agent_with_backend(dir.path(), "aa-00000001", &mut backend)
             .unwrap()
@@ -428,8 +428,8 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(agent_ids(&reports), vec!["aa-00000001"]);
-        assert_eq!(backend.abort_calls[0].agent_id, "aa-00000001");
-        assert_eq!(backend.abort_calls[0].session_id, "th_codex");
+        assert_eq!(backend.fake().abort_calls[0].agent_id, "aa-00000001");
+        assert_eq!(backend.fake().abort_calls[0].session_id, "th_codex");
         assert_eq!(
             load_agent_report(dir.path(), "aa-00000001")
                 .unwrap()
@@ -443,10 +443,10 @@ mod tests {
     fn agent_stop_does_not_mark_aborted_when_codex_signal_fails() {
         let dir = tempdir().unwrap();
         write_codex_agent_with_session(dir.path(), "aa-00000001", "running", "th_codex");
-        let mut backend = FakeBackend {
+        let mut backend = Backend::Fake(FakeBackend {
             abort_error: Some("signal failed".to_string()),
             ..FakeBackend::default()
-        };
+        });
 
         let error = stop_agent_with_backend(dir.path(), "aa-00000001", &mut backend).unwrap_err();
 
@@ -464,10 +464,10 @@ mod tests {
     fn agent_stop_does_not_mark_aborted_when_opencode_abort_fails() {
         let dir = tempdir().unwrap();
         write_agent_with_session(dir.path(), "aa-3881fda0", "running", Some("ses_123"));
-        let mut backend = FakeBackend {
+        let mut backend = Backend::Fake(FakeBackend {
             abort_error: Some("abort failed".to_string()),
             ..FakeBackend::default()
-        };
+        });
 
         let error = stop_agent_with_backend(dir.path(), "aa-3881fda0", &mut backend).unwrap_err();
 

@@ -27,8 +27,7 @@ use super::commands::{Command, SteerRequest, SteeringResult};
 use serde_json::{json, Value as JsonValue};
 
 use super::backend::{
-    AbortContext, AgentSessionRun, AgentSystemBackend, RunOutcome, Runner, StartContext,
-    SteeringError,
+    AbortContext, AgentSessionRun, RunOutcome, Runner, StartContext, SteeringError,
 };
 use super::process::AgentProcess;
 use super::{AgentRunOptions, ReasoningEffort};
@@ -44,10 +43,8 @@ impl CodexBackend {
             config: get_codex_run_config(options)?,
         })
     }
-}
 
-impl AgentSystemBackend for CodexBackend {
-    async fn start(
+    pub(super) async fn start(
         &mut self,
         context: StartContext<'_>,
         receiver: Receiver<Command>,
@@ -82,7 +79,7 @@ impl AgentSystemBackend for CodexBackend {
             receiver,
         ))
     }
-    async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
+    pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
         signal_codex_run(context.agent_id).await
     }
 }

@@ -123,22 +123,15 @@ pub(super) struct AbortContext<'a> {
     pub(super) session_id: &'a str,
 }
 
-pub(super) trait AgentSystemBackend {
-    async fn start(
-        &mut self,
-        context: StartContext<'_>,
-        receiver: Receiver<Command>,
-    ) -> io::Result<AgentSessionRun>;
-    async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()>;
-}
-
 pub(super) enum Backend {
     Claude(ClaudeBackend),
     Codex(CodexBackend),
     Opencode(OpencodeBackend),
+    #[cfg(test)]
+    Fake(fake::FakeBackend),
 }
-impl AgentSystemBackend for Backend {
-    async fn start(
+impl Backend {
+    pub(super) async fn start(
         &mut self,
         context: StartContext<'_>,
         receiver: Receiver<Command>,
@@ -147,23 +140,35 @@ impl AgentSystemBackend for Backend {
             Self::Claude(b) => b.start(context, receiver).await,
             Self::Codex(b) => b.start(context, receiver).await,
             Self::Opencode(b) => b.start(context, receiver).await,
+            #[cfg(test)]
+            Self::Fake(b) => b.start(context, receiver).await,
         }
     }
-    async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
+    pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
         match self {
             Self::Claude(b) => b.abort(context).await,
             Self::Codex(b) => b.abort(context).await,
             Self::Opencode(b) => b.abort(context).await,
+            #[cfg(test)]
+            Self::Fake(b) => b.abort(context).await,
         }
     }
 }
 #[cfg(test)]
 impl Backend {
+    pub(super) fn fake(&self) -> &fake::FakeBackend {
+        let Self::Fake(backend) = self else {
+            panic!("expected fake backend")
+        };
+        backend
+    }
+
     pub(super) fn type_name(&self) -> &'static str {
         match self {
             Self::Claude(_) => std::any::type_name::<ClaudeBackend>(),
             Self::Codex(_) => std::any::type_name::<CodexBackend>(),
             Self::Opencode(_) => std::any::type_name::<OpencodeBackend>(),
+            Self::Fake(_) => std::any::type_name::<fake::FakeBackend>(),
         }
     }
 }
@@ -262,8 +267,8 @@ pub(super) mod fake {
             }
         }
     }
-    impl AgentSystemBackend for FakeBackend {
-        async fn start(
+    impl FakeBackend {
+        pub(super) async fn start(
             &mut self,
             context: StartContext<'_>,
             receiver: Receiver<Command>,
@@ -291,7 +296,7 @@ pub(super) mod fake {
                 receiver,
             ))
         }
-        async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
+        pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
             self.abort_calls.push(AbortCall {
                 waap_root: context.waap_root.into(),
                 agent_id: context.agent_id.into(),

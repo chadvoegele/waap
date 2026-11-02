@@ -9,9 +9,7 @@ use tokio::sync::mpsc::Receiver;
 use reqwest::{Client, Response};
 use serde_json::{json, Value as JsonValue};
 
-use super::backend::{
-    AbortContext, AgentSessionRun, AgentSystemBackend, RunOutcome, Runner, StartContext,
-};
+use super::backend::{AbortContext, AgentSessionRun, RunOutcome, Runner, StartContext};
 use super::commands::Command;
 
 pub(super) struct OpencodeBackend {
@@ -24,10 +22,8 @@ impl OpencodeBackend {
             config: opencode_run_config_from_env()?,
         })
     }
-}
 
-impl AgentSystemBackend for OpencodeBackend {
-    async fn start(
+    pub(super) async fn start(
         &mut self,
         context: StartContext<'_>,
         receiver: Receiver<Command>,
@@ -54,7 +50,7 @@ impl AgentSystemBackend for OpencodeBackend {
             receiver,
         ))
     }
-    async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
+    pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
         let root = opencode_repository_root(context.waap_root)?;
         abort_opencode_session(&self.config, context.session_id, &root).await
     }
@@ -499,8 +495,7 @@ mod tests {
     use super::{
         abort_opencode_session, create_session_payload, monitor_opencode_events,
         opencode_directory_query, opencode_repository_root, opencode_url, parse_opencode_model,
-        prompt_payload, AgentSystemBackend, OpencodeBackend, OpencodeRunConfig, RunOutcome,
-        StartContext,
+        prompt_payload, OpencodeBackend, OpencodeRunConfig, RunOutcome, StartContext,
     };
 
     use crate::agent::backend::SteeringError;
