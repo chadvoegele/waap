@@ -318,7 +318,7 @@ fn native_codex_steering_through_run_owner_preserves_state_output_and_cleanup() 
             assert!(output.status.success(), "{output:?}");
             fs::write(run.repo.path().join("release"), "complete").unwrap();
         }
-        run.finish(if interrupt { "aborted" } else { "completed" }, !interrupt);
+        run.finish(if interrupt { "aborted" } else { "completed" }, true);
         assert!(fs::read_to_string(run.repo.path().join("run.stdout"))
             .unwrap()
             .contains("steered output"));
@@ -339,6 +339,30 @@ fn native_codex_steering_through_run_owner_preserves_state_output_and_cleanup() 
         assert!(waap(run.repo.path(), &["check"], "steering")
             .status
             .success());
+    }
+}
+
+#[test]
+fn both_os_signals_use_native_interrupt_and_reap_the_owned_child() {
+    for signal in ["-INT", "-TERM"] {
+        let mut run = SteeringRun::start("steering-lifecycle");
+        let pid = run.child.0.as_ref().unwrap().id().to_string();
+        assert!(Command::new("kill")
+            .args([signal, &pid])
+            .status()
+            .unwrap()
+            .success());
+        run.finish("aborted", true);
+        let interrupts: Vec<Value> = run
+            .requests()
+            .into_iter()
+            .filter(|request| request["method"] == "turn/interrupt")
+            .collect();
+        assert_eq!(interrupts.len(), 1);
+        assert_eq!(
+            interrupts[0]["params"],
+            json!({"threadId":"th_test","turnId":"tu_test"})
+        );
     }
 }
 
@@ -522,7 +546,7 @@ fn startup_steering_is_rejected_without_deferring_delivery_to_the_active_turn() 
             .contains("native turn active")
     });
     run.stop();
-    run.finish("aborted", false);
+    run.finish("aborted", true);
     assert!(run.steering_requests().is_empty());
 }
 
@@ -563,7 +587,7 @@ fn native_failures_reach_cli_without_prompt_disclosure_retries_or_lifecycle_chan
                 .join(&run.agent_id)
                 .is_dir());
             run.stop();
-            run.finish("aborted", false);
+            run.finish("aborted", true);
         }
     }
 }

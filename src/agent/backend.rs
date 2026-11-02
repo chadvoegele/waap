@@ -10,6 +10,7 @@ use tokio::sync::mpsc::Receiver;
 #[derive(Debug, PartialEq)]
 pub(super) enum RunOutcome {
     Completed,
+    Aborted,
     Failed(ExitCode),
 }
 
@@ -259,7 +260,7 @@ pub(super) mod fake {
                         }
                         return if let Some(error) = self.error.take() { Err(io::Error::other(error)) } else { Ok(self.outcome.take().unwrap()) };
                     }
-                    Some(Command::Steer(mut request)) = commands.recv() => {
+                    Some(Command::Steer(mut request) | Command::Stop(mut request)) = commands.recv() => {
                         self.steer_calls.lock().unwrap().push((request.message.clone(), request.deadline, std::thread::current().id()));
                         request.respond(self.steer_error.clone().map_or(Ok(()), Err));
                     }

@@ -10,16 +10,26 @@ pub(super) struct Request {
     pub(super) version: u64,
     pub(super) request_id: String,
     pub(super) method: String,
-    pub(super) prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) prompt: Option<String>,
 }
 
 impl Request {
+    pub(super) fn stop() -> Self {
+        Self {
+            version: 1,
+            request_id: Uuid::new_v4().to_string(),
+            method: "stop".into(),
+            prompt: None,
+        }
+    }
+
     pub(super) fn steer(prompt: &str) -> Self {
         Self {
             version: 1,
             request_id: Uuid::new_v4().to_string(),
             method: "steer".to_string(),
-            prompt: prompt.to_string(),
+            prompt: Some(prompt.to_string()),
         }
     }
 }
@@ -55,11 +65,12 @@ pub(super) fn parse_request(frame: &[u8]) -> Result<Request, Response> {
         build_rejection(
             id.as_deref(),
             "invalid_request",
-            "Expected version, UUID request_id, method, and a nonempty prompt.",
+            "Expected version, UUID request_id, and method; steer requires a nonempty prompt and stop forbids prompt.",
         )
     };
+    let has_prompt = value.get("prompt").is_some();
     let request: Request = serde_json::from_value(value).map_err(|_| invalid())?;
-    if id.is_none() || request.prompt.trim().is_empty() {
+    if id.is_none() {
         return Err(invalid());
     }
     if request.version != 1 {
@@ -69,12 +80,21 @@ pub(super) fn parse_request(frame: &[u8]) -> Result<Request, Response> {
             "Unsupported control protocol version; expected 1.",
         ));
     }
-    if request.method != "steer" {
+    if !matches!(request.method.as_str(), "steer" | "stop") {
         return Err(build_rejection(
             id.as_deref(),
             "unknown_method",
-            "Unknown control method; expected steer.",
+            "Unknown control method; expected steer or stop.",
         ));
+    }
+    if (request.method == "steer"
+        && request
+            .prompt
+            .as_ref()
+            .is_none_or(|prompt| prompt.trim().is_empty()))
+        || (request.method == "stop" && has_prompt)
+    {
+        return Err(invalid());
     }
     Ok(request)
 }
@@ -104,5 +124,50 @@ pub(super) fn build_response(id: &str, result: Result<(), SteeringError>) -> Res
             accepted: None,
             ..build_rejection(Some(id), "acceptance_unknown", &message)
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn stop_is_prompt_free_and_steering_still_requires_a_nonempty_string() {
+        let stop = serde_json::to_value(Request::stop()).unwrap();
+        assert!(stop.get("prompt").is_none());
+        let parsed = parse_request(&serde_json::to_vec(&stop).unwrap()).unwrap();
+        assert_eq!(parsed.method, "stop");
+        for prompt in [json!(null), json!(""), json!("unexpected"), json!(7)] {
+            let mut invalid = stop.clone();
+            invalid["prompt"] = prompt;
+            let response = parse_request(&serde_json::to_vec(&invalid).unwrap()).unwrap_err();
+            assert_eq!(
+                response.request_id.as_deref(),
+                Some(parsed.request_id.as_str())
+            );
+            assert_eq!(response.error.unwrap().code, "invalid_request");
+        }
+        let mut steer = stop;
+        steer["method"] = json!("steer");
+        for prompt in [
+            None,
+            Some(json!(null)),
+            Some(json!("  ")),
+            Some(json!(false)),
+        ] {
+            if let Some(prompt) = prompt {
+                steer["prompt"] = prompt;
+            }
+            assert!(parse_request(&serde_json::to_vec(&steer).unwrap()).is_err());
+        }
+        steer["prompt"] = json!(" keep whitespace 雪 ");
+        assert_eq!(
+            parse_request(&serde_json::to_vec(&steer).unwrap())
+                .unwrap()
+                .prompt
+                .as_deref(),
+            Some(" keep whitespace 雪 ")
+        );
     }
 }

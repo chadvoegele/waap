@@ -105,6 +105,17 @@ fn run_agent_with_backend(
             }
             Ok(ExitCode::SUCCESS)
         }
+        Ok(RunOutcome::Aborted) => {
+            transition_and_commit_status(
+                waap_root,
+                output_format,
+                agent_id,
+                AgentStatus::Aborted,
+                "Aborted agent",
+                &format!("waap agent aborted {agent_id}"),
+            )?;
+            Ok(ExitCode::SUCCESS)
+        }
         Ok(RunOutcome::Failed(code)) => {
             mark_failed(waap_root, output_format, agent_id)?;
             Ok(code)
@@ -181,18 +192,22 @@ impl AgentApp {
 
     pub(super) async fn run(&mut self) -> io::Result<RunOutcome> {
         use futures_util::FutureExt;
-        let outcome = {
-            let wait = std::panic::AssertUnwindSafe(self.run.run()).catch_unwind();
-            tokio::pin!(wait);
-            let result = tokio::select! {
-                result = &mut wait => result,
-                control = self.control.run() => {
-                    if let Err(error) = control { log::error!("control server failed: {error}"); }
-                    wait.await
-                }
-            };
-            result.unwrap_or_else(|_| Err(io::Error::other("agent wait panicked")))
-        };
+        let (shutdown, stopped) = tokio::sync::oneshot::channel();
+        let (outcome, control) = tokio::join!(
+            async {
+                let result = std::panic::AssertUnwindSafe(self.run.run())
+                    .catch_unwind()
+                    .await;
+                let _ = shutdown.send(());
+                result.unwrap_or_else(|_| Err(io::Error::other("agent wait panicked")))
+            },
+            self.control.run_until(async {
+                let _ = stopped.await;
+            }),
+        );
+        if let Err(error) = control {
+            log::error!("control server failed: {error}");
+        }
         let outcome = collapse_errors(outcome, self.control.close());
         collapse_errors(outcome, self.cleanup().await)
     }
