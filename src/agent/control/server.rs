@@ -93,8 +93,8 @@ impl ControlServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::backend::CommandError;
     use crate::agent::commands::Command;
+    use crate::agent::commands::CommandError;
     use crate::agent::control::protocol::{Request, Response};
     use crate::agent::control::socket::{SocketPath, MAX_FRAME_BYTES};
     use crate::root::find_control_root_in;
@@ -155,7 +155,7 @@ mod tests {
                 else {
                     panic!("expected steering command")
                 };
-                request.respond(Err(crate::agent::backend::CommandError::not_implemented(
+                request.respond(Err(crate::agent::commands::CommandError::not_implemented(
                     "claude", "steering",
                 )));
             }

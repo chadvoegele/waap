@@ -21,8 +21,9 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(30);
 pub(in crate::agent) mod tests {
     use super::socket::MAX_FRAME_BYTES;
     use super::*;
-    use crate::agent::backend::{AgentSessionRun, CommandError, RunOutcome, Runner};
+    use crate::agent::backend::{AgentSessionRun, RunOutcome, Runner};
     use crate::agent::commands::CommandDispatcher;
+    use crate::agent::commands::CommandError;
     use crate::root::{find_control_root_in, ControlRoot};
     use serde_json::{json, Value};
     use std::fs;

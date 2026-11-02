@@ -498,8 +498,8 @@ mod tests {
         prompt_payload, OpencodeBackend, OpencodeRunConfig, RunOutcome, StartContext,
     };
 
-    use crate::agent::backend::CommandError;
     use crate::agent::commands::CommandDispatcher;
+    use crate::agent::commands::CommandError;
     use futures_util::FutureExt;
     use std::time::{Duration, Instant};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

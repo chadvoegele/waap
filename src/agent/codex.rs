@@ -21,11 +21,11 @@ use tokio::io::{
 use tokio::process::{ChildStdin, ChildStdout, Command as ProcessCommand};
 use tokio::sync::mpsc::Receiver;
 
-use super::commands::{Command, CommandRequest, CommandResult};
+use super::commands::{Command, CommandError, CommandRequest, CommandResult};
 
 use serde_json::{json, Value as JsonValue};
 
-use super::backend::{AgentSessionRun, CommandError, RunOutcome, Runner, StartContext};
+use super::backend::{AgentSessionRun, RunOutcome, Runner, StartContext};
 use super::process::AgentProcess;
 use super::{AgentRunOptions, ReasoningEffort};
 
@@ -95,7 +95,7 @@ pub(super) struct CodexRunner {
 impl CodexRunner {
     pub(super) async fn run(
         &mut self,
-        mut steering_receiver: Receiver<Command>,
+        mut command_receiver: Receiver<Command>,
     ) -> io::Result<RunOutcome> {
         let interrupt = &mut self.interrupt;
         let sigint = &mut self.sigint;
@@ -108,7 +108,7 @@ impl CodexRunner {
                 async {
                     tokio::select! { _ = interrupt.recv() => {}, _ = sigint.recv() => {} }
                 },
-                &mut steering_receiver,
+                &mut command_receiver,
             )
             .await;
         let status = status?;
@@ -434,14 +434,6 @@ fn reject(code: &'static str, message: &str) -> CommandError {
     }
 }
 
-fn build_acceptance_unknown_error(reason: &str) -> CommandError {
-    CommandError::AcceptanceUnknown {
-        message: format!(
-            "Codex control acceptance is unknown: {reason}; do not retry automatically"
-        ),
-    }
-}
-
 struct PendingWrite {
     id: i64,
     bytes: Vec<u8>,
@@ -458,7 +450,7 @@ impl PendingSteer {
     fn expire(&mut self, now: Instant) {
         if now >= self.request.deadline && self.request.has_reply_sender() {
             self.request.respond(Err(if self.write_started {
-                build_acceptance_unknown_error("acknowledgement deadline expired")
+                CommandError::acceptance_unknown("acknowledgement deadline expired")
             } else {
                 reject("timeout", "Steering request expired before Codex dispatch")
             }));
@@ -482,10 +474,14 @@ impl PendingInterrupt {
         if Instant::now() < self.deadline {
             return Ok(());
         }
+        if self.acknowledged {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Codex accepted interruption but did not complete within 30 seconds",
+            ));
+        }
         let error = if self.write_started {
-            build_acceptance_unknown_error(
-                "interrupt acknowledgement or completion deadline expired",
-            )
+            CommandError::acceptance_unknown("interrupt acknowledgement deadline expired")
         } else {
             reject(
                 "timeout",
@@ -520,7 +516,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> CodexCl
         thread_id: &str,
         prompt: &str,
         interrupt: impl std::future::Future<Output = ()>,
-        steering_receiver: &mut Receiver<Command>,
+        command_receiver: &mut Receiver<Command>,
     ) -> io::Result<TurnStatus> {
         let mut turn = TurnState {
             thread_id,
@@ -603,7 +599,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> CodexCl
                         Err(error) => return Err(error),
                     }
                 }
-                request = steering_receiver.recv(), if channel_open => {
+                request = command_receiver.recv(), if channel_open => {
                     match request {
                         Some(Command::Steer { prompt, request }) => self.dispatch_steering(&mut turn, prompt, request),
                         Some(Command::Stop(request)) => Self::dispatch_stop(&mut turn, Some(request)),
@@ -953,7 +949,7 @@ fn parse_interrupt_response(message: &JsonValue) -> CommandResult {
                 "Codex rejected turn/interrupt; verify that the turn is active",
             ));
         }
-        return Err(build_acceptance_unknown_error(
+        return Err(CommandError::acceptance_unknown(
             "invalid turn/interrupt error",
         ));
     }
@@ -962,7 +958,7 @@ fn parse_interrupt_response(message: &JsonValue) -> CommandResult {
         .and_then(JsonValue::as_object)
         .is_none_or(|result| !result.is_empty())
     {
-        return Err(build_acceptance_unknown_error(
+        return Err(CommandError::acceptance_unknown(
             "invalid turn/interrupt acknowledgement",
         ));
     }
@@ -975,12 +971,12 @@ fn parse_steering_response(message: &JsonValue, expected_turn: &str) -> CommandR
             error.get("code").and_then(JsonValue::as_i64),
             error.get("message").and_then(JsonValue::as_str),
         ) else {
-            return Err(build_acceptance_unknown_error(
+            return Err(CommandError::acceptance_unknown(
                 "the server returned an invalid turn/steer error",
             ));
         };
         if message.get("result").is_some() {
-            return Err(build_acceptance_unknown_error(
+            return Err(CommandError::acceptance_unknown(
                 "the server returned both a result and an error",
             ));
         }
@@ -999,7 +995,7 @@ fn parse_steering_response(message: &JsonValue, expected_turn: &str) -> CommandR
         .and_then(JsonValue::as_str)
         != Some(expected_turn)
     {
-        return Err(build_acceptance_unknown_error(
+        return Err(CommandError::acceptance_unknown(
             "the server returned an invalid turn/steer acknowledgement",
         ));
     }
@@ -1125,7 +1121,7 @@ mod steering_tests {
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
         let output = CapturedOutput::default();
-        let (dispatcher, steering_receiver) = create_test_dispatcher();
+        let (dispatcher, command_receiver) = create_test_dispatcher();
         let mailbox = TestMailbox {
             dispatcher,
             finished: AtomicBool::new(false),
@@ -1134,7 +1130,7 @@ mod steering_tests {
         let (interrupt, mut interrupts) = tokio::sync::watch::channel(false);
         let result = thread::scope(|scope| {
             let worker = scope.spawn(|| {
-                let mut steering_receiver = steering_receiver;
+                let mut command_receiver = command_receiver;
                 let result = crate::agent::runtime::block_on(async {
                     let (reader, writer) = tokio::net::UnixStream::from_std(stream)
                         .unwrap()
@@ -1154,11 +1150,11 @@ mod steering_tests {
                             async {
                                 interrupts.changed().await.unwrap();
                             },
-                            &mut steering_receiver,
+                            &mut command_receiver,
                         )
                         .await
                 });
-                drop(steering_receiver);
+                drop(command_receiver);
                 mailbox.finished.store(true, Ordering::Release);
                 result
             });
@@ -1467,6 +1463,48 @@ mod steering_tests {
             );
             assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn accepted_stop_bounds_completion_without_retracting_acceptance() {
+        let mut client = CodexClient {
+            reader: io::Cursor::new(Vec::<u8>::new()),
+            writer: Vec::<u8>::new(),
+            out: Vec::<u8>::new(),
+            next_id: 2,
+            model: None,
+            reasoning_effort: None,
+        };
+        let mut turn = TurnState {
+            thread_id: "th",
+            start_request_id: 0,
+            turn_id: Some("tu".into()),
+            early_completion: None,
+            pending_steer: None,
+            pending_writes: VecDeque::new(),
+            interrupt_request_id: Some(1),
+            interrupt: None,
+            completion: None,
+        };
+        let (request, reply) = CommandRequest::new(deadline());
+        CodexClient::<(), (), Vec<u8>>::dispatch_stop(&mut turn, Some(request));
+        let before_ack = Instant::now();
+        assert!(client
+            .process_message(&mut turn, &json!({"id": 1, "result": {}}))
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(reply.await.unwrap(), Ok(()));
+        let stop = turn.interrupt.as_mut().unwrap();
+        assert!(stop.acknowledged);
+        assert!(stop.deadline >= before_ack + INTERRUPT_TIMEOUT);
+        assert!(stop.deadline <= Instant::now() + INTERRUPT_TIMEOUT);
+        assert!(stop.check_deadline().is_ok());
+        stop.deadline = Instant::now();
+        let error = stop.check_deadline().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("accepted interruption"));
+        assert!(!stop.request.as_ref().unwrap().has_reply_sender());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1961,14 +1999,14 @@ mod steering_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn caller_timeout_is_unknown_and_owner_discards_expired_queued_request() {
-        let (dispatcher, mut steering_receiver) = create_test_dispatcher();
+        let (dispatcher, mut command_receiver) = create_test_dispatcher();
         assert!(matches!(
             dispatcher
                 .steer("queued", Instant::now() + Duration::from_millis(10))
                 .await,
             Err(CommandError::AcceptanceUnknown { .. })
         ));
-        let Command::Steer { prompt, request } = steering_receiver.recv().await.unwrap() else {
+        let Command::Steer { prompt, request } = command_receiver.recv().await.unwrap() else {
             panic!("expected steering command")
         };
         assert!(Instant::now() >= request.deadline);
@@ -1999,15 +2037,15 @@ mod steering_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn runner_exit_without_a_reply_is_unknown_and_later_calls_are_rejected() {
-        let (dispatcher, mut steering_receiver) = create_test_dispatcher();
+        let (dispatcher, mut command_receiver) = create_test_dispatcher();
         let (result, ()) = tokio::join!(dispatcher.steer("queued", deadline()), async {
-            drop(steering_receiver.recv().await.unwrap());
+            drop(command_receiver.recv().await.unwrap());
         });
         assert!(matches!(
             result,
             Err(CommandError::AcceptanceUnknown { .. })
         ));
-        drop(steering_receiver);
+        drop(command_receiver);
         assert_rejected(
             dispatcher.steer("after exit", deadline()).await,
             "agent_exited",

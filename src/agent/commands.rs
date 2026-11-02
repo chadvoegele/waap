@@ -1,7 +1,36 @@
 use std::time::Instant;
 use tokio::sync::{mpsc, oneshot};
 
-use super::backend::CommandError;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum CommandError {
+    Rejected { code: &'static str, message: String },
+    AcceptanceUnknown { message: String },
+}
+
+impl CommandError {
+    pub(super) fn not_implemented(backend: &str, method: &str) -> Self {
+        Self::Rejected {
+            code: "not_implemented",
+            message: format!("{method} not implemented for backend {backend}"),
+        }
+    }
+    pub(super) fn acceptance_unknown(reason: &str) -> Self {
+        Self::AcceptanceUnknown {
+            message: format!("Control acceptance is unknown: {reason}; do not retry automatically"),
+        }
+    }
+}
+
+impl std::fmt::Display for CommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected { message, .. } | Self::AcceptanceUnknown { message } => {
+                f.write_str(message)
+            }
+        }
+    }
+}
+impl std::error::Error for CommandError {}
 
 pub(super) type CommandResult = Result<(), CommandError>;
 

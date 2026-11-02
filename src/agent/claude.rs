@@ -159,8 +159,9 @@ mod tests {
         ClaudeRunConfig,
     };
 
-    use crate::agent::backend::{CommandError, RunOutcome};
+    use crate::agent::backend::RunOutcome;
     use crate::agent::commands::CommandDispatcher;
+    use crate::agent::commands::CommandError;
     use futures_util::FutureExt;
     use std::process::Stdio;
     use std::time::{Duration, Instant};

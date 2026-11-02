@@ -2,8 +2,9 @@ use std::future::Future;
 use std::io;
 use tokio::sync::mpsc::Receiver;
 
-use super::backend::{CommandError, RunOutcome};
+use super::backend::RunOutcome;
 use super::commands::Command;
+use super::commands::CommandError;
 
 pub(super) async fn await_with_unsupported_commands<F>(
     wait: F,

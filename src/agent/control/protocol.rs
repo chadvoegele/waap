@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::super::backend::CommandError;
+use super::super::commands::CommandError;
 use super::super::commands::{CommandResult, Operation};
 
 #[derive(Debug, Serialize)]
