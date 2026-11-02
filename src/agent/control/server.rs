@@ -1,8 +1,10 @@
 use super::super::commands::CommandDispatcher;
-use super::handler::ControlRequestHandler;
+use super::protocol::{build_rejection, build_response, parse_request};
 use super::socket::{SocketConnection, SocketListener};
+use super::{ACK_TIMEOUT, IO_TIMEOUT};
 use futures_util::{stream::FuturesUnordered, FutureExt, StreamExt};
 use std::io;
+use std::time::Instant;
 
 const MAX_HANDLERS: usize = 8;
 
@@ -20,7 +22,6 @@ impl ControlServer {
     }
 
     pub(in crate::agent) async fn run(&self) -> io::Result<()> {
-        let handler = ControlRequestHandler::new(self.dispatcher.clone());
         let mut handlers = FuturesUnordered::new();
         loop {
             tokio::select! {
@@ -32,7 +33,7 @@ impl ControlServer {
                     match connection {
                         Ok(stream) if handlers.len() < MAX_HANDLERS => {
                             handlers.push(std::panic::AssertUnwindSafe(
-                                handler.handle(SocketConnection::new(stream))
+                                self.handle(SocketConnection::new(stream))
                             ).catch_unwind());
                         }
                         Ok(stream) => drop(stream),
@@ -43,6 +44,31 @@ impl ControlServer {
             }
         }
     }
+
+    async fn handle(&self, mut connection: SocketConnection) -> io::Result<()> {
+        let response = match connection.read_frame(IO_TIMEOUT).await {
+            Ok(frame) => match parse_request(&frame) {
+                Ok(request) => {
+                    let steering_result = self
+                        .dispatcher
+                        .steer(&request.prompt, Instant::now() + ACK_TIMEOUT)
+                        .await;
+                    build_response(&request.request_id, steering_result)
+                }
+                Err(response) => response,
+            },
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => build_rejection(
+                None,
+                "request_too_large",
+                "Request exceeds 64 KiB including newline.",
+            ),
+            Err(error) => return Err(error),
+        };
+        connection
+            .write_frame(&serde_json::to_vec(&response)?)
+            .await
+    }
+
     pub(in crate::agent) fn close(&mut self) -> io::Result<()> {
         self.listener.close()
     }
@@ -54,15 +80,110 @@ mod tests {
     use crate::agent::backend::SteeringError;
     use crate::agent::commands::Command;
     use crate::agent::control::protocol::{Request, Response};
-    use crate::agent::control::socket::SocketPath;
-    use crate::agent::control::IO_TIMEOUT;
+    use crate::agent::control::socket::{SocketPath, MAX_FRAME_BYTES};
     use crate::root::find_control_root_in;
     use crate::test_git::init_repo_with_commit;
+    use serde_json::{json, Value};
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unsupported_backend_rejection_is_forwarded() {
+        let request = Request::steer("steer");
+        let id = request.request_id.clone();
+        let (_repo, _runtime, control, _path, mut commands) = fixture().await;
+        let (server, client) = tokio::net::UnixStream::pair().unwrap();
+        let mut client = SocketConnection::new(client);
+        let (result, response, ()) = tokio::join!(
+            control.handle(SocketConnection::new(server)),
+            async {
+                client
+                    .write_frame(&serde_json::to_vec(&request).unwrap())
+                    .await
+                    .unwrap();
+                serde_json::from_slice::<Response>(&client.read_frame(IO_TIMEOUT).await.unwrap())
+                    .unwrap()
+            },
+            async {
+                let crate::agent::commands::Command::Steer(mut request) =
+                    commands.recv().await.unwrap();
+                request.respond(Err(crate::agent::backend::SteeringError::not_implemented(
+                    "claude",
+                )));
+            }
+        );
+        result.unwrap();
+        assert_eq!(response.request_id.as_deref(), Some(id.as_str()));
+        assert_eq!(response.accepted, Some(false));
+        assert_eq!(response.error.unwrap().code, "not_implemented");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn socket_rejects_invalid_schemas_without_backend_dispatch_or_prompt_disclosure() {
+        let secret = "private prompt";
+        let valid = serde_json::to_value(Request::steer(secret)).unwrap();
+        let mut cases = vec![
+            (b"not JSON\n".to_vec(), "invalid_request", false),
+            (b"\xff\n".to_vec(), "invalid_request", false),
+            (b"[]\n".to_vec(), "invalid_request", false),
+        ];
+        for (key, value, code, trusted_id) in [
+            ("version", json!(2), "unsupported_version", true),
+            ("version", json!("1"), "invalid_request", true),
+            ("method", json!("start"), "unknown_method", true),
+            ("method", json!(1), "invalid_request", true),
+            ("request_id", json!("untrusted"), "invalid_request", false),
+            ("request_id", Value::Null, "invalid_request", false),
+            ("prompt", json!(" \n\t\u{2003}"), "invalid_request", true),
+            ("prompt", json!(7), "invalid_request", true),
+            ("threadId", json!("not allowed"), "invalid_request", true),
+        ] {
+            let mut value_to_send = valid.clone();
+            value_to_send[key] = value;
+            let mut bytes = serde_json::to_vec(&value_to_send).unwrap();
+            bytes.push(b'\n');
+            cases.push((bytes, code, trusted_id));
+        }
+        for key in ["version", "method", "prompt", "request_id"] {
+            let mut value = valid.clone();
+            value.as_object_mut().unwrap().remove(key);
+            let mut bytes = serde_json::to_vec(&value).unwrap();
+            bytes.push(b'\n');
+            cases.push((bytes, "invalid_request", key != "request_id"));
+        }
+        cases.push((vec![b'x'; MAX_FRAME_BYTES], "request_too_large", false));
+        let (_repo, _runtime, control, _path, mut commands) = fixture().await;
+        for (bytes, code, trusted_id) in cases {
+            let (server, mut client) = UnixStream::pair().unwrap();
+            let (result, value) =
+                tokio::join!(control.handle(SocketConnection::new(server)), async {
+                    client.write_all(&bytes).await.unwrap();
+                    serde_json::from_slice::<Value>(
+                        &SocketConnection::new(client)
+                            .read_frame(IO_TIMEOUT)
+                            .await
+                            .unwrap(),
+                    )
+                    .unwrap()
+                });
+            result.unwrap();
+            assert!(commands.try_recv().is_err());
+            assert_eq!(value["accepted"], false);
+            assert_eq!(value["error"]["code"], code);
+            assert_eq!(
+                value["request_id"],
+                if trusted_id {
+                    valid["request_id"].clone()
+                } else {
+                    Value::Null
+                }
+            );
+            assert!(!value.to_string().contains(secret));
+        }
+    }
 
     async fn fixture() -> (
         tempfile::TempDir,

@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 pub(super) mod client;
-mod handler;
 mod protocol;
 mod server;
 mod socket;
@@ -16,11 +15,10 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 pub(in crate::agent) mod tests {
-    use super::handler::ControlRequestHandler;
     use super::socket::MAX_FRAME_BYTES;
     use super::*;
     use crate::agent::backend::{AgentSessionRun, RunOutcome, Runner, SteeringError};
-    use crate::agent::commands::{Command, CommandDispatcher};
+    use crate::agent::commands::CommandDispatcher;
     use crate::root::{find_control_root_in, ControlRoot};
     use serde_json::{json, Value};
     use std::fs;
@@ -124,21 +122,6 @@ pub(in crate::agent) mod tests {
             SocketConnection::new(tokio::net::UnixStream::from_std(stream)?)
                 .read_frame(IO_TIMEOUT)
                 .await
-        })
-    }
-
-    fn serve_connection(
-        stream: UnixStream,
-        runner: &FakeRunner<impl Fn(&str, Instant) -> Result<(), SteeringError>>,
-    ) -> io::Result<()> {
-        stream.set_nonblocking(true)?;
-        crate::agent::runtime::block_on(async {
-            let (dispatcher, mut commands) = CommandDispatcher::channel();
-            let handler = ControlRequestHandler::new(dispatcher);
-            tokio::select! {
-                result = handler.handle(SocketConnection::new(tokio::net::UnixStream::from_std(stream)?)) => result,
-                Some(Command::Steer(request)) = commands.recv() => { (runner.steer)(&request.message, request.deadline).unwrap(); panic!("unexpected dispatch"); }
-            }
         })
     }
 
@@ -252,66 +235,6 @@ pub(in crate::agent) mod tests {
             .await
             .unwrap();
         client.join().unwrap();
-    }
-
-    #[test]
-    fn socket_rejects_invalid_schemas_without_backend_dispatch_or_prompt_disclosure() {
-        let secret = "private prompt";
-        let valid: Value = serde_json::from_slice(&frame(secret)).unwrap();
-        let mut cases = vec![
-            (b"not JSON\n".to_vec(), "invalid_request", false),
-            (b"\xff\n".to_vec(), "invalid_request", false),
-            (b"[]\n".to_vec(), "invalid_request", false),
-        ];
-        for (key, value, code, trusted_id) in [
-            ("version", json!(2), "unsupported_version", true),
-            ("version", json!("1"), "invalid_request", true),
-            ("method", json!("start"), "unknown_method", true),
-            ("method", json!(1), "invalid_request", true),
-            ("request_id", json!("untrusted"), "invalid_request", false),
-            ("request_id", Value::Null, "invalid_request", false),
-            ("prompt", json!(" \n\t\u{2003}"), "invalid_request", true),
-            ("prompt", json!(7), "invalid_request", true),
-            ("threadId", json!("not allowed"), "invalid_request", true),
-        ] {
-            let mut value_to_send = valid.clone();
-            value_to_send[key] = value;
-            let mut bytes = serde_json::to_vec(&value_to_send).unwrap();
-            bytes.push(b'\n');
-            cases.push((bytes, code, trusted_id));
-        }
-        for key in ["version", "method", "prompt", "request_id"] {
-            let mut value = valid.clone();
-            value.as_object_mut().unwrap().remove(key);
-            let mut bytes = serde_json::to_vec(&value).unwrap();
-            bytes.push(b'\n');
-            cases.push((bytes, "invalid_request", key != "request_id"));
-        }
-        cases.push((vec![b'x'; MAX_FRAME_BYTES], "request_too_large", false));
-        for (bytes, code, trusted_id) in cases {
-            let (mut client, server) = UnixStream::pair().unwrap();
-            let (_complete, completion) = mpsc::channel();
-            let runner = FakeRunner {
-                completion: Arc::new(Mutex::new(completion)),
-                steer: |_: &str, _| panic!("invalid request dispatched"),
-            };
-            thread::scope(|scope| {
-                scope.spawn(|| serve_connection(server, &runner).unwrap());
-                client.write_all(&bytes).unwrap();
-                let value = read_response(client);
-                assert_eq!(value["accepted"], false);
-                assert_eq!(value["error"]["code"], code);
-                assert_eq!(
-                    value["request_id"],
-                    if trusted_id {
-                        valid["request_id"].clone()
-                    } else {
-                        Value::Null
-                    }
-                );
-                assert!(!value.to_string().contains(secret));
-            });
-        }
     }
 
     #[test]
