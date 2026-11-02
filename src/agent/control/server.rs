@@ -1,4 +1,4 @@
-use super::super::commands::CommandDispatcher;
+use super::super::commands::{CommandDispatcher, Operation};
 use super::protocol::{build_rejection, build_response, parse_request};
 use super::socket::{SocketConnection, SocketListener};
 use super::{ACK_TIMEOUT, IO_TIMEOUT};
@@ -63,14 +63,13 @@ impl ControlServer {
             Ok(frame) => match parse_request(&frame) {
                 Ok(request) => {
                     let deadline = Instant::now() + ACK_TIMEOUT;
-                    let steering_result = if request.method == "stop" {
-                        self.dispatcher.stop(deadline).await
-                    } else {
-                        self.dispatcher
-                            .steer(request.prompt.as_deref().unwrap(), deadline)
-                            .await
+                    let result = match request.operation {
+                        Operation::Steer { prompt } => {
+                            self.dispatcher.steer(&prompt, deadline).await
+                        }
+                        Operation::Stop {} => self.dispatcher.stop(deadline).await,
                     };
-                    build_response(&request.request_id, steering_result)
+                    build_response(&request.request_id, result)
                 }
                 Err(response) => response,
             },
@@ -94,7 +93,7 @@ impl ControlServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::backend::SteeringError;
+    use crate::agent::backend::CommandError;
     use crate::agent::commands::Command;
     use crate::agent::control::protocol::{Request, Response};
     use crate::agent::control::socket::{SocketPath, MAX_FRAME_BYTES};
@@ -151,13 +150,13 @@ mod tests {
                     .unwrap()
             },
             async {
-                let crate::agent::commands::Command::Steer(mut request) =
+                let crate::agent::commands::Command::Steer { mut request, .. } =
                     commands.recv().await.unwrap()
                 else {
                     panic!("expected steering command")
                 };
-                request.respond(Err(crate::agent::backend::SteeringError::not_implemented(
-                    "claude",
+                request.respond(Err(crate::agent::backend::CommandError::not_implemented(
+                    "claude", "steering",
                 )));
             }
         );
@@ -292,16 +291,16 @@ mod tests {
                     slow.write_all(b"{").await.unwrap();
                     clients.push(SocketConnection::new(slow));
                     let (request, mut fast) = send_request(&path, "fast").await;
-                    let Command::Steer(mut command) = commands.recv().await.unwrap() else { panic!("expected steering command") };
-                    assert_eq!(Some(command.message.as_str()), request.prompt.as_deref());
+                    let Command::Steer { prompt, request: mut command } = commands.recv().await.unwrap() else { panic!("expected steering command") };
+                    assert_eq!(crate::agent::commands::Operation::Steer { prompt }, request.operation);
                     command.respond(Ok(()));
                     let response = read_response(&mut fast).await;
                     assert_eq!(response.request_id, Some(request.request_id));
                     assert_eq!(response.accepted, Some(true));
                     for index in 1..MAX_HANDLERS {
                         let (request, client) = send_request(&path, &format!("held {index}")).await;
-                        let Command::Steer(command) = commands.recv().await.unwrap() else { panic!("expected steering command") };
-                        assert_eq!(Some(command.message.as_str()), request.prompt.as_deref());
+                        let Command::Steer { prompt, request: command } = commands.recv().await.unwrap() else { panic!("expected steering command") };
+                        assert_eq!(crate::agent::commands::Operation::Steer { prompt }, request.operation);
                         pending.push(command);
                         clients.push(client);
                     }
@@ -339,7 +338,7 @@ mod tests {
                 _ = async {
                     for _ in 0..MAX_HANDLERS {
                         let (_, client) = send_request(&path, "held").await;
-                        let Command::Steer(command) = commands.recv().await.unwrap() else { panic!("expected steering command") };
+                        let Command::Steer { request: command, .. } = commands.recv().await.unwrap() else { panic!("expected steering command") };
                         clients.push(client);
                         pending.push(command);
                     }
@@ -350,8 +349,8 @@ mod tests {
             tokio::select! {
                 result = &mut future => panic!("server exited: {result:?}"),
                 _ = async {
-                    let Command::Steer(mut command) = commands.recv().await.unwrap() else { panic!("expected steering command") };
-                    assert_eq!(Some(command.message.as_str()), request.prompt.as_deref());
+                    let Command::Steer { prompt, request: mut command } = commands.recv().await.unwrap() else { panic!("expected steering command") };
+                    assert_eq!(crate::agent::commands::Operation::Steer { prompt }, request.operation);
                     command.respond(Ok(()));
                     let response = read_response(&mut backlogged).await;
                     assert_eq!(response.request_id, Some(request.request_id));
@@ -374,12 +373,12 @@ mod tests {
                 _ = async {
                     for index in 0..MAX_HANDLERS * 2 {
                         let (request, mut client) = send_request(&path, &format!("request {index}")).await;
-                        let Command::Steer(mut command) = commands.recv().await.unwrap() else { panic!("expected steering command") };
-                        assert_eq!(Some(command.message.as_str()), request.prompt.as_deref());
+                        let Command::Steer { prompt, request: mut command } = commands.recv().await.unwrap() else { panic!("expected steering command") };
+                        assert_eq!(crate::agent::commands::Operation::Steer { prompt }, request.operation);
                         let (reply, accepted, code) = match index % 3 {
                             0 => (Ok(()), Some(true), None),
                             1 => (
-                                Err(SteeringError::Rejected {
+                                Err(CommandError::Rejected {
                                     code: "busy",
                                     message: "pending acknowledgement".into(),
                                 }),
@@ -387,7 +386,7 @@ mod tests {
                                 Some("busy"),
                             ),
                             _ => (
-                                Err(SteeringError::acceptance_unknown("lost acknowledgement")),
+                                Err(CommandError::acceptance_unknown("lost acknowledgement")),
                                 None,
                                 Some("acceptance_unknown"),
                             ),

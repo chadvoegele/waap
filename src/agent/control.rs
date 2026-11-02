@@ -21,7 +21,7 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(30);
 pub(in crate::agent) mod tests {
     use super::socket::MAX_FRAME_BYTES;
     use super::*;
-    use crate::agent::backend::{AgentSessionRun, RunOutcome, Runner, SteeringError};
+    use crate::agent::backend::{AgentSessionRun, CommandError, RunOutcome, Runner};
     use crate::agent::commands::CommandDispatcher;
     use crate::root::{find_control_root_in, ControlRoot};
     use serde_json::{json, Value};
@@ -46,7 +46,7 @@ pub(in crate::agent) mod tests {
     }
 
     impl Fixture {
-        async fn wait<F: Fn(&str, Instant) -> Result<(), SteeringError>>(
+        async fn wait<F: Fn(&str, Instant) -> Result<(), CommandError>>(
             self,
             runner: &FakeRunner<F>,
         ) -> io::Result<RunOutcome> {

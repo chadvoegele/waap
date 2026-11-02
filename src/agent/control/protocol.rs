@@ -2,34 +2,33 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::super::backend::SteeringError;
+use super::super::backend::CommandError;
+use super::super::commands::{CommandResult, Operation};
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Serialize)]
 pub(super) struct Request {
     pub(super) version: u64,
     pub(super) request_id: String,
-    pub(super) method: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) prompt: Option<String>,
+    #[serde(flatten)]
+    pub(super) operation: Operation,
 }
 
 impl Request {
     pub(super) fn stop() -> Self {
-        Self {
-            version: 1,
-            request_id: Uuid::new_v4().to_string(),
-            method: "stop".into(),
-            prompt: None,
-        }
+        Self::new(Operation::Stop {})
     }
 
     pub(super) fn steer(prompt: &str) -> Self {
+        Self::new(Operation::Steer {
+            prompt: prompt.into(),
+        })
+    }
+
+    fn new(operation: Operation) -> Self {
         Self {
             version: 1,
             request_id: Uuid::new_v4().to_string(),
-            method: "steer".to_string(),
-            prompt: Some(prompt.to_string()),
+            operation,
         }
     }
 }
@@ -68,34 +67,41 @@ pub(super) fn parse_request(frame: &[u8]) -> Result<Request, Response> {
             "Expected version, UUID request_id, and method; steer requires a nonempty prompt and stop forbids prompt.",
         )
     };
-    let has_prompt = value.get("prompt").is_some();
-    let request: Request = serde_json::from_value(value).map_err(|_| invalid())?;
-    if id.is_none() {
-        return Err(invalid());
-    }
-    if request.version != 1 {
+    let mut fields = value.as_object().cloned().ok_or_else(invalid)?;
+    let version = fields
+        .remove("version")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(invalid)?;
+    fields.remove("request_id");
+    let request_id = id.clone().ok_or_else(invalid)?;
+    let method = fields
+        .get("method")
+        .and_then(Value::as_str)
+        .ok_or_else(invalid)?;
+    if version != 1 {
         return Err(build_rejection(
-            id.as_deref(),
+            Some(&request_id),
             "unsupported_version",
             "Unsupported control protocol version; expected 1.",
         ));
     }
-    if !matches!(request.method.as_str(), "steer" | "stop") {
+    if !matches!(method, "steer" | "stop") {
         return Err(build_rejection(
-            id.as_deref(),
+            Some(&request_id),
             "unknown_method",
             "Unknown control method; expected steer or stop.",
         ));
     }
-    if (request.method == "steer"
-        && request
-            .prompt
-            .as_ref()
-            .is_none_or(|prompt| prompt.trim().is_empty()))
-        || (request.method == "stop" && has_prompt)
-    {
+    let operation: Operation =
+        serde_json::from_value(Value::Object(fields)).map_err(|_| invalid())?;
+    if matches!(&operation, Operation::Steer { prompt } if prompt.trim().is_empty()) {
         return Err(invalid());
     }
+    let request = Request {
+        version,
+        request_id,
+        operation,
+    };
     Ok(request)
 }
 
@@ -111,7 +117,7 @@ pub(super) fn build_rejection(id: Option<&str>, code: &str, message: &str) -> Re
     }
 }
 
-pub(super) fn build_response(id: &str, result: Result<(), SteeringError>) -> Response {
+pub(super) fn build_response(id: &str, result: CommandResult) -> Response {
     match result {
         Ok(()) => Response {
             version: 1,
@@ -119,8 +125,8 @@ pub(super) fn build_response(id: &str, result: Result<(), SteeringError>) -> Res
             accepted: Some(true),
             error: None,
         },
-        Err(SteeringError::Rejected { code, message }) => build_rejection(Some(id), code, &message),
-        Err(SteeringError::AcceptanceUnknown { message }) => Response {
+        Err(CommandError::Rejected { code, message }) => build_rejection(Some(id), code, &message),
+        Err(CommandError::AcceptanceUnknown { message }) => Response {
             accepted: None,
             ..build_rejection(Some(id), "acceptance_unknown", &message)
         },
@@ -133,11 +139,54 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn typed_variants_preserve_wire_shape_and_reject_extra_fields() {
+        for request in [Request::stop(), Request::steer("  Unicode 雪  ")] {
+            let wire = serde_json::to_value(&request).unwrap();
+            assert_eq!(wire["version"], 1);
+            assert_eq!(wire["request_id"], request.request_id);
+            assert_eq!(
+                wire["method"],
+                match request.operation {
+                    Operation::Steer { .. } => "steer",
+                    Operation::Stop {} => "stop",
+                }
+            );
+            let parsed = parse_request(&serde_json::to_vec(&wire).unwrap()).unwrap();
+            assert_eq!(parsed.operation, request.operation);
+            for extra in ["unexpected", "deadline", "payload"] {
+                let mut invalid = wire.clone();
+                invalid[extra] = json!(null);
+                let response = parse_request(&serde_json::to_vec(&invalid).unwrap()).unwrap_err();
+                assert_eq!(
+                    response.request_id.as_deref(),
+                    Some(request.request_id.as_str())
+                );
+                assert_eq!(response.error.unwrap().code, "invalid_request");
+            }
+            for (key, value, code) in [
+                ("version", json!(2), "unsupported_version"),
+                ("method", json!("future"), "unknown_method"),
+                ("method", json!(false), "invalid_request"),
+                ("version", json!(null), "invalid_request"),
+            ] {
+                let mut invalid = wire.clone();
+                invalid[key] = value;
+                let response = parse_request(&serde_json::to_vec(&invalid).unwrap()).unwrap_err();
+                assert_eq!(
+                    response.request_id.as_deref(),
+                    Some(request.request_id.as_str())
+                );
+                assert_eq!(response.error.unwrap().code, code);
+            }
+        }
+    }
+
+    #[test]
     fn stop_is_prompt_free_and_steering_still_requires_a_nonempty_string() {
         let stop = serde_json::to_value(Request::stop()).unwrap();
         assert!(stop.get("prompt").is_none());
         let parsed = parse_request(&serde_json::to_vec(&stop).unwrap()).unwrap();
-        assert_eq!(parsed.method, "stop");
+        assert_eq!(parsed.operation, Operation::Stop {});
         for prompt in [json!(null), json!(""), json!("unexpected"), json!(7)] {
             let mut invalid = stop.clone();
             invalid["prompt"] = prompt;
@@ -165,9 +214,10 @@ mod tests {
         assert_eq!(
             parse_request(&serde_json::to_vec(&steer).unwrap())
                 .unwrap()
-                .prompt
-                .as_deref(),
-            Some(" keep whitespace 雪 ")
+                .operation,
+            Operation::Steer {
+                prompt: " keep whitespace 雪 ".into()
+            }
         );
     }
 }

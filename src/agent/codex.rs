@@ -21,11 +21,11 @@ use tokio::io::{
 use tokio::process::{ChildStdin, ChildStdout, Command as ProcessCommand};
 use tokio::sync::mpsc::Receiver;
 
-use super::commands::{Command, CommandRequest, SteeringResult};
+use super::commands::{Command, CommandRequest, CommandResult};
 
 use serde_json::{json, Value as JsonValue};
 
-use super::backend::{AgentSessionRun, RunOutcome, Runner, StartContext, SteeringError};
+use super::backend::{AgentSessionRun, CommandError, RunOutcome, Runner, StartContext};
 use super::process::AgentProcess;
 use super::{AgentRunOptions, ReasoningEffort};
 
@@ -427,15 +427,15 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> Code
     }
 }
 
-fn reject(code: &'static str, message: &str) -> SteeringError {
-    SteeringError::Rejected {
+fn reject(code: &'static str, message: &str) -> CommandError {
+    CommandError::Rejected {
         code,
         message: message.to_string(),
     }
 }
 
-fn build_acceptance_unknown_error(reason: &str) -> SteeringError {
-    SteeringError::AcceptanceUnknown {
+fn build_acceptance_unknown_error(reason: &str) -> CommandError {
+    CommandError::AcceptanceUnknown {
         message: format!(
             "Codex control acceptance is unknown: {reason}; do not retry automatically"
         ),
@@ -605,7 +605,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> CodexCl
                 }
                 request = steering_receiver.recv(), if channel_open => {
                     match request {
-                        Some(Command::Steer(request)) => self.dispatch_steering(&mut turn, request),
+                        Some(Command::Steer { prompt, request }) => self.dispatch_steering(&mut turn, prompt, request),
                         Some(Command::Stop(request)) => Self::dispatch_stop(&mut turn, Some(request)),
                         None => channel_open = false,
                     }
@@ -715,7 +715,12 @@ impl<R, W, O: AsyncWrite + Unpin> CodexClient<R, W, O> {
         });
     }
 
-    fn dispatch_steering(&mut self, turn: &mut TurnState<'_>, mut request: CommandRequest) {
+    fn dispatch_steering(
+        &mut self,
+        turn: &mut TurnState<'_>,
+        prompt: String,
+        mut request: CommandRequest,
+    ) {
         if turn.interrupt.is_some() {
             request.respond(Err(reject("stopping", "Codex interruption is pending")));
             return;
@@ -744,7 +749,7 @@ impl<R, W, O: AsyncWrite + Unpin> CodexClient<R, W, O> {
         let params = json!({
             "threadId": turn.thread_id,
             "expectedTurnId": turn_id,
-            "input": [{ "type": "text", "text": request.message }],
+            "input": [{ "type": "text", "text": prompt }],
         });
         let id = self.enqueue_request(turn, METHOD_TURN_STEER, params);
         turn.pending_steer = Some(PendingSteer {
@@ -937,7 +942,7 @@ impl<R, W, O: AsyncWrite + Unpin> CodexClient<R, W, O> {
     }
 }
 
-fn parse_interrupt_response(message: &JsonValue) -> SteeringResult {
+fn parse_interrupt_response(message: &JsonValue) -> CommandResult {
     if let Some(error) = message.get("error") {
         if error.get("code").and_then(JsonValue::as_i64).is_some()
             && error.get("message").and_then(JsonValue::as_str).is_some()
@@ -964,7 +969,7 @@ fn parse_interrupt_response(message: &JsonValue) -> SteeringResult {
     Ok(())
 }
 
-fn parse_steering_response(message: &JsonValue, expected_turn: &str) -> SteeringResult {
+fn parse_steering_response(message: &JsonValue, expected_turn: &str) -> CommandResult {
     if let Some(error) = message.get("error") {
         let (Some(code), Some(diagnostic)) = (
             error.get("code").and_then(JsonValue::as_i64),
@@ -1055,11 +1060,11 @@ mod steering_tests {
     }
 
     impl TestMailbox {
-        fn stop(&self) -> SteeringResult {
+        fn stop(&self) -> CommandResult {
             crate::agent::runtime::block_on(self.dispatcher.stop(deadline()))
         }
 
-        fn steer(&self, prompt: &str, deadline: Instant) -> SteeringResult {
+        fn steer(&self, prompt: &str, deadline: Instant) -> CommandResult {
             crate::agent::runtime::block_on(self.dispatcher.steer(prompt, deadline))
         }
     }
@@ -1175,9 +1180,9 @@ mod steering_tests {
         Instant::now() + Duration::from_secs(2)
     }
 
-    fn assert_rejected(result: SteeringResult, code: &str) {
+    fn assert_rejected(result: CommandResult, code: &str) {
         assert!(
-            matches!(&result, Err(SteeringError::Rejected { code: actual, .. }) if *actual == code),
+            matches!(&result, Err(CommandError::Rejected { code: actual, .. }) if *actual == code),
             "{result:?}"
         );
     }
@@ -1214,11 +1219,15 @@ mod steering_tests {
                 while output.0.lock().unwrap().is_empty() {
                     tokio::task::yield_now().await;
                 }
-                let (request, reply_receiver) = CommandRequest::new(
-                    "expires".to_string(),
-                    Instant::now() + Duration::from_millis(100),
-                );
-                sender.send(Command::Steer(request)).await.unwrap();
+                let (request, reply_receiver) =
+                    CommandRequest::new(Instant::now() + Duration::from_millis(100));
+                sender
+                    .send(Command::Steer {
+                        prompt: "expires".into(),
+                        request,
+                    })
+                    .await
+                    .unwrap();
                 line.clear();
                 server.read_line(&mut line).await.unwrap();
                 assert_eq!(
@@ -1230,7 +1239,7 @@ mod steering_tests {
                         .await
                         .unwrap()
                         .unwrap(),
-                    Err(SteeringError::AcceptanceUnknown { .. })
+                    Err(CommandError::AcceptanceUnknown { .. })
                 ));
                 let complete = json!({"method":METHOD_TURN_COMPLETED,"params":{"threadId":"th","turn":{"id":"tu","status":"completed"}}});
                 server
@@ -1434,10 +1443,8 @@ mod steering_tests {
                             .await
                             .unwrap();
                     }
-                    let (request, reply) = CommandRequest::new(
-                        String::new(),
-                        Instant::now() + Duration::from_millis(50),
-                    );
+                    let (request, reply) =
+                        CommandRequest::new(Instant::now() + Duration::from_millis(50));
                     sender.send(Command::Stop(request)).await.unwrap();
                     if active {
                         line.clear();
@@ -1451,7 +1458,7 @@ mod steering_tests {
                     if active {
                         assert!(matches!(
                             result,
-                            Err(SteeringError::AcceptanceUnknown { .. })
+                            Err(CommandError::AcceptanceUnknown { .. })
                         ));
                     } else {
                         assert_rejected(result, "timeout");
@@ -1487,10 +1494,10 @@ mod steering_tests {
             interrupt: None,
             completion: None,
         };
-        let (steer, _) = CommandRequest::new("prompt".into(), deadline());
-        client.dispatch_steering(&mut turn, steer);
+        let (steer, _) = CommandRequest::new(deadline());
+        client.dispatch_steering(&mut turn, "prompt".into(), steer);
         assert!(client.flush_requests(&mut turn).now_or_never().is_none());
-        let (stop, mut reply) = CommandRequest::new(String::new(), deadline());
+        let (stop, mut reply) = CommandRequest::new(deadline());
         CodexClient::<io::Cursor<Vec<u8>>, LimitedWriter, Vec<u8>>::dispatch_stop(
             &mut turn,
             Some(stop),
@@ -1583,7 +1590,7 @@ mod steering_tests {
                 wait_until(|| {
                     matches!(
                         mailbox.steer("probe", deadline()),
-                        Err(SteeringError::Rejected {
+                        Err(CommandError::Rejected {
                             code: "stopping",
                             ..
                         })
@@ -1666,7 +1673,7 @@ mod steering_tests {
                         server.send(json!({"id":stop["id"],"result":{}}));
                         assert!(matches!(
                             steering.join().unwrap(),
-                            Err(SteeringError::AcceptanceUnknown { .. })
+                            Err(CommandError::AcceptanceUnknown { .. })
                         ));
                     } else {
                         server.send(json!({"id":stop["id"],"result":{}}));
@@ -1693,7 +1700,7 @@ mod steering_tests {
                 let request = server.read();
                 assert!(matches!(
                     steering.join().unwrap(),
-                    Err(SteeringError::AcceptanceUnknown { .. })
+                    Err(CommandError::AcceptanceUnknown { .. })
                 ));
                 assert_rejected(mailbox.steer("blocked", deadline()), "busy");
                 server.accept(&request["id"]);
@@ -1730,7 +1737,7 @@ mod steering_tests {
                     .unwrap();
                 assert!(matches!(
                     steering.join().unwrap(),
-                    Err(SteeringError::AcceptanceUnknown { .. })
+                    Err(CommandError::AcceptanceUnknown { .. })
                 ));
             });
         });
@@ -1749,7 +1756,7 @@ mod steering_tests {
                     server.send(json!({"id":request["id"],"result":response}));
                     assert!(matches!(
                         steering.join().unwrap(),
-                        Err(SteeringError::AcceptanceUnknown { .. })
+                        Err(CommandError::AcceptanceUnknown { .. })
                     ));
                 });
                 server.complete("completed");
@@ -1890,7 +1897,7 @@ mod steering_tests {
         use futures_util::FutureExt;
         for allowance in [0, 7] {
             let expires = deadline();
-            let (request, mut reply_receiver) = CommandRequest::new("prompt".to_string(), expires);
+            let (request, mut reply_receiver) = CommandRequest::new(expires);
             let mut client = CodexClient {
                 reader: io::Cursor::new(Vec::<u8>::new()),
                 writer: LimitedWriter {
@@ -1932,7 +1939,7 @@ mod steering_tests {
             } else {
                 assert!(matches!(
                     result,
-                    Err(SteeringError::AcceptanceUnknown { .. })
+                    Err(CommandError::AcceptanceUnknown { .. })
                 ));
             }
             client.writer.allowance = usize::MAX;
@@ -1959,9 +1966,9 @@ mod steering_tests {
             dispatcher
                 .steer("queued", Instant::now() + Duration::from_millis(10))
                 .await,
-            Err(SteeringError::AcceptanceUnknown { .. })
+            Err(CommandError::AcceptanceUnknown { .. })
         ));
-        let Command::Steer(request) = steering_receiver.recv().await.unwrap() else {
+        let Command::Steer { prompt, request } = steering_receiver.recv().await.unwrap() else {
             panic!("expected steering command")
         };
         assert!(Instant::now() >= request.deadline);
@@ -1984,7 +1991,7 @@ mod steering_tests {
             interrupt: None,
             completion: None,
         };
-        client.dispatch_steering(&mut turn, request);
+        client.dispatch_steering(&mut turn, prompt, request);
         client.flush_requests(&mut turn).await.unwrap();
         assert!(client.writer.is_empty());
         assert!(turn.pending_steer.is_none());
@@ -1998,7 +2005,7 @@ mod steering_tests {
         });
         assert!(matches!(
             result,
-            Err(SteeringError::AcceptanceUnknown { .. })
+            Err(CommandError::AcceptanceUnknown { .. })
         ));
         drop(steering_receiver);
         assert_rejected(
@@ -2028,7 +2035,7 @@ mod steering_tests {
                     server.send(response);
                     let error = steering.join().unwrap().unwrap_err();
                     assert!(
-                        matches!(error, SteeringError::AcceptanceUnknown { .. }),
+                        matches!(error, CommandError::AcceptanceUnknown { .. }),
                         "{error:?}"
                     );
                     assert!(!error.to_string().contains("secret prompt"));

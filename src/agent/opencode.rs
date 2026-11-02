@@ -498,7 +498,7 @@ mod tests {
         prompt_payload, OpencodeBackend, OpencodeRunConfig, RunOutcome, StartContext,
     };
 
-    use crate::agent::backend::SteeringError;
+    use crate::agent::backend::CommandError;
     use crate::agent::commands::CommandDispatcher;
     use futures_util::FutureExt;
     use std::time::{Duration, Instant};
@@ -548,7 +548,7 @@ mod tests {
                     dispatcher
                         .steer("pending", Instant::now() + Duration::from_secs(2))
                         .await,
-                    Err(SteeringError::not_implemented("opencode"))
+                    Err(CommandError::not_implemented("opencode", "steering"))
                 );
                 finish_events(&mut socket).await;
             },
@@ -561,7 +561,7 @@ mod tests {
             dispatcher
                 .steer("completed", Instant::now() + Duration::from_secs(2))
                 .await,
-            Err(SteeringError::Rejected {
+            Err(CommandError::Rejected {
                 code: "agent_exited",
                 ..
             })
@@ -595,8 +595,8 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            matches!(result, Err(SteeringError::AcceptanceUnknown { .. }))
-                || result == Err(SteeringError::not_implemented("opencode"))
+            matches!(result, Err(CommandError::AcceptanceUnknown { .. }))
+                || result == Err(CommandError::not_implemented("opencode", "steering"))
         );
         assert!(runner.events.is_none());
         let mut byte = [0];
@@ -626,13 +626,13 @@ mod tests {
                 tokio::time::timeout(Duration::from_millis(100), steering)
                     .await
                     .unwrap(),
-                Err(SteeringError::AcceptanceUnknown { .. })
+                Err(CommandError::AcceptanceUnknown { .. })
             ));
             assert!(matches!(
                 dispatcher
                     .steer("cancelled", Instant::now() + Duration::from_secs(2))
                     .await,
-                Err(SteeringError::Rejected {
+                Err(CommandError::Rejected {
                     code: "agent_exited",
                     ..
                 })

@@ -45,6 +45,52 @@ The Codex run owner must persist `aborted` after an intentional stop or signal s
 
 Missing or stale sockets, legacy live runners lacking stop support, and startup races must produce clear errors without claiming that the agent stopped or repairing state. Ready-agent stop and CLI stop-all selection remain supported. Mixed backend stop-all must preserve Claude/OpenCode behavior without deadlocking Codex finalization. No persisted-state migration is required.
 
+## Typed request contract
+
+Version and UUID request ID belong to the wire envelope. Its operation is a
+closed enum: `Steer { prompt: String }` or `Stop`. Serialization preserves the
+version-1 flat objects: steering has `method: "steer"` and `prompt`, while stop
+has `method: "stop"` and no prompt field. Parsing at the protocol boundary
+validates envelope metadata, reports unsupported versions and unknown methods,
+and rejects unknown fields and invalid variant payloads. Steering requires a
+nonempty string after trimming for validation, while preserving the original
+text. Stop rejects a prompt of any type, including null.
+
+The server exhaustively matches the typed operation. In-process dispatch accepts
+that operation and a deadline, then queues a typed command: steer carries its
+prompt and reply context; stop carries only its reply context. The shared reply
+context owns the deadline and one-shot response sender, with no operation-specific
+fields. Adding an operation requires explicit schema, dispatch and backend match
+arms. Generic commands use `CommandResult` and `CommandError`, with rejection
+separate from unknown acceptance and method-specific rejection diagnostics.
+
+The following detail expands the command-dispatch component above:
+
+```mermaid
+flowchart LR
+    Frame[Bounded JSON frame] --> Boundary[Envelope and variant validation]
+    Boundary --> Operation[Typed operation]
+    Operation --> Dispatch[Exhaustive server dispatch]
+    Dispatch --> Queue[Bounded typed command queue]
+    Queue --> Driver[Backend owner loop]
+    Driver --> Reply[Correlated one-shot result]
+    Reply --> Response[Wire response]
+```
+
+For Codex, successful CLI output confirms native acceptance; cleanup and terminal
+persistence may still be in progress. JSON retains `stopped_agents` and `commit`:
+a reported agent may still be `running`, and a Codex-only stop has `commit: null`
+because the owner commits its final status. Human output says `Stop accepted for
+agent` while it remains running; `waap agent get` reports the final state.
+
+Connect and frame I/O each allow five seconds. Native acknowledgement allows
+30 seconds plus five seconds for response delivery. Interrupted completion is
+bounded to 30 seconds after acknowledgement. Shutdown drains bounded in-flight
+handlers before removing the socket. Missing/stale sockets, startup before socket
+publication, or older runners lacking stop support return errors without changing
+state. Lost delivery or acknowledgement reports unknown acceptance without retry
+or signal fallback.
+
 ## Verification
 
 - Protocol/client/dispatcher tests for stop, malformed frames, method-specific prompt validation, correlation, rejection, uncertainty, bounded queues and deadlines; steering regressions remain green.

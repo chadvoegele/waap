@@ -2,7 +2,7 @@ use std::future::Future;
 use std::io;
 use tokio::sync::mpsc::Receiver;
 
-use super::backend::{RunOutcome, SteeringError};
+use super::backend::{CommandError, RunOutcome};
 use super::commands::Command;
 
 pub(super) async fn await_with_unsupported_commands<F>(
@@ -20,7 +20,8 @@ where
         tokio::select! {
             result = &mut wait => return result,
             request = receiver.recv(), if channel_open => match request {
-                Some(Command::Steer(mut request) | Command::Stop(mut request)) => request.respond(Err(SteeringError::not_implemented(backend))),
+                Some(Command::Steer { mut request, .. }) => request.respond(Err(CommandError::not_implemented(backend, "steering"))),
+                Some(Command::Stop(mut request)) => request.respond(Err(CommandError::not_implemented(backend, "stop"))),
                 None => channel_open = false,
             }
         }
@@ -51,7 +52,7 @@ mod tests {
                     let result = dispatcher
                         .stop(Instant::now() + Duration::from_secs(1))
                         .await;
-                    assert_eq!(result, Err(SteeringError::not_implemented(backend)));
+                    assert_eq!(result, Err(CommandError::not_implemented(backend, "stop")));
                     finish.send(()).unwrap();
                 }
             );

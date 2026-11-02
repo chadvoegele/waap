@@ -86,28 +86,26 @@ impl Runner {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum SteeringError {
+pub(super) enum CommandError {
     Rejected { code: &'static str, message: String },
     AcceptanceUnknown { message: String },
 }
 
-impl SteeringError {
-    pub(super) fn not_implemented(backend: &str) -> Self {
+impl CommandError {
+    pub(super) fn not_implemented(backend: &str, method: &str) -> Self {
         Self::Rejected {
             code: "not_implemented",
-            message: format!("steering not implemented for backend {backend}"),
+            message: format!("{method} not implemented for backend {backend}"),
         }
     }
     pub(super) fn acceptance_unknown(reason: &str) -> Self {
         Self::AcceptanceUnknown {
-            message: format!(
-                "Steering acceptance is unknown: {reason}; do not retry automatically"
-            ),
+            message: format!("Control acceptance is unknown: {reason}; do not retry automatically"),
         }
     }
 }
 
-impl std::fmt::Display for SteeringError {
+impl std::fmt::Display for CommandError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Rejected { message, .. } | Self::AcceptanceUnknown { message } => {
@@ -116,7 +114,7 @@ impl std::fmt::Display for SteeringError {
         }
     }
 }
-impl std::error::Error for SteeringError {}
+impl std::error::Error for CommandError {}
 
 pub(super) struct AbortContext<'a> {
     pub(super) waap_root: &'a Path,
@@ -209,7 +207,7 @@ pub(super) mod fake {
         pub(crate) start_calls: Vec<StartCall>,
         pub(crate) wait_calls: Arc<AtomicUsize>,
         pub(crate) steer_calls: Arc<Mutex<Vec<(String, Instant, std::thread::ThreadId)>>>,
-        pub(crate) steer_error: Option<SteeringError>,
+        pub(crate) steer_error: Option<CommandError>,
         pub(crate) abort_calls: Vec<AbortCall>,
     }
     impl Default for FakeBackend {
@@ -235,7 +233,7 @@ pub(super) mod fake {
         pub(in crate::agent) action: Option<Box<dyn FnOnce() -> io::Result<()> + Send>>,
         pub(in crate::agent) wait_calls: Arc<AtomicUsize>,
         pub(in crate::agent) steer_calls: Arc<Mutex<Vec<(String, Instant, std::thread::ThreadId)>>>,
-        pub(in crate::agent) steer_error: Option<SteeringError>,
+        pub(in crate::agent) steer_error: Option<CommandError>,
     }
     impl FakeRunner {
         pub(super) async fn run(
@@ -260,9 +258,14 @@ pub(super) mod fake {
                         }
                         return if let Some(error) = self.error.take() { Err(io::Error::other(error)) } else { Ok(self.outcome.take().unwrap()) };
                     }
-                    Some(Command::Steer(mut request) | Command::Stop(mut request)) = commands.recv() => {
-                        self.steer_calls.lock().unwrap().push((request.message.clone(), request.deadline, std::thread::current().id()));
-                        request.respond(self.steer_error.clone().map_or(Ok(()), Err));
+                    Some(command) = commands.recv() => {
+                        match command {
+                            Command::Steer { prompt, mut request } => {
+                                self.steer_calls.lock().unwrap().push((prompt, request.deadline, std::thread::current().id()));
+                                request.respond(self.steer_error.clone().map_or(Ok(()), Err));
+                            }
+                            Command::Stop(mut request) => request.respond(self.steer_error.clone().map_or(Ok(()), Err)),
+                        }
                     }
                 }
             }
@@ -362,7 +365,7 @@ mod execution_tests {
             dispatcher
                 .steer("completed", Instant::now() + Duration::from_secs(1))
                 .await,
-            Err(SteeringError::Rejected {
+            Err(CommandError::Rejected {
                 code: "agent_exited",
                 ..
             })
@@ -397,13 +400,13 @@ mod execution_tests {
                 tokio::time::timeout(Duration::from_millis(100), steering)
                     .await
                     .unwrap(),
-                Err(SteeringError::AcceptanceUnknown { .. })
+                Err(CommandError::AcceptanceUnknown { .. })
             ));
             assert!(matches!(
                 dispatcher
                     .steer("cancelled", Instant::now() + Duration::from_secs(1))
                     .await,
-                Err(SteeringError::Rejected {
+                Err(CommandError::Rejected {
                     code: "agent_exited",
                     ..
                 })

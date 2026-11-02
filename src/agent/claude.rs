@@ -159,7 +159,7 @@ mod tests {
         ClaudeRunConfig,
     };
 
-    use crate::agent::backend::{RunOutcome, SteeringError};
+    use crate::agent::backend::{CommandError, RunOutcome};
     use crate::agent::commands::CommandDispatcher;
     use futures_util::FutureExt;
     use std::process::Stdio;
@@ -188,7 +188,7 @@ mod tests {
                     dispatcher
                         .steer("pending", Instant::now() + Duration::from_secs(2))
                         .await,
-                    Err(SteeringError::not_implemented("claude"))
+                    Err(CommandError::not_implemented("claude", "steering"))
                 );
                 release.write_all(b"finish\n").await.unwrap();
             },
@@ -205,7 +205,7 @@ mod tests {
             dispatcher
                 .steer("completed", Instant::now() + Duration::from_secs(2))
                 .await,
-            Err(SteeringError::Rejected {
+            Err(CommandError::Rejected {
                 code: "agent_exited",
                 ..
             })
@@ -229,8 +229,8 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            matches!(result, Err(SteeringError::AcceptanceUnknown { .. }))
-                || result == Err(SteeringError::not_implemented("claude"))
+            matches!(result, Err(CommandError::AcceptanceUnknown { .. }))
+                || result == Err(CommandError::not_implemented("claude", "steering"))
         );
         runner.cleanup().await.unwrap();
     }
@@ -252,13 +252,13 @@ mod tests {
                 tokio::time::timeout(Duration::from_millis(100), steering)
                     .await
                     .unwrap(),
-                Err(SteeringError::AcceptanceUnknown { .. })
+                Err(CommandError::AcceptanceUnknown { .. })
             ));
             assert!(matches!(
                 dispatcher
                     .steer("cancelled", Instant::now() + Duration::from_secs(2))
                     .await,
-                Err(SteeringError::Rejected {
+                Err(CommandError::Rejected {
                     code: "agent_exited",
                     ..
                 })
