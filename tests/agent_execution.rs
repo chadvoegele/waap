@@ -111,10 +111,18 @@ for line in sys.stdin:
         time.sleep(60)
     if method == 'turn/interrupt' and mode == 'steering-stop-eof':
         sys.exit(0)
+    if method == 'turn/interrupt' and mode == 'steering-stop-malformed':
+        emit({'id': request['id'], 'result': None})
+        time.sleep(60)
+    if method == 'turn/interrupt' and mode == 'steering-stop-complete-first':
+        emit({'method': 'turn/completed', 'params': {
+            'threadId': 'th_test', 'turn': {'id': 'tu_test', 'status': 'interrupted'}}})
+        while not os.path.exists(os.path.join(root, 'release-interrupt')):
+            time.sleep(0.005)
     emit({'id': request['id'], 'result': result})
     if method == 'turn/interrupt':
         emit({'method': 'turn/completed', 'params': {
-            'threadId': 'th_test', 'turn': {'id': 'tu_test', 'status': 'interrupted'}}})
+            'threadId': 'th_test', 'turn': {'id': 'tu_test', 'status': 'completed' if mode == 'steering-stop-natural' else 'interrupted'}}})
         time.sleep(60)
     if method == 'turn/steer' and steers == 2:
         while not os.path.exists(os.path.join(root, 'release')):
@@ -744,7 +752,11 @@ fn stop_all_routes_mixed_backends_and_preserves_ready_agents() {
 
 #[test]
 fn failed_native_stop_remains_failed_and_cleans_up() {
-    for mode in ["steering-stop-rejected", "steering-stop-eof"] {
+    for mode in [
+        "steering-stop-rejected",
+        "steering-stop-eof",
+        "steering-stop-malformed",
+    ] {
         let mut run = SteeringRun::start(mode);
         let output = waap_command(run.repo.path(), mode, run.runtime.path())
             .args(["agent", "stop", "--agent-id", &run.agent_id])
@@ -810,6 +822,72 @@ fn stop_does_not_wait_for_pending_steering_acknowledgement() {
         run.requests()
             .iter()
             .filter(|r| r["method"] == "turn/start")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn stop_waits_for_ack_after_completion_and_releases_state_lock() {
+    let mut run = SteeringRun::start("steering-stop-complete-first");
+    let mut stop = RunningChild(Some(
+        waap_command(run.repo.path(), run.mode, run.runtime.path())
+            .args([
+                "--output-format",
+                "json",
+                "agent",
+                "stop",
+                "--agent-id",
+                &run.agent_id,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    ));
+    wait_until(|| {
+        run.requests()
+            .iter()
+            .any(|r| r["method"] == "turn/interrupt")
+    });
+    assert!(stop.0.as_mut().unwrap().try_wait().unwrap().is_none());
+    let before = run.snapshot();
+    let mut writer = RunningChild(Some(
+        waap_command(run.repo.path(), run.mode, run.runtime.path())
+            .args(["agent", "new", "--name", "Concurrent writer"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    ));
+    wait_until(|| writer.0.as_mut().unwrap().try_wait().unwrap().is_some());
+    let output = writer.0.take().unwrap().wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        run.snapshot().0,
+        before.0,
+        "stop must not persist terminal state"
+    );
+    assert!(stop.0.as_mut().unwrap().try_wait().unwrap().is_none());
+    fs::write(run.repo.path().join("release-interrupt"), "acknowledge").unwrap();
+    wait_until(|| stop.0.as_mut().unwrap().try_wait().unwrap().is_some());
+    let output = stop.0.take().unwrap().wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report["commit"].is_null());
+    assert_eq!(report["stopped_agents"][0]["agent_id"], run.agent_id);
+    run.finish("aborted", true);
+}
+
+#[test]
+fn accepted_stop_preserves_racing_natural_completion() {
+    let mut run = SteeringRun::start("steering-stop-natural");
+    run.stop();
+    run.finish("completed", true);
+    assert_eq!(
+        run.requests()
+            .iter()
+            .filter(|r| r["method"] == "turn/interrupt")
             .count(),
         1
     );

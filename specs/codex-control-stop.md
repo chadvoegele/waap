@@ -1,7 +1,7 @@
 +++
-status = "draft"
+status = "final"
 created = 2026-11-01
-last_update = 2026-11-01
+last_update = 2026-11-02
 +++
 
 # Codex stop through run control
