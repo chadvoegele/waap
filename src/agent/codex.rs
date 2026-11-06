@@ -46,7 +46,7 @@ impl CodexBackend {
         context: StartContext<'_>,
         receiver: Receiver<Command>,
     ) -> io::Result<AgentSessionRun> {
-        let mut interrupt =
+        let mut sigterm =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
         let mut server = spawn_codex_app_server(&self.config, context.worktree_dir)?;
@@ -56,7 +56,7 @@ impl CodexBackend {
                 server.client.thread_start(context.worktree_dir).await
             } => result,
             _ = sigint.recv() => Err(io::Error::new(io::ErrorKind::Interrupted, "Codex startup interrupted")),
-            _ = interrupt.recv() => Err(io::Error::new(io::ErrorKind::Interrupted, "Codex startup interrupted")),
+            _ = sigterm.recv() => Err(io::Error::new(io::ErrorKind::Interrupted, "Codex startup interrupted")),
         };
         let thread_id = match startup {
             Ok(thread_id) => thread_id,
@@ -71,7 +71,7 @@ impl CodexBackend {
             thread_id.clone(),
             Runner::Codex(Box::new(CodexRunner {
                 server,
-                interrupt,
+                sigterm,
                 sigint,
                 thread_id,
                 prompt: context.prompt.to_string(),
@@ -87,7 +87,7 @@ struct CodexAppServer {
 }
 pub(super) struct CodexRunner {
     server: CodexAppServer,
-    interrupt: tokio::signal::unix::Signal,
+    sigterm: tokio::signal::unix::Signal,
     sigint: tokio::signal::unix::Signal,
     thread_id: String,
     prompt: String,
@@ -97,7 +97,7 @@ impl CodexRunner {
         &mut self,
         mut command_receiver: Receiver<Command>,
     ) -> io::Result<RunOutcome> {
-        let interrupt = &mut self.interrupt;
+        let sigterm = &mut self.sigterm;
         let sigint = &mut self.sigint;
         let status = self
             .server
@@ -106,7 +106,7 @@ impl CodexRunner {
                 &self.thread_id,
                 &self.prompt,
                 async {
-                    tokio::select! { _ = interrupt.recv() => {}, _ = sigint.recv() => {} }
+                    tokio::select! { _ = sigterm.recv() => {}, _ = sigint.recv() => {} }
                 },
                 &mut command_receiver,
             )
@@ -460,16 +460,16 @@ impl PendingSteer {
 
 // The 30-second deadline bounds pre-turn intent, native acknowledgement, and
 // (after acknowledgement) interrupted completion. No retries are performed.
-const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(30);
+const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 
-struct PendingInterrupt {
+struct PendingStop {
     request: Option<CommandRequest>,
     deadline: Instant,
     write_started: bool,
     acknowledged: bool,
 }
 
-impl PendingInterrupt {
+impl PendingStop {
     fn check_deadline(&mut self) -> io::Result<()> {
         if Instant::now() < self.deadline {
             return Ok(());
@@ -505,8 +505,8 @@ struct TurnState<'a> {
     early_completion: Option<(String, io::Result<TurnStatus>)>,
     pending_steer: Option<PendingSteer>,
     pending_writes: VecDeque<PendingWrite>,
-    interrupt_request_id: Option<i64>,
-    interrupt: Option<PendingInterrupt>,
+    interrupt_rpc_id: Option<i64>,
+    pending_stop: Option<PendingStop>,
     completion: Option<io::Result<TurnStatus>>,
 }
 
@@ -515,7 +515,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> CodexCl
         &mut self,
         thread_id: &str,
         prompt: &str,
-        interrupt: impl std::future::Future<Output = ()>,
+        shutdown_signal: impl std::future::Future<Output = ()>,
         command_receiver: &mut Receiver<Command>,
     ) -> io::Result<TurnStatus> {
         let mut turn = TurnState {
@@ -525,8 +525,8 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> CodexCl
             early_completion: None,
             pending_steer: None,
             pending_writes: VecDeque::new(),
-            interrupt_request_id: None,
-            interrupt: None,
+            interrupt_rpc_id: None,
+            pending_stop: None,
             completion: None,
         };
         self.enqueue_request(
@@ -539,13 +539,13 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> CodexCl
                 self.reasoning_effort,
             ),
         );
-        tokio::pin!(interrupt);
-        let mut interrupted = false;
+        tokio::pin!(shutdown_signal);
+        let mut shutdown_signal_received = false;
         let mut channel_open = true;
         let mut chunk = [0; 8192];
         let mut buffer = Vec::new();
         loop {
-            if let Some(stop) = &mut turn.interrupt {
+            if let Some(stop) = &mut turn.pending_stop {
                 stop.check_deadline()?;
             }
             if let Some(status) = self.process_frames(&mut turn, &mut buffer).await? {
@@ -553,7 +553,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> CodexCl
                 return Ok(
                     if status == TurnStatus::Interrupted
                         && turn
-                            .interrupt
+                            .pending_stop
                             .as_ref()
                             .is_some_and(|stop| stop.acknowledged)
                     {
@@ -564,10 +564,10 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> CodexCl
                 );
             }
             self.prepare_writes(&mut turn);
-            if turn.interrupt.is_some() && turn.interrupt_request_id.is_none() {
+            if turn.pending_stop.is_some() && turn.interrupt_rpc_id.is_none() {
                 if let Some(turn_id) = &turn.turn_id {
                     let params = json!({ "threadId": thread_id, "turnId": turn_id });
-                    turn.interrupt_request_id =
+                    turn.interrupt_rpc_id =
                         Some(self.enqueue_request(&mut turn, METHOD_TURN_INTERRUPT, params));
                 }
             }
@@ -577,7 +577,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> CodexCl
                 .filter(|pending| pending.request.has_reply_sender())
                 .map(|pending| pending.request.deadline)
                 .into_iter()
-                .chain(turn.interrupt.as_ref().map(|stop| stop.deadline))
+                .chain(turn.pending_stop.as_ref().map(|stop| stop.deadline))
                 .min();
             let bytes = turn
                 .pending_writes
@@ -606,8 +606,8 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> CodexCl
                         None => channel_open = false,
                     }
                 }
-                _ = &mut interrupt, if !interrupted => {
-                    interrupted = true;
+                _ = &mut shutdown_signal, if !shutdown_signal_received => {
+                    shutdown_signal_received = true;
                     Self::dispatch_stop(&mut turn, None);
                 },
                 _ = wait_for_deadline(deadline) => {}
@@ -654,18 +654,18 @@ impl<R, W, O: AsyncWrite + Unpin> CodexClient<R, W, O> {
                 )
             })?;
             if let Some(status) = self.process_message(turn, &message).await? {
-                if turn.interrupt_request_id.is_some()
+                if turn.interrupt_rpc_id.is_some()
                     && turn
-                        .interrupt
+                        .pending_stop
                         .as_ref()
                         .is_some_and(|stop| !stop.acknowledged)
                 {
                     turn.completion = Some(status);
                     continue;
                 }
-                if turn.interrupt_request_id.is_none() {
+                if turn.interrupt_rpc_id.is_none() {
                     if let Some(request) = turn
-                        .interrupt
+                        .pending_stop
                         .as_mut()
                         .and_then(|stop| stop.request.as_mut())
                     {
@@ -690,7 +690,7 @@ impl<R, W, O: AsyncWrite + Unpin> CodexClient<R, W, O> {
                 return;
             }
         }
-        if let Some(pending) = &turn.interrupt {
+        if let Some(pending) = &turn.pending_stop {
             if let Some(request) = &mut request {
                 request.respond(if pending.acknowledged {
                     Ok(())
@@ -700,10 +700,10 @@ impl<R, W, O: AsyncWrite + Unpin> CodexClient<R, W, O> {
             }
             return;
         }
-        let deadline = request.as_ref().map_or(now + INTERRUPT_TIMEOUT, |request| {
-            request.deadline.min(now + INTERRUPT_TIMEOUT)
+        let deadline = request.as_ref().map_or(now + STOP_TIMEOUT, |request| {
+            request.deadline.min(now + STOP_TIMEOUT)
         });
-        turn.interrupt = Some(PendingInterrupt {
+        turn.pending_stop = Some(PendingStop {
             request,
             deadline,
             write_started: false,
@@ -717,7 +717,7 @@ impl<R, W, O: AsyncWrite + Unpin> CodexClient<R, W, O> {
         prompt: String,
         mut request: CommandRequest,
     ) {
-        if turn.interrupt.is_some() {
+        if turn.pending_stop.is_some() {
             request.respond(Err(reject("stopping", "Codex interruption is pending")));
             return;
         }
@@ -802,8 +802,8 @@ impl<R, W, O: AsyncWrite + Unpin> CodexClient<R, W, O> {
                 pending.write_started = true;
             }
         }
-        if Some(write.id) == turn.interrupt_request_id {
-            turn.interrupt.as_mut().unwrap().write_started = true;
+        if Some(write.id) == turn.interrupt_rpc_id {
+            turn.pending_stop.as_mut().unwrap().write_started = true;
         }
         write.offset += count;
         if write.offset == write.bytes.len() {
@@ -852,13 +852,13 @@ impl<R, W, O: AsyncWrite + Unpin> CodexClient<R, W, O> {
                 message,
                 turn.turn_id.as_deref().unwrap(),
             ));
-        } else if Some(id) == turn.interrupt_request_id
+        } else if Some(id) == turn.interrupt_rpc_id
             && turn
-                .interrupt
+                .pending_stop
                 .as_ref()
                 .is_some_and(|stop| !stop.acknowledged)
         {
-            let stop = turn.interrupt.as_mut().unwrap();
+            let stop = turn.pending_stop.as_mut().unwrap();
             stop.check_deadline()?;
             let result = parse_interrupt_response(message);
             if let Some(request) = &mut stop.request {
@@ -866,7 +866,7 @@ impl<R, W, O: AsyncWrite + Unpin> CodexClient<R, W, O> {
             }
             result.map_err(io::Error::other)?;
             stop.acknowledged = true;
-            stop.deadline = Instant::now() + INTERRUPT_TIMEOUT;
+            stop.deadline = Instant::now() + STOP_TIMEOUT;
             if let Some(status) = turn.completion.take() {
                 return Ok(Some(status));
             }
@@ -1127,7 +1127,7 @@ mod steering_tests {
             finished: AtomicBool::new(false),
             output: output.clone(),
         };
-        let (interrupt, mut interrupts) = tokio::sync::watch::channel(false);
+        let (shutdown_signal, mut shutdown_signals) = tokio::sync::watch::channel(false);
         let result = thread::scope(|scope| {
             let worker = scope.spawn(|| {
                 let mut command_receiver = command_receiver;
@@ -1148,7 +1148,7 @@ mod steering_tests {
                             "th",
                             "initial",
                             async {
-                                interrupts.changed().await.unwrap();
+                                shutdown_signals.changed().await.unwrap();
                             },
                             &mut command_receiver,
                         )
@@ -1159,7 +1159,7 @@ mod steering_tests {
                 result
             });
             let mut server = Server(BufReader::new(server));
-            action(&mut server, &mailbox, &interrupt, &output);
+            action(&mut server, &mailbox, &shutdown_signal, &output);
             drop(server);
             worker.join().unwrap()
         });
@@ -1482,8 +1482,8 @@ mod steering_tests {
             early_completion: None,
             pending_steer: None,
             pending_writes: VecDeque::new(),
-            interrupt_request_id: Some(1),
-            interrupt: None,
+            interrupt_rpc_id: Some(1),
+            pending_stop: None,
             completion: None,
         };
         let (request, reply) = CommandRequest::new(deadline());
@@ -1495,10 +1495,10 @@ mod steering_tests {
             .unwrap()
             .is_none());
         assert_eq!(reply.await.unwrap(), Ok(()));
-        let stop = turn.interrupt.as_mut().unwrap();
+        let stop = turn.pending_stop.as_mut().unwrap();
         assert!(stop.acknowledged);
-        assert!(stop.deadline >= before_ack + INTERRUPT_TIMEOUT);
-        assert!(stop.deadline <= Instant::now() + INTERRUPT_TIMEOUT);
+        assert!(stop.deadline >= before_ack + STOP_TIMEOUT);
+        assert!(stop.deadline <= Instant::now() + STOP_TIMEOUT);
         assert!(stop.check_deadline().is_ok());
         stop.deadline = Instant::now();
         let error = stop.check_deadline().unwrap_err();
@@ -1528,8 +1528,8 @@ mod steering_tests {
             early_completion: None,
             pending_steer: None,
             pending_writes: VecDeque::new(),
-            interrupt_request_id: None,
-            interrupt: None,
+            interrupt_rpc_id: None,
+            pending_stop: None,
             completion: None,
         };
         let (steer, _) = CommandRequest::new(deadline());
@@ -1545,7 +1545,7 @@ mod steering_tests {
             METHOD_TURN_INTERRUPT,
             json!({"threadId":"th","turnId":"tu"}),
         );
-        turn.interrupt_request_id = Some(id);
+        turn.interrupt_rpc_id = Some(id);
         client.writer.allowance = usize::MAX;
         client.flush_requests(&mut turn).await.unwrap();
         let wire = String::from_utf8(client.writer.bytes.clone()).unwrap();
@@ -1696,12 +1696,12 @@ mod steering_tests {
     #[test]
     fn interrupt_is_sent_without_waiting_for_steering_or_interrupt_ack() {
         for complete_first in [false, true] {
-            let (status, _) = with_run(|server, mailbox, interrupt, _| {
+            let (status, _) = with_run(|server, mailbox, shutdown_signal, _| {
                 server.start(mailbox);
                 thread::scope(|scope| {
                     let steering = scope.spawn(|| mailbox.steer("steer", deadline()));
                     let request = server.read();
-                    interrupt.send(true).unwrap();
+                    shutdown_signal.send(true).unwrap();
                     let stop = server.read();
                     assert_eq!(stop["method"], METHOD_TURN_INTERRUPT);
                     assert_eq!(stop["params"], json!({"threadId":"th","turnId":"tu"}));
@@ -1954,8 +1954,8 @@ mod steering_tests {
                 early_completion: None,
                 pending_steer: None,
                 pending_writes: VecDeque::new(),
-                interrupt_request_id: None,
-                interrupt: None,
+                interrupt_rpc_id: None,
+                pending_stop: None,
                 completion: None,
             };
             let id =
@@ -2025,8 +2025,8 @@ mod steering_tests {
             early_completion: None,
             pending_steer: None,
             pending_writes: VecDeque::new(),
-            interrupt_request_id: None,
-            interrupt: None,
+            interrupt_rpc_id: None,
+            pending_stop: None,
             completion: None,
         };
         client.dispatch_steering(&mut turn, prompt, request);
