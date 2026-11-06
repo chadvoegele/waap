@@ -81,7 +81,8 @@ For Codex, successful CLI output confirms native acceptance; cleanup and termina
 persistence may still be in progress. JSON retains `stopped_agents` and `commit`:
 a reported agent may still be `running`, and a Codex-only stop has `commit: null`
 because the owner commits its final status. Human output says `Stop accepted for
-agent` while it remains running; `waap agent get` reports the final state.
+agent` whenever the explicit outcome is acceptance, even if a reload already sees
+a terminal status; `waap agent get` reports the final state.
 
 Connect and frame I/O each allow five seconds. Native acknowledgement allows
 30 seconds plus five seconds for response delivery. Interrupted completion is
@@ -98,3 +99,18 @@ or signal fallback.
 - CLI/run integration with fake Codex covering stop-one and stop-all, mixed backend routing, no `pkill`, response delivery, lock release, runner-owned `aborted` persistence, failure classification and socket/worktree/child cleanup.
 - Preserve ready-agent stop and Claude/OpenCode regression tests.
 - Run repository validations: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo build`, `cargo build --release`, and `cargo test`.
+
+## Runtime maintenance and verification limits
+
+Codex app-server is an external executable. Changes to its native protocol must
+retain version-1 control JSON and run the fake app-server rejection, malformed
+response, lost acknowledgement, completion-race, signal and cleanup regressions.
+Before deploying a Codex upgrade, verify stop and steer with that actual version
+in a disposable run, record the version/result, and retain the previously working
+executable for rollback. Never retry an interrupt automatically after unknown
+acceptance. The repository checks cannot replace that live compatibility check;
+no live version or model-service maintenance ownership is established here.
+
+The stop deadline applies to a responsive owner loop. A blocked output write can
+delay the loop, initialization precedes socket publication, and owned-child reap
+has no independent timeout. These remain limitations of bounded shutdown.

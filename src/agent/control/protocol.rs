@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+pub(super) const PROTOCOL_VERSION: u64 = 1;
+
 use super::super::commands::CommandError;
 use super::super::commands::{CommandResult, Operation};
 
@@ -26,7 +28,7 @@ impl Request {
 
     fn new(operation: Operation) -> Self {
         Self {
-            version: 1,
+            version: PROTOCOL_VERSION,
             request_id: Uuid::new_v4().to_string(),
             operation,
         }
@@ -78,7 +80,7 @@ pub(super) fn parse_request(frame: &[u8]) -> Result<Request, Response> {
         .get("method")
         .and_then(Value::as_str)
         .ok_or_else(invalid)?;
-    if version != 1 {
+    if version != PROTOCOL_VERSION {
         return Err(build_rejection(
             Some(&request_id),
             "unsupported_version",
@@ -107,7 +109,7 @@ pub(super) fn parse_request(frame: &[u8]) -> Result<Request, Response> {
 
 pub(super) fn build_rejection(id: Option<&str>, code: &str, message: &str) -> Response {
     Response {
-        version: 1,
+        version: PROTOCOL_VERSION,
         request_id: id.map(str::to_owned),
         accepted: Some(false),
         error: Some(ResponseError {
@@ -120,7 +122,7 @@ pub(super) fn build_rejection(id: Option<&str>, code: &str, message: &str) -> Re
 pub(super) fn build_response(id: &str, result: CommandResult) -> Response {
     match result {
         Ok(()) => Response {
-            version: 1,
+            version: PROTOCOL_VERSION,
             request_id: Some(id.to_string()),
             accepted: Some(true),
             error: None,
@@ -134,90 +136,5 @@ pub(super) fn build_response(id: &str, result: CommandResult) -> Response {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn typed_variants_preserve_wire_shape_and_reject_extra_fields() {
-        for request in [Request::stop(), Request::steer("  Unicode 雪  ")] {
-            let wire = serde_json::to_value(&request).unwrap();
-            assert_eq!(wire["version"], 1);
-            assert_eq!(wire["request_id"], request.request_id);
-            assert_eq!(
-                wire["method"],
-                match request.operation {
-                    Operation::Steer { .. } => "steer",
-                    Operation::Stop {} => "stop",
-                }
-            );
-            let parsed = parse_request(&serde_json::to_vec(&wire).unwrap()).unwrap();
-            assert_eq!(parsed.operation, request.operation);
-            for extra in ["unexpected", "deadline", "payload"] {
-                let mut invalid = wire.clone();
-                invalid[extra] = json!(null);
-                let response = parse_request(&serde_json::to_vec(&invalid).unwrap()).unwrap_err();
-                assert_eq!(
-                    response.request_id.as_deref(),
-                    Some(request.request_id.as_str())
-                );
-                assert_eq!(response.error.unwrap().code, "invalid_request");
-            }
-            for (key, value, code) in [
-                ("version", json!(2), "unsupported_version"),
-                ("method", json!("future"), "unknown_method"),
-                ("method", json!(false), "invalid_request"),
-                ("version", json!(null), "invalid_request"),
-            ] {
-                let mut invalid = wire.clone();
-                invalid[key] = value;
-                let response = parse_request(&serde_json::to_vec(&invalid).unwrap()).unwrap_err();
-                assert_eq!(
-                    response.request_id.as_deref(),
-                    Some(request.request_id.as_str())
-                );
-                assert_eq!(response.error.unwrap().code, code);
-            }
-        }
-    }
-
-    #[test]
-    fn stop_is_prompt_free_and_steering_still_requires_a_nonempty_string() {
-        let stop = serde_json::to_value(Request::stop()).unwrap();
-        assert!(stop.get("prompt").is_none());
-        let parsed = parse_request(&serde_json::to_vec(&stop).unwrap()).unwrap();
-        assert_eq!(parsed.operation, Operation::Stop {});
-        for prompt in [json!(null), json!(""), json!("unexpected"), json!(7)] {
-            let mut invalid = stop.clone();
-            invalid["prompt"] = prompt;
-            let response = parse_request(&serde_json::to_vec(&invalid).unwrap()).unwrap_err();
-            assert_eq!(
-                response.request_id.as_deref(),
-                Some(parsed.request_id.as_str())
-            );
-            assert_eq!(response.error.unwrap().code, "invalid_request");
-        }
-        let mut steer = stop;
-        steer["method"] = json!("steer");
-        for prompt in [
-            None,
-            Some(json!(null)),
-            Some(json!("  ")),
-            Some(json!(false)),
-        ] {
-            if let Some(prompt) = prompt {
-                steer["prompt"] = prompt;
-            }
-            assert!(parse_request(&serde_json::to_vec(&steer).unwrap()).is_err());
-        }
-        steer["prompt"] = json!(" keep whitespace 雪 ");
-        assert_eq!(
-            parse_request(&serde_json::to_vec(&steer).unwrap())
-                .unwrap()
-                .operation,
-            Operation::Steer {
-                prompt: " keep whitespace 雪 ".into()
-            }
-        );
-    }
-}
+#[path = "protocol_tests.rs"]
+mod tests;
