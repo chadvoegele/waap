@@ -957,14 +957,15 @@ impl<R, W, O: AsyncWrite + Unpin> CodexClient<R, W, O> {
 
 fn parse_interrupt_response(message: &JsonValue) -> CommandResult {
     if let Some(error) = message.get("error") {
-        if error.get("code").and_then(JsonValue::as_i64).is_some()
-            && error.get("message").and_then(JsonValue::as_str).is_some()
-            && message.get("result").is_none()
-        {
-            return Err(reject(
-                "backend_rejected",
-                "Codex rejected turn/interrupt; verify that the turn is active",
-            ));
+        if let Some(code) = error.get("code").and_then(JsonValue::as_i64) {
+            if error.get("message").and_then(JsonValue::as_str).is_some()
+                && message.get("result").is_none()
+            {
+                return Err(reject(
+                    "backend_rejected",
+                    &format!("Codex rejected turn/interrupt (RPC error code {code}); verify that the turn is active"),
+                ));
+            }
         }
         return Err(CommandError::acceptance_unknown(
             "invalid turn/interrupt error",
@@ -1025,6 +1026,37 @@ mod steering_tests {
 
     use super::super::commands::CommandDispatcher;
     use super::*;
+
+    #[test]
+    fn interrupt_rejection_preserves_rpc_code_without_disclosing_backend_text() {
+        for code in [-32601, -32603, -32000] {
+            let error = parse_interrupt_response(&json!({
+                "error": {"code": code, "message": "private prompt or diagnostic"}
+            }))
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                CommandError::Rejected {
+                    code: "backend_rejected",
+                    ..
+                }
+            ));
+            let diagnostic = error.to_string();
+            assert!(diagnostic.contains(&format!("RPC error code {code}")));
+            assert!(diagnostic.contains("verify that the turn is active"));
+            assert!(!diagnostic.contains("private prompt or diagnostic"));
+        }
+        for response in [
+            json!({"error": {"code": "invalid", "message": "private"}}),
+            json!({"error": {"code": -32603}}),
+            json!({"error": {"code": -32603, "message": "private"}, "result": {}}),
+        ] {
+            assert!(matches!(
+                parse_interrupt_response(&response),
+                Err(CommandError::AcceptanceUnknown { .. })
+            ));
+        }
+    }
 
     #[derive(Clone, Default)]
     struct CapturedOutput(Arc<Mutex<Vec<u8>>>);
