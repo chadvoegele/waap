@@ -214,7 +214,13 @@ are ignored. Stdout must continue being consumed while awaiting responses.
 
 Cleanup owns cancellable async pipe handles, with no reader-thread join.
 Explicitly drop stdin to deliver EOF; child wait must not depend on descendants
-closing stdout. The shared process wrapper owns direct-child kill/reap and
+closing stdout. Concurrently drain and validate native JSONL records until the
+direct child exits, so shutdown notifications exceeding pipe capacity cannot
+block exit. Discard these records without changing the settled outcome or
+forwarding protocol data to the operator; stdin is closed, so no UI replies are
+sent. Observed malformed records or read failures still fail the owner. Clean
+stdout EOF stops draining but does not replace the bounded child wait.
+The shared process wrapper owns direct-child kill/reap and
 cancellation fallback. Arbitrary detached descendants remain the extension's
 responsibility; WAAP does not promise process-group supervision. Native records
 have a separate 64 MiB limit, including LF, to accommodate large snapshots while
@@ -248,8 +254,10 @@ and socket/worktree cleanup. Existing Codex, Claude, and OpenCode tests must pas
 The opt-in `tests/pi_real_smoke.py` runs the real installed Pi against a local
 SSE provider fixture, executes a tool that writes and commits a file, verifies
 steering reaches a later provider request, and stops a streaming run. It uses
-an isolated Pi directory and no external credentials. An authenticated external
-provider smoke remains a separate deployment check.
+an isolated Pi directory and no external credentials. Pass
+`--shutdown-notification` to exercise completion and stop with a real extension
+emitting a shutdown notification larger than pipe capacity. An authenticated
+external provider smoke remains a separate deployment check.
 
 Run all repository validations: clippy with warnings denied, formatting, debug
 build, release build, tests outside a sandbox, and `waap check`.

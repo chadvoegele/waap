@@ -65,15 +65,32 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> PiCl
 
     // fill_buf is cancellation-safe; consumed partial bytes stay in this client.
     pub(super) async fn receive(&mut self) -> io::Result<Value> {
+        self.read_record().await?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Pi RPC closed before acknowledgement or agent_settled",
+            )
+        })
+    }
+
+    // After stdin closes, validate and discard shutdown notifications. The run
+    // outcome is already known and UI replies can no longer be sent.
+    pub(super) async fn drain_shutdown(&mut self) -> io::Result<()> {
+        while self.read_record().await?.is_some() {}
+        Ok(())
+    }
+
+    async fn read_record(&mut self) -> io::Result<Option<Value>> {
         loop {
             let available = self.reader.fill_buf().await?;
             if available.is_empty() {
-                let message = if self.buffer.is_empty() {
-                    "Pi RPC closed before acknowledgement or agent_settled"
-                } else {
-                    "Pi RPC sent an unterminated JSONL record"
-                };
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, message));
+                if self.buffer.is_empty() {
+                    return Ok(None);
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "Pi RPC sent an unterminated JSONL record",
+                ));
             }
             let newline = available.iter().position(|byte| *byte == b'\n');
             let count = newline.map_or(available.len(), |index| index + 1);
@@ -97,7 +114,7 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> PiCl
                 "Pi RPC record must be an object with a type",
             ));
         }
-        Ok(value)
+        Ok(Some(value))
     }
 
     pub(super) async fn session_id(&mut self, deadline: Instant) -> io::Result<String> {
@@ -228,6 +245,29 @@ mod tests {
             client.receive().await.unwrap_err().kind(),
             io::ErrorKind::UnexpectedEof
         );
+    }
+
+    #[tokio::test]
+    async fn shutdown_validates_records_without_forwarding_text_or_replying_to_ui() {
+        let input = concat!(
+            "{\"type\":\"extension_ui_request\",\"method\":\"confirm\",\"id\":\"shutdown\"}\n",
+            "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"delta\":\"shutdown text\"}}\n"
+        );
+        let mut client = PiClient::new(BufReader::new(input.as_bytes()), Vec::new(), Vec::new());
+        client.close();
+        client.drain_shutdown().await.unwrap();
+        assert!(client.output.is_empty());
+
+        for (input, expected) in [
+            ("not-json\n", io::ErrorKind::InvalidData),
+            ("{}\n", io::ErrorKind::InvalidData),
+            ("{\"type\":\"partial\"}", io::ErrorKind::UnexpectedEof),
+        ] {
+            let mut client =
+                PiClient::new(BufReader::new(input.as_bytes()), Vec::new(), Vec::new());
+            client.close();
+            assert_eq!(client.drain_shutdown().await.unwrap_err().kind(), expected);
+        }
     }
 
     #[tokio::test]

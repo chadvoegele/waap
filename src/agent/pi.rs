@@ -121,14 +121,22 @@ impl PiRunner {
             )
             .await?;
         self.client.close();
-        let status = tokio::time::timeout(self.timeout, self.process.wait())
-            .await
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "Pi RPC did not exit after stdin closed",
-                )
-            })??;
+        let status = tokio::time::timeout(self.timeout, async {
+            tokio::select! {
+                result = self.process.wait() => result,
+                result = self.client.drain_shutdown() => {
+                    result?;
+                    self.process.wait().await
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Pi RPC did not exit after stdin closed",
+            )
+        })??;
         if !status.success() {
             return Err(io::Error::other(format!(
                 "Pi RPC exited with status {status}"

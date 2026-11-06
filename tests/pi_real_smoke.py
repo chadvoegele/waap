@@ -26,6 +26,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("waap", type=Path)
     parser.add_argument("--pi", default="pi")
+    parser.add_argument("--shutdown-notification", action="store_true",
+                        help="emit a 128 KiB UI notification after native stdin EOF")
     args = parser.parse_args()
     waap = str(args.waap.resolve())
     ready = threading.Event()
@@ -84,6 +86,16 @@ def main():
             runtime.mkdir(mode=0o700)
             config = root / "pi"
             config.mkdir()
+            if args.shutdown_notification:
+                (config / "extensions").mkdir()
+                (config / "extensions/shutdown.ts").write_text('''import { writeFileSync } from "node:fs";
+export default function(pi) {
+  pi.on("session_shutdown", async (_event, ctx) => {
+    ctx.ui.notify("shutdown-notification" + "x".repeat(128 * 1024));
+    writeFileSync(process.env.PI_CODING_AGENT_DIR + "/shutdown-ran", "yes");
+  });
+}
+''')
             (config / "models.json").write_text(json.dumps({"providers": {"local-smoke": {
                 "baseUrl": f"http://127.0.0.1:{server.server_port}/v1", "api": "openai-completions",
                 "apiKey": "local-fixture", "models": [{"id": "fixture", "reasoning": False,
@@ -105,6 +117,7 @@ def main():
             base = [waap, "--waap-root", str(repo / ".state")]
             run(base + ["init"], cwd=repo, env=env)
             for mode in ["complete", "stop"]:
+                (config / "shutdown-ran").unlink(missing_ok=True)
                 ready.clear()
                 release.clear()
                 requests.clear()
@@ -122,6 +135,9 @@ def main():
                         run(base + ["agent", "stop", "--agent-id", agent], cwd=repo, env=env)
                     out, err = owner.communicate(timeout=15)
                     assert owner.returncode == 0, (out, err)
+                    assert "shutdown-notification" not in out + err, (out, err)
+                    if args.shutdown_notification:
+                        assert (config / "shutdown-ran").read_text() == "yes"
                     status = "completed" if mode == "complete" else "aborted"
                     record = (repo / ".state/agents" / agent / "agent.md").read_text()
                     assert f'status = "{status}"' in record, record

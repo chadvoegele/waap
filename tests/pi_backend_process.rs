@@ -129,6 +129,15 @@ fn write_pi_script(path: &Path, body: &str) {
     .unwrap();
 }
 
+fn shutdown_notification_script() -> String {
+    let record = serde_json::json!({
+        "type": "extension_ui_request",
+        "method": "notify",
+        "message": "shutdown-notification".to_owned() + &"x".repeat(128 * 1024),
+    });
+    format!("printf '%s\\n' '{record}'\n")
+}
+
 fn fake_pi_runner() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-pi-runner")
 }
@@ -270,7 +279,7 @@ fn stop_uses_shared_socket_after_steering_and_owner_persists_aborted() {
     let ready = project.root.join("pi-ready");
     write_pi_script(
         &fake,
-        r#"while IFS= read -r line; do
+        &(r#"while IFS= read -r line; do
   printf '%s\n' "$line" >> "$WAAP_FAKE_LOG"
   case "$line" in
     *'"type":"get_state"'*)
@@ -294,7 +303,7 @@ fn stop_uses_shared_socket_after_steering_and_owner_persists_aborted() {
       ;;
   esac
 done
-"#,
+"#.to_owned() + &shutdown_notification_script()),
     );
     let runner = project
         .command()
@@ -333,6 +342,7 @@ done
     let owner = wait_output(runner);
 
     assert_success(&owner);
+    assert!(!String::from_utf8_lossy(&owner.stdout).contains("shutdown-notification"));
     assert!(!String::from_utf8_lossy(&owner.stderr).contains("transition"));
     assert_record(&project, &agent_id, "aborted", "pi", "pi-abort-session");
     assert_eq!(
@@ -525,6 +535,99 @@ while IFS= read -r ignored; do :; done
         assert_record(&project, &agent_id, "failed", "pi", "handled-session");
         assert!(!project.worktree(&agent_id).exists());
         assert_reaped(&pid);
+    }
+}
+
+#[test]
+fn post_eof_protocol_output_larger_than_pipe_capacity_preserves_owner_outcome() {
+    for (reason, status) in [("stop", "completed"), ("error", "failed")] {
+        let project = Project::new();
+        let agent_id = project.create_agent("shutdown-output");
+        let fake = project.root.join("shutdown-pi");
+        let pid = project.root.join("shutdown-pi.pid");
+        let script = r#"
+IFS= read -r state
+printf '%s\n' '{"type":"response","id":"waap-1","command":"get_state","success":true,"data":{"sessionId":"shutdown-session"}}'
+IFS= read -r prompt
+printf '%s\n' '{"type":"response","id":"waap-2","command":"prompt","success":true,"data":{"disposition":"started"}}'
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"STOP_REASON"}}'
+printf '%s\n' '{"type":"agent_settled"}'
+while IFS= read -r ignored; do :; done
+"#.replace("STOP_REASON", reason) + &shutdown_notification_script();
+        write_pi_script(&fake, &script);
+        let output = wait_output(
+            project
+                .command()
+                .args(["agent", "run", "--agent-id", &agent_id])
+                .env("WAAP_PI_BIN", fake_pi_runner())
+                .env("WAAP_FAKE_PI_SCRIPT", fake)
+                .env("WAAP_FAKE_PID", &pid)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        assert_eq!(output.status.success(), status == "completed", "{output:?}");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("shutdown-notification"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("Pi RPC did not exit"));
+        assert_record(&project, &agent_id, status, "pi", "shutdown-session");
+        assert_reaped(&pid);
+        assert!(!project.worktree(&agent_id).exists());
+        assert!(!project.socket(&agent_id).exists());
+    }
+}
+
+#[test]
+fn shutdown_protocol_errors_and_nonzero_exit_fail_and_reap_owner_child() {
+    for (shutdown, error) in [
+        ("exec 1>&-; sleep 0.1; exit 7", "Pi RPC exited with status"),
+        ("printf 'not-json\\n'; exec sleep 30", "malformed JSON"),
+        (
+            "printf '{\"type\":\"partial\"}'; exec 1>&-; exec sleep 30",
+            "unterminated JSONL record",
+        ),
+    ] {
+        let project = Project::new();
+        let agent_id = project.create_agent("shutdown-error");
+        let fake = project.root.join("shutdown-error-pi");
+        let pid = project.root.join("shutdown-error-pi.pid");
+        let script = r#"
+IFS= read -r state
+printf '%s\n' '{"type":"response","id":"waap-1","command":"get_state","success":true,"data":{"sessionId":"shutdown-error-session"}}'
+IFS= read -r prompt
+printf '%s\n' '{"type":"response","id":"waap-2","command":"prompt","success":true,"data":{"disposition":"started"}}'
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop"}}'
+printf '%s\n' '{"type":"agent_settled"}'
+while IFS= read -r ignored; do :; done
+"#.to_owned() + shutdown;
+        write_pi_script(&fake, &script);
+        let output = wait_output(
+            project
+                .command()
+                .args(["agent", "run", "--agent-id", &agent_id])
+                .env("WAAP_PI_BIN", fake_pi_runner())
+                .env("WAAP_FAKE_PI_SCRIPT", fake)
+                .env("WAAP_FAKE_PID", &pid)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(error),
+            "{output:?}"
+        );
+        assert_record(
+            &project,
+            &agent_id,
+            "failed",
+            "pi",
+            "shutdown-error-session",
+        );
+        assert_reaped(&pid);
+        assert!(!project.worktree(&agent_id).exists());
+        assert!(!project.socket(&agent_id).exists());
     }
 }
 
