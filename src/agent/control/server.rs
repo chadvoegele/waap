@@ -21,12 +21,7 @@ impl ControlServer {
         }
     }
 
-    #[cfg(test)]
-    pub(in crate::agent) async fn run(&self) -> io::Result<()> {
-        self.run_until(std::future::pending()).await
-    }
-
-    pub(in crate::agent) async fn run_until(
+    pub(in crate::agent) async fn run(
         &self,
         shutdown: impl std::future::Future<Output = ()>,
     ) -> io::Result<()> {
@@ -111,7 +106,7 @@ mod tests {
         let (_repo, _runtime, control, path, mut commands) = fixture().await;
         let (shutdown, stopped) = tokio::sync::oneshot::channel();
         let (server, client, ()) = tokio::join!(
-            control.run_until(async {
+            control.run(async {
                 let _ = stopped.await;
             }),
             async {
@@ -267,7 +262,7 @@ mod tests {
     async fn cancellation_of_idle_or_unpolled_server_needs_no_notification() {
         for polled in [false, true] {
             let (_repo, _runtime, mut server, path, _commands) = fixture().await;
-            let future = server.run();
+            let future = server.run(std::future::pending());
             if polled {
                 assert!(future.now_or_never().is_none());
             } else {
@@ -285,7 +280,7 @@ mod tests {
         let mut pending = Vec::new();
         tokio::time::timeout(Duration::from_secs(2), async {
             tokio::select! {
-                result = server.run() => panic!("server exited: {result:?}"),
+                result = server.run(std::future::pending()) => panic!("server exited: {result:?}"),
                 _ = async {
                     let mut slow = UnixStream::connect(&path).await.unwrap();
                     slow.write_all(b"{").await.unwrap();
@@ -329,7 +324,7 @@ mod tests {
     async fn completed_handlers_are_reaped_before_admitting_backlogged_connections() {
         let (_repo, _runtime, mut server, path, mut commands) = fixture().await;
         tokio::time::timeout(Duration::from_secs(2), async {
-            let future = server.run();
+            let future = server.run(std::future::pending());
             tokio::pin!(future);
             let mut clients = Vec::new();
             let mut pending = Vec::new();
@@ -369,7 +364,7 @@ mod tests {
         let (_repo, _runtime, mut server, path, mut commands) = fixture().await;
         tokio::time::timeout(Duration::from_secs(2), async {
             tokio::select! {
-                result = server.run() => panic!("server exited: {result:?}"),
+                result = server.run(std::future::pending()) => panic!("server exited: {result:?}"),
                 _ = async {
                     for index in 0..MAX_HANDLERS * 2 {
                         let (request, mut client) = send_request(&path, &format!("request {index}")).await;

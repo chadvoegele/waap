@@ -201,7 +201,7 @@ impl AgentApp {
                 let _ = shutdown.send(());
                 result.unwrap_or_else(|_| Err(io::Error::other("agent wait panicked")))
             },
-            self.control.run_until(async {
+            self.control.run(async {
                 let _ = stopped.await;
             }),
         );

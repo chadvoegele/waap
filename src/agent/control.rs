@@ -346,7 +346,7 @@ pub(in crate::agent) mod tests {
             async {
                 let unsupported = runner.run(receiver);
                 tokio::select! {
-                    result = server.run() => result.map(|_| RunOutcome::Completed),
+                    result = server.run(std::future::pending()) => result.map(|_| RunOutcome::Completed),
                     result = unsupported => panic!("backend exited before rejection: {result:?}"),
                     _ = complete.notified() => { server.close()?; Ok(RunOutcome::Completed) },
                 }
