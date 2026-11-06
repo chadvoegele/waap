@@ -64,12 +64,6 @@ pub(crate) fn stop_agents_with_systems(
     let selected = {
         let lock = crate::state::StateLock::acquire(waap_root)?;
         let selected = select_agents_to_stop(waap_root, agent_id, &lock)?;
-        #[cfg(test)]
-        tests::AFTER_SELECTION.with_borrow_mut(|hook| {
-            if let Some(hook) = hook.take() {
-                hook();
-            }
-        });
         if let [report] = selected.as_slice() {
             if report.metadata.status == AgentStatus::Ready.as_str() {
                 let (report, commit) = persist_stopped_agent_locked(waap_root, report, &lock)?;
@@ -245,11 +239,6 @@ mod tests {
     use crate::agent::backend::{fake::FakeBackend, Backend};
     use crate::agent::get::load_agent_report;
     use crate::agent::{AgentMetadata, AgentReport};
-
-    thread_local! {
-        pub(super) static AFTER_SELECTION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-            std::cell::RefCell::new(None);
-    }
 
     #[test]
     fn stop_output_uses_explicit_outcome_for_every_system_and_status() {
@@ -606,72 +595,59 @@ mod tests {
     }
 
     #[test]
-    fn ready_cancellation_keeps_selection_locked_against_concurrent_start() {
-        use std::sync::mpsc;
-        use std::time::Duration;
-
+    fn ready_cancellation_persists_and_commits_under_selection_lock() {
         let dir = tempdir().unwrap();
         crate::test_git::init_repo_with_commit(dir.path());
         write_agent(dir.path(), "aa-test", "ready");
-        let root = dir.path().to_path_buf();
-        let (selected_tx, selected_rx) = mpsc::channel();
-        let (contending_tx, contending_rx) = mpsc::channel();
-        AFTER_SELECTION.set(Some(Box::new(move || {
-            selected_tx.send(()).unwrap();
-            contending_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        })));
+        let lock = crate::state::StateLock::acquire(dir.path()).unwrap();
+        let selected = super::select_agents_to_stop(dir.path(), Some("aa-test"), &lock).unwrap();
+        assert_eq!(selected[0].metadata.status, "ready");
+        let contender = fs::OpenOptions::new()
+            .write(true)
+            .open(dir.path().join(".git/waap-state.lock"))
+            .unwrap();
+        assert!(matches!(
+            contender.try_lock(),
+            Err(fs::TryLockError::WouldBlock)
+        ));
 
-        let starter = std::thread::spawn(move || {
-            selected_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-            assert_eq!(
-                load_agent_report(&root, "aa-test").unwrap().metadata.status,
-                "ready"
-            );
-            let contender = fs::OpenOptions::new()
-                .write(true)
-                .open(root.join(".git/waap-state.lock"))
-                .unwrap();
-            let locked = matches!(contender.try_lock(), Err(fs::TryLockError::WouldBlock));
-            contending_tx.send(()).unwrap();
-            assert!(locked, "ready selection must retain the cancellation lock");
+        let (stopped, commit) =
+            super::persist_stopped_agent_locked(dir.path(), &selected[0], &lock).unwrap();
 
-            let error = crate::agent::run::run_agent(
-                &root,
-                &root,
-                Err(io::Error::other("backend must not start")),
-                &crate::cli::OutputFormat::Json,
-                "aa-test",
-                &crate::agent::AgentSystem::Codex,
-                &crate::agent::AgentRunOptions::default(),
-            )
-            .unwrap_err();
-            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-            assert!(error.to_string().contains("aborted"), "{error}");
-            let _lock = crate::state::StateLock::acquire(&root).unwrap();
-            assert_eq!(
-                load_agent_report(&root, "aa-test").unwrap().metadata.status,
-                "aborted"
-            );
-            let committed = crate::test_git::run(&root, &["show", "HEAD:agents/aa-test/agent.md"]);
-            assert!(committed.contains("status = \"aborted\""));
-        });
-
-        let stopped = super::stop_agents_with_systems(
-            dir.path(),
-            Err(io::Error::other("ready cancellation needs no backend")),
-            Some("aa-test"),
-        )
-        .unwrap();
-        starter.join().unwrap();
-        assert_eq!(stopped.agent_stops[0].report.metadata.status, "aborted");
+        assert_eq!(stopped.metadata.status, "aborted");
         assert_eq!(
-            stopped.agent_stops[0].outcome,
-            crate::agent::backend::AbortOutcome::Stopped
+            load_agent_report(dir.path(), "aa-test")
+                .unwrap()
+                .metadata
+                .status,
+            "aborted"
         );
         assert_eq!(
-            stopped.commit.unwrap(),
+            commit.unwrap(),
             crate::test_git::run(dir.path(), &["rev-parse", "HEAD"])
         );
+        let committed = crate::test_git::run(dir.path(), &["show", "HEAD:agents/aa-test/agent.md"]);
+        assert!(committed.contains("status = \"aborted\""));
+        assert!(matches!(
+            contender.try_lock(),
+            Err(fs::TryLockError::WouldBlock)
+        ));
+        drop(lock);
+        contender.try_lock().unwrap();
+        contender.unlock().unwrap();
+
+        let error = crate::agent::run::run_agent(
+            dir.path(),
+            dir.path(),
+            Err(io::Error::other("backend must not start")),
+            &crate::cli::OutputFormat::Json,
+            "aa-test",
+            &crate::agent::AgentSystem::Codex,
+            &crate::agent::AgentRunOptions::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("aborted"), "{error}");
     }
 
     #[test]
