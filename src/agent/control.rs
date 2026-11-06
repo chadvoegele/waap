@@ -10,6 +10,10 @@ pub(super) use server::ControlServer;
 use socket::SocketConnection;
 pub(super) use socket::{SocketListener, SocketPath};
 
+// Connect, frame read, and frame write each have a five-second deadline.
+// Dispatch allows 30 seconds for native acknowledgement; the client waits
+// another five seconds for response delivery. Shutdown drains at most eight
+// concurrent handlers, each bounded by read + dispatch + write (40 seconds).
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -17,8 +21,9 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(30);
 pub(in crate::agent) mod tests {
     use super::socket::MAX_FRAME_BYTES;
     use super::*;
-    use crate::agent::backend::{AgentSessionRun, RunOutcome, Runner, SteeringError};
+    use crate::agent::backend::{AgentSessionRun, RunOutcome, Runner};
     use crate::agent::commands::CommandDispatcher;
+    use crate::agent::commands::CommandError;
     use crate::root::{find_control_root_in, ControlRoot};
     use serde_json::{json, Value};
     use std::fs;
@@ -42,7 +47,7 @@ pub(in crate::agent) mod tests {
     }
 
     impl Fixture {
-        async fn wait<F: Fn(&str, Instant) -> Result<(), SteeringError>>(
+        async fn wait<F: Fn(&str, Instant) -> Result<(), CommandError>>(
             self,
             runner: &FakeRunner<F>,
         ) -> io::Result<RunOutcome> {
@@ -57,7 +62,7 @@ pub(in crate::agent) mod tests {
                     .map(|_| ())
                     .map_err(io::Error::other)
             });
-            let (dispatcher, receiver) = CommandDispatcher::channel();
+            let (dispatcher, receiver) = CommandDispatcher::create_channel();
             let session = AgentSessionRun::new(
                 "test".into(),
                 Runner::Fake(crate::agent::backend::fake::FakeRunner {
@@ -187,7 +192,7 @@ pub(in crate::agent) mod tests {
                 .map(|_| ())
                 .map_err(io::Error::other)
         });
-        let (dispatcher, receiver) = CommandDispatcher::channel();
+        let (dispatcher, receiver) = CommandDispatcher::create_channel();
         let session = AgentSessionRun::new(
             "test".into(),
             Runner::Fake(crate::agent::backend::fake::FakeRunner {
@@ -335,13 +340,13 @@ pub(in crate::agent) mod tests {
         let fixture = Fixture::new().await;
         let path = fixture.path.clone();
         let complete = tokio::sync::Notify::new();
-        let (dispatcher, receiver) = CommandDispatcher::channel();
+        let (dispatcher, receiver) = CommandDispatcher::create_channel();
         let mut server = ControlServer::new(fixture.listener, dispatcher);
         let (outcome, reply) = tokio::join!(
             async {
                 let unsupported = runner.run(receiver);
                 tokio::select! {
-                    result = server.run() => result.map(|_| RunOutcome::Completed),
+                    result = server.run(std::future::pending()) => result.map(|_| RunOutcome::Completed),
                     result = unsupported => panic!("backend exited before rejection: {result:?}"),
                     _ = complete.notified() => { server.close()?; Ok(RunOutcome::Completed) },
                 }

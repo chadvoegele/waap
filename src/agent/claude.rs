@@ -8,7 +8,9 @@ use tokio::sync::mpsc::Receiver;
 use super::process::AgentProcess;
 use uuid::Uuid;
 
-use super::backend::{AbortContext, AgentSessionRun, RunOutcome, Runner, StartContext};
+use super::backend::{
+    AbortContext, AbortOutcome, AgentSessionRun, RunOutcome, Runner, StartContext,
+};
 use super::commands::Command;
 
 pub(super) struct ClaudeBackend {
@@ -43,8 +45,11 @@ impl ClaudeBackend {
             receiver,
         ))
     }
-    pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
-        kill_claude_session(context.session_id).await
+    pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<AbortOutcome> {
+        if let Some(session_id) = context.session_id {
+            kill_claude_session(session_id).await?;
+        }
+        Ok(AbortOutcome::Stopped)
     }
 }
 
@@ -159,8 +164,9 @@ mod tests {
         ClaudeRunConfig,
     };
 
-    use crate::agent::backend::{RunOutcome, SteeringError};
+    use crate::agent::backend::RunOutcome;
     use crate::agent::commands::CommandDispatcher;
+    use crate::agent::commands::CommandError;
     use futures_util::FutureExt;
     use std::process::Stdio;
     use std::time::{Duration, Instant};
@@ -179,7 +185,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn concrete_runner_rejects_steering_then_finishes_the_same_process_wait() {
         let (mut runner, mut release) = pending_runner();
-        let (dispatcher, receiver) = CommandDispatcher::channel();
+        let (dispatcher, receiver) = CommandDispatcher::create_channel();
         let mut execution = Box::pin(runner.run(receiver));
         assert!(execution.as_mut().now_or_never().is_none());
         let ((), result) = tokio::join!(
@@ -188,7 +194,7 @@ mod tests {
                     dispatcher
                         .steer("pending", Instant::now() + Duration::from_secs(2))
                         .await,
-                    Err(SteeringError::not_implemented("claude"))
+                    Err(CommandError::not_implemented("claude", "steering"))
                 );
                 release.write_all(b"finish\n").await.unwrap();
             },
@@ -205,7 +211,7 @@ mod tests {
             dispatcher
                 .steer("completed", Instant::now() + Duration::from_secs(2))
                 .await,
-            Err(SteeringError::Rejected {
+            Err(CommandError::Rejected {
                 code: "agent_exited",
                 ..
             })
@@ -217,7 +223,7 @@ mod tests {
         let (mut runner, mut release) = pending_runner();
         release.write_all(b"finish\n").await.unwrap();
         assert_eq!(runner.child.wait().await.unwrap().code(), Some(7));
-        let (dispatcher, receiver) = CommandDispatcher::channel();
+        let (dispatcher, receiver) = CommandDispatcher::create_channel();
         let steering = dispatcher.steer("queued", Instant::now() + Duration::from_secs(30));
         tokio::pin!(steering);
         assert!(steering.as_mut().now_or_never().is_none());
@@ -229,8 +235,8 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            matches!(result, Err(SteeringError::AcceptanceUnknown { .. }))
-                || result == Err(SteeringError::not_implemented("claude"))
+            matches!(result, Err(CommandError::AcceptanceUnknown { .. }))
+                || result == Err(CommandError::not_implemented("claude", "steering"))
         );
         runner.cleanup().await.unwrap();
     }
@@ -239,7 +245,7 @@ mod tests {
     async fn concrete_runner_cancellation_releases_queued_replies_before_or_after_polling() {
         for polled in [false, true] {
             let (mut runner, _release) = pending_runner();
-            let (dispatcher, receiver) = CommandDispatcher::channel();
+            let (dispatcher, receiver) = CommandDispatcher::create_channel();
             let mut execution = Box::pin(runner.run(receiver));
             if polled {
                 assert!(execution.as_mut().now_or_never().is_none());
@@ -252,13 +258,13 @@ mod tests {
                 tokio::time::timeout(Duration::from_millis(100), steering)
                     .await
                     .unwrap(),
-                Err(SteeringError::AcceptanceUnknown { .. })
+                Err(CommandError::AcceptanceUnknown { .. })
             ));
             assert!(matches!(
                 dispatcher
                     .steer("cancelled", Instant::now() + Duration::from_secs(2))
                     .await,
-                Err(SteeringError::Rejected {
+                Err(CommandError::Rejected {
                     code: "agent_exited",
                     ..
                 })

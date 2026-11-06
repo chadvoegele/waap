@@ -9,18 +9,28 @@ use tokio::sync::mpsc::Receiver;
 use reqwest::{Client, Response};
 use serde_json::{json, Value as JsonValue};
 
-use super::backend::{AbortContext, AgentSessionRun, RunOutcome, Runner, StartContext};
+use super::backend::{
+    AbortContext, AbortOutcome, AgentSessionRun, RunOutcome, Runner, StartContext,
+};
 use super::commands::Command;
 
+#[derive(Default)]
 pub(super) struct OpencodeBackend {
-    config: OpencodeRunConfig,
+    config: Option<OpencodeRunConfig>,
 }
 
 impl OpencodeBackend {
     pub(super) fn from_env() -> io::Result<Self> {
         Ok(Self {
-            config: opencode_run_config_from_env()?,
+            config: Some(opencode_run_config_from_env()?),
         })
+    }
+
+    fn config(&mut self) -> io::Result<&OpencodeRunConfig> {
+        if self.config.is_none() {
+            self.config = Some(opencode_run_config_from_env()?);
+        }
+        Ok(self.config.as_ref().expect("configuration initialized"))
     }
 
     pub(super) async fn start(
@@ -28,14 +38,15 @@ impl OpencodeBackend {
         context: StartContext<'_>,
         receiver: Receiver<Command>,
     ) -> io::Result<AgentSessionRun> {
+        let config = self.config()?;
         let repository_root = opencode_repository_root(context.repository_root)?;
         let client = opencode_client()?;
-        let session_id = create_opencode_session(&client, &self.config, &repository_root).await?;
+        let session_id = create_opencode_session(&client, config, &repository_root).await?;
         // Subscribe first so a fast agent cannot finish before monitoring begins.
-        let events = subscribe_opencode_events(&client, &self.config, &repository_root).await?;
+        let events = subscribe_opencode_events(&client, config, &repository_root).await?;
         submit_opencode_prompt(
             &client,
-            &self.config,
+            config,
             &session_id,
             &repository_root,
             context.prompt,
@@ -50,9 +61,13 @@ impl OpencodeBackend {
             receiver,
         ))
     }
-    pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
-        let root = opencode_repository_root(context.waap_root)?;
-        abort_opencode_session(&self.config, context.session_id, &root).await
+    pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<AbortOutcome> {
+        if let Some(session_id) = context.session_id {
+            let config = self.config()?;
+            let root = opencode_repository_root(context.waap_root)?;
+            abort_opencode_session(config, session_id, &root).await?;
+        }
+        Ok(AbortOutcome::Stopped)
     }
 }
 
@@ -498,8 +513,8 @@ mod tests {
         prompt_payload, OpencodeBackend, OpencodeRunConfig, RunOutcome, StartContext,
     };
 
-    use crate::agent::backend::SteeringError;
     use crate::agent::commands::CommandDispatcher;
+    use crate::agent::commands::CommandError;
     use futures_util::FutureExt;
     use std::time::{Duration, Instant};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -539,7 +554,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn concrete_runner_rejects_steering_then_finishes_the_same_event_wait() {
         let (mut runner, mut socket) = pending_runner().await;
-        let (dispatcher, receiver) = CommandDispatcher::channel();
+        let (dispatcher, receiver) = CommandDispatcher::create_channel();
         let mut execution = Box::pin(runner.run(receiver));
         assert!(execution.as_mut().now_or_never().is_none());
         let ((), result) = tokio::join!(
@@ -548,7 +563,7 @@ mod tests {
                     dispatcher
                         .steer("pending", Instant::now() + Duration::from_secs(2))
                         .await,
-                    Err(SteeringError::not_implemented("opencode"))
+                    Err(CommandError::not_implemented("opencode", "steering"))
                 );
                 finish_events(&mut socket).await;
             },
@@ -561,7 +576,7 @@ mod tests {
             dispatcher
                 .steer("completed", Instant::now() + Duration::from_secs(2))
                 .await,
-            Err(SteeringError::Rejected {
+            Err(CommandError::Rejected {
                 code: "agent_exited",
                 ..
             })
@@ -580,7 +595,7 @@ mod tests {
     async fn concrete_runner_completion_releases_queued_replies() {
         let (mut runner, mut socket) = pending_runner().await;
         finish_events(&mut socket).await;
-        let (dispatcher, receiver) = CommandDispatcher::channel();
+        let (dispatcher, receiver) = CommandDispatcher::create_channel();
         let steering = dispatcher.steer("queued", Instant::now() + Duration::from_secs(30));
         tokio::pin!(steering);
         assert!(steering.as_mut().now_or_never().is_none());
@@ -595,8 +610,8 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            matches!(result, Err(SteeringError::AcceptanceUnknown { .. }))
-                || result == Err(SteeringError::not_implemented("opencode"))
+            matches!(result, Err(CommandError::AcceptanceUnknown { .. }))
+                || result == Err(CommandError::not_implemented("opencode", "steering"))
         );
         assert!(runner.events.is_none());
         let mut byte = [0];
@@ -613,7 +628,7 @@ mod tests {
     async fn concrete_runner_cancellation_releases_queued_replies_before_or_after_polling() {
         for polled in [false, true] {
             let (mut runner, mut socket) = pending_runner().await;
-            let (dispatcher, receiver) = CommandDispatcher::channel();
+            let (dispatcher, receiver) = CommandDispatcher::create_channel();
             let mut execution = Box::pin(runner.run(receiver));
             if polled {
                 assert!(execution.as_mut().now_or_never().is_none());
@@ -626,13 +641,13 @@ mod tests {
                 tokio::time::timeout(Duration::from_millis(100), steering)
                     .await
                     .unwrap(),
-                Err(SteeringError::AcceptanceUnknown { .. })
+                Err(CommandError::AcceptanceUnknown { .. })
             ));
             assert!(matches!(
                 dispatcher
                     .steer("cancelled", Instant::now() + Duration::from_secs(2))
                     .await,
-                Err(SteeringError::Rejected {
+                Err(CommandError::Rejected {
                     code: "agent_exited",
                     ..
                 })
@@ -813,10 +828,10 @@ mod tests {
                 .unwrap();
         });
         let mut backend = OpencodeBackend {
-            config: OpencodeRunConfig {
+            config: Some(OpencodeRunConfig {
                 server_url: format!("http://{address}"),
                 ..OpencodeRunConfig::for_test()
-            },
+            }),
         };
 
         let mut started = backend
@@ -827,7 +842,7 @@ mod tests {
                     repository_root: &repository_root,
                     worktree_dir: root.path(),
                 },
-                super::super::commands::CommandDispatcher::channel().1,
+                super::super::commands::CommandDispatcher::create_channel().1,
             )
             .await
             .unwrap();
@@ -977,10 +992,10 @@ mod tests {
             );
         });
         let mut backend = OpencodeBackend {
-            config: OpencodeRunConfig {
+            config: Some(OpencodeRunConfig {
                 server_url: format!("http://{address}"),
                 ..OpencodeRunConfig::for_test()
-            },
+            }),
         };
 
         let error = match backend
@@ -991,7 +1006,7 @@ mod tests {
                     repository_root: &repository_root,
                     worktree_dir: root.path(),
                 },
-                super::super::commands::CommandDispatcher::channel().1,
+                super::super::commands::CommandDispatcher::create_channel().1,
             )
             .await
         {

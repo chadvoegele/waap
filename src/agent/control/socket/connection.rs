@@ -17,7 +17,10 @@ impl SocketConnection {
     }
 
     pub(in crate::agent::control) async fn connect(path: &Path) -> io::Result<Self> {
-        UnixStream::connect(path).await.map(Self::new).map_err(|error| {
+        tokio::time::timeout(IO_TIMEOUT, UnixStream::connect(path))
+            .await
+            .unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "control connection deadline expired")))
+            .map(Self::new).map_err(|error| {
             io::Error::new(error.kind(), format!("cannot connect to control socket {}: {error}; agent may be starting, exited, or have a stale endpoint", path.display()))
         })
     }

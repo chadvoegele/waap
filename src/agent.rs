@@ -345,9 +345,10 @@ impl AgentSystem {
         }
 
         match self {
-            AgentSystem::Opencode => Ok(backend::Backend::Opencode(
-                opencode::OpencodeBackend::from_env()?,
-            )),
+            AgentSystem::Opencode => Ok(backend::Backend::Opencode(match options {
+                Some(_) => opencode::OpencodeBackend::from_env()?,
+                None => opencode::OpencodeBackend::default(),
+            })),
             AgentSystem::Claude => Ok(backend::Backend::Claude(claude::ClaudeBackend::from_env())),
             AgentSystem::Codex => match options {
                 Some(options) => Ok(backend::Backend::Codex(codex::CodexBackend::from_env(

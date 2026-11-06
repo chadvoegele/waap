@@ -396,3 +396,81 @@ fn cli_resolves_primary_repository_socket_from_linked_worktree() {
     });
     assert_eq!(fixture.snapshot(), before);
 }
+
+#[test]
+fn stop_acknowledges_without_state_mutation_or_lock_during_remote_wait() {
+    let fixture = Fixture::new();
+    let before = fixture.snapshot();
+    let listener = fixture.listener();
+    thread::scope(|scope| {
+        let server = scope.spawn(|| {
+            serve(&listener, |request| {
+                assert_eq!(request["method"], "stop");
+                assert!(request.get("prompt").is_none());
+                let state = fixture.repo.path().join(".state");
+                let git_dir = git(&state, &["rev-parse", "--absolute-git-dir"]);
+                let lock = fs::OpenOptions::new()
+                    .write(true)
+                    .open(Path::new(git_dir.trim()).join("waap-state.lock"))
+                    .unwrap();
+                lock.try_lock()
+                    .expect("stop CLI must release the state lock before waiting");
+                frame(json!({"version":1,"request_id":request["request_id"],"accepted":true}))
+            })
+        });
+        let output = fixture
+            .command()
+            .args([
+                "--output-format",
+                "json",
+                "agent",
+                "stop",
+                "--agent-id",
+                "aa-test",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["stopped_agents"][0]["metadata"]["status"], "running");
+        assert!(report["commit"].is_null());
+        server.join().unwrap();
+    });
+    assert_eq!(fixture.snapshot(), before);
+}
+
+#[test]
+fn stop_missing_stale_legacy_and_rejected_endpoints_preserve_running_state() {
+    let fixture = Fixture::new();
+    let before = fixture.snapshot();
+    let stop = || {
+        fixture
+            .command()
+            .args(["agent", "stop", "--agent-id", "aa-test"])
+            .output()
+            .unwrap()
+    };
+    assert!(diagnostic(&stop()).contains("cannot connect"));
+    let path = fixture.socket();
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    drop(std::os::unix::net::UnixDatagram::bind(&path).unwrap());
+    assert!(diagnostic(&stop()).contains("stale endpoint"));
+    fs::remove_file(path).unwrap();
+    for code in ["unknown_method", "interrupt_rejected"] {
+        let listener = fixture.listener();
+        thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                serve(&listener, |request| {
+                    frame(json!({
+                        "version":1,"request_id":request["request_id"],"accepted":false,
+                        "error":{"code":code,"message":"stop unavailable"}
+                    }))
+                })
+            });
+            assert!(diagnostic(&stop()).contains(code));
+            server.join().unwrap();
+        });
+        fs::remove_file(fixture.socket()).unwrap();
+    }
+    assert_eq!(fixture.snapshot(), before);
+}

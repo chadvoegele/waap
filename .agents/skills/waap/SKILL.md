@@ -41,6 +41,13 @@ Then run the agent with `waap agent run --agent-id aa-1234abcd`.
 Steer a running agent with `waap agent steer --agent-id aa-1234abcd --prompt "Focus on keyboard navigation"`.
 Steering currently supports Codex; Claude and OpenCode return an unsupported-backend error.
 
+Stop one agent, or omit `--agent-id` to stop all running agents in this repository:
+
+```sh
+waap agent stop --agent-id aa-1234abcd
+waap agent stop
+```
+
 ## State Model
 
 waap tracks `${waap_data}` on the dedicated `waap` branch.

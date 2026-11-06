@@ -19,6 +19,10 @@ impl ControlClient {
         self.exchange(Request::steer(prompt)).await
     }
 
+    pub(in crate::agent) async fn stop(&mut self) -> io::Result<()> {
+        self.exchange(Request::stop()).await
+    }
+
     async fn exchange(&mut self, request: Request) -> io::Result<()> {
         let payload = serde_json::to_vec(&request)?;
         self.connection
@@ -49,7 +53,9 @@ impl ControlClient {
 fn validate_response(frame: &[u8], request_id: &str) -> io::Result<()> {
     let invalid = || build_acceptance_unknown_error("invalid or uncorrelated control response");
     let response: Response = serde_json::from_slice(frame).map_err(|_| invalid())?;
-    if response.version != 1 || response.request_id.as_deref() != Some(request_id) {
+    if response.version != super::protocol::PROTOCOL_VERSION
+        || response.request_id.as_deref() != Some(request_id)
+    {
         return Err(invalid());
     }
     match (response.accepted, response.error) {

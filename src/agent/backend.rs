@@ -3,6 +3,8 @@ use std::path::Path;
 use std::process::{ExitCode, ExitStatus};
 
 use super::commands::Command;
+#[cfg(test)]
+use super::commands::CommandError;
 use super::{claude::ClaudeBackend, codex::CodexBackend, opencode::OpencodeBackend};
 use std::future::Future;
 use tokio::sync::mpsc::Receiver;
@@ -10,6 +12,7 @@ use tokio::sync::mpsc::Receiver;
 #[derive(Debug, PartialEq)]
 pub(super) enum RunOutcome {
     Completed,
+    Aborted,
     Failed(ExitCode),
 }
 
@@ -84,43 +87,18 @@ impl Runner {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum SteeringError {
-    Rejected { code: &'static str, message: String },
-    AcceptanceUnknown { message: String },
+/// Acceptance leaves cleanup and terminal persistence to the live run owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AbortOutcome {
+    StopAccepted,
+    Stopped,
 }
-
-impl SteeringError {
-    pub(super) fn not_implemented(backend: &str) -> Self {
-        Self::Rejected {
-            code: "not_implemented",
-            message: format!("steering not implemented for backend {backend}"),
-        }
-    }
-    pub(super) fn acceptance_unknown(reason: &str) -> Self {
-        Self::AcceptanceUnknown {
-            message: format!(
-                "Steering acceptance is unknown: {reason}; do not retry automatically"
-            ),
-        }
-    }
-}
-
-impl std::fmt::Display for SteeringError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Rejected { message, .. } | Self::AcceptanceUnknown { message } => {
-                f.write_str(message)
-            }
-        }
-    }
-}
-impl std::error::Error for SteeringError {}
 
 pub(super) struct AbortContext<'a> {
     pub(super) waap_root: &'a Path,
+    pub(super) session_id: Option<&'a str>,
     pub(super) agent_id: &'a str,
-    pub(super) session_id: &'a str,
+    pub(super) control_root: &'a io::Result<crate::root::ControlRoot>,
 }
 
 pub(super) enum Backend {
@@ -144,7 +122,7 @@ impl Backend {
             Self::Fake(b) => b.start(context, receiver).await,
         }
     }
-    pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
+    pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<AbortOutcome> {
         match self {
             Self::Claude(b) => b.abort(context).await,
             Self::Codex(b) => b.abort(context).await,
@@ -194,8 +172,8 @@ pub(super) mod fake {
     #[derive(Debug, PartialEq, Eq)]
     pub(crate) struct AbortCall {
         pub(crate) waap_root: PathBuf,
+        pub(crate) session_id: Option<String>,
         pub(crate) agent_id: String,
-        pub(crate) session_id: String,
     }
 
     pub(crate) struct FakeBackend {
@@ -205,10 +183,11 @@ pub(super) mod fake {
         pub(crate) wait_error: Option<String>,
         pub(crate) wait_action: Option<Box<dyn FnOnce() -> io::Result<()> + Send>>,
         pub(crate) abort_error: Option<String>,
+        pub(crate) abort_outcome: AbortOutcome,
         pub(crate) start_calls: Vec<StartCall>,
         pub(crate) wait_calls: Arc<AtomicUsize>,
         pub(crate) steer_calls: Arc<Mutex<Vec<(String, Instant, std::thread::ThreadId)>>>,
-        pub(crate) steer_error: Option<SteeringError>,
+        pub(crate) steer_error: Option<CommandError>,
         pub(crate) abort_calls: Vec<AbortCall>,
     }
     impl Default for FakeBackend {
@@ -220,6 +199,7 @@ pub(super) mod fake {
                 wait_error: None,
                 wait_action: None,
                 abort_error: None,
+                abort_outcome: AbortOutcome::Stopped,
                 start_calls: Vec::new(),
                 wait_calls: Arc::new(AtomicUsize::new(0)),
                 steer_calls: Arc::new(Mutex::new(Vec::new())),
@@ -234,7 +214,7 @@ pub(super) mod fake {
         pub(in crate::agent) action: Option<Box<dyn FnOnce() -> io::Result<()> + Send>>,
         pub(in crate::agent) wait_calls: Arc<AtomicUsize>,
         pub(in crate::agent) steer_calls: Arc<Mutex<Vec<(String, Instant, std::thread::ThreadId)>>>,
-        pub(in crate::agent) steer_error: Option<SteeringError>,
+        pub(in crate::agent) steer_error: Option<CommandError>,
     }
     impl FakeRunner {
         pub(super) async fn run(
@@ -259,9 +239,14 @@ pub(super) mod fake {
                         }
                         return if let Some(error) = self.error.take() { Err(io::Error::other(error)) } else { Ok(self.outcome.take().unwrap()) };
                     }
-                    Some(Command::Steer(mut request)) = commands.recv() => {
-                        self.steer_calls.lock().unwrap().push((request.message.clone(), request.deadline, std::thread::current().id()));
-                        request.respond(self.steer_error.clone().map_or(Ok(()), Err));
+                    Some(command) = commands.recv() => {
+                        match command {
+                            Command::Steer { prompt, mut request } => {
+                                self.steer_calls.lock().unwrap().push((prompt, request.deadline, std::thread::current().id()));
+                                request.respond(self.steer_error.clone().map_or(Ok(()), Err));
+                            }
+                            Command::Stop(mut request) => request.respond(self.steer_error.clone().map_or(Ok(()), Err)),
+                        }
                     }
                 }
             }
@@ -296,37 +281,21 @@ pub(super) mod fake {
                 receiver,
             ))
         }
-        pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
+        pub(super) async fn abort(
+            &mut self,
+            context: AbortContext<'_>,
+        ) -> io::Result<AbortOutcome> {
             self.abort_calls.push(AbortCall {
                 waap_root: context.waap_root.into(),
+                session_id: context.session_id.map(str::to_owned),
                 agent_id: context.agent_id.into(),
-                session_id: context.session_id.into(),
             });
             self.abort_error
                 .as_ref()
-                .map_or(Ok(()), |error| Err(io::Error::other(error.clone())))
+                .map_or(Ok(self.abort_outcome), |error| {
+                    Err(io::Error::other(error.clone()))
+                })
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::os::unix::process::ExitStatusExt;
-    #[test]
-    fn exit_status_maps_success_and_exact_failure_code() {
-        assert_eq!(
-            RunOutcome::from_exit_status(ExitStatus::from_raw(0)),
-            RunOutcome::Completed
-        );
-        assert_eq!(
-            RunOutcome::from_exit_status(ExitStatus::from_raw(7 << 8)),
-            RunOutcome::Failed(ExitCode::from(7))
-        );
-        assert_eq!(
-            RunOutcome::from_exit_status(ExitStatus::from_raw(9)),
-            RunOutcome::Failed(ExitCode::from(1))
-        );
     }
 }
 
@@ -354,7 +323,7 @@ mod execution_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn completed_session_releases_receiver_while_retaining_runner() {
-        let (dispatcher, receiver) = CommandDispatcher::channel();
+        let (dispatcher, receiver) = CommandDispatcher::create_channel();
         let mut session = session(receiver);
         assert_eq!(session.run().await.unwrap(), RunOutcome::Completed);
         assert!(session.receiver.is_none());
@@ -362,7 +331,7 @@ mod execution_tests {
             dispatcher
                 .steer("completed", Instant::now() + Duration::from_secs(1))
                 .await,
-            Err(SteeringError::Rejected {
+            Err(CommandError::Rejected {
                 code: "agent_exited",
                 ..
             })
@@ -373,7 +342,7 @@ mod execution_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn cancelled_session_releases_queued_replies_before_or_after_polling() {
         for polled in [false, true] {
-            let (dispatcher, receiver) = CommandDispatcher::channel();
+            let (dispatcher, receiver) = CommandDispatcher::create_channel();
             let mut session = session(receiver);
             let (release, wait) = std::sync::mpsc::channel();
             let Runner::Fake(runner) = &mut session.runner else {
@@ -397,18 +366,38 @@ mod execution_tests {
                 tokio::time::timeout(Duration::from_millis(100), steering)
                     .await
                     .unwrap(),
-                Err(SteeringError::AcceptanceUnknown { .. })
+                Err(CommandError::AcceptanceUnknown { .. })
             ));
             assert!(matches!(
                 dispatcher
                     .steer("cancelled", Instant::now() + Duration::from_secs(1))
                     .await,
-                Err(SteeringError::Rejected {
+                Err(CommandError::Rejected {
                     code: "agent_exited",
                     ..
                 })
             ));
             session.runner.cleanup().await.unwrap();
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+    #[test]
+    fn exit_status_maps_success_and_exact_failure_code() {
+        assert_eq!(
+            RunOutcome::from_exit_status(ExitStatus::from_raw(0)),
+            RunOutcome::Completed
+        );
+        assert_eq!(
+            RunOutcome::from_exit_status(ExitStatus::from_raw(7 << 8)),
+            RunOutcome::Failed(ExitCode::from(7))
+        );
+        assert_eq!(
+            RunOutcome::from_exit_status(ExitStatus::from_raw(9)),
+            RunOutcome::Failed(ExitCode::from(1))
+        );
     }
 }
