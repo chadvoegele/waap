@@ -8,7 +8,9 @@ use tokio::sync::mpsc::Receiver;
 use super::process::AgentProcess;
 use uuid::Uuid;
 
-use super::backend::{AbortContext, AgentSessionRun, RunOutcome, Runner, StartContext};
+use super::backend::{
+    AbortContext, AbortOutcome, AgentSessionRun, RunOutcome, Runner, StartContext,
+};
 use super::commands::Command;
 
 pub(super) struct ClaudeBackend {
@@ -43,8 +45,11 @@ impl ClaudeBackend {
             receiver,
         ))
     }
-    pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
-        kill_claude_session(context.session_id).await
+    pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<AbortOutcome> {
+        if let Some(session_id) = context.session_id {
+            kill_claude_session(session_id).await?;
+        }
+        Ok(AbortOutcome::Stopped)
     }
 }
 

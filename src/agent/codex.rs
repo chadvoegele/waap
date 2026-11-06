@@ -25,7 +25,9 @@ use super::commands::{Command, CommandError, CommandRequest, CommandResult};
 
 use serde_json::{json, Value as JsonValue};
 
-use super::backend::{AgentSessionRun, RunOutcome, Runner, StartContext};
+use super::backend::{
+    AbortContext, AbortOutcome, AgentSessionRun, RunOutcome, Runner, StartContext,
+};
 use super::process::AgentProcess;
 use super::{AgentRunOptions, ReasoningEffort};
 
@@ -35,6 +37,21 @@ pub(super) struct CodexBackend {
 }
 
 impl CodexBackend {
+    pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<AbortOutcome> {
+        use super::control::{client::ControlClient, SocketPath};
+        let root = context
+            .control_root
+            .as_ref()
+            .map_err(|error| io::Error::new(error.kind(), error.to_string()))?;
+        let path = SocketPath::for_agent(root, context.agent_id)?;
+        async { ControlClient::connect(path.as_path()).await?.stop().await }
+            .await
+            .map_err(|error| {
+                io::Error::new(error.kind(), format!("agent {}: {error}", context.agent_id))
+            })?;
+        Ok(AbortOutcome::StopAccepted)
+    }
+
     pub(super) fn from_env(options: &AgentRunOptions) -> io::Result<Self> {
         Ok(Self {
             config: get_codex_run_config(options)?,

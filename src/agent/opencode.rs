@@ -9,7 +9,9 @@ use tokio::sync::mpsc::Receiver;
 use reqwest::{Client, Response};
 use serde_json::{json, Value as JsonValue};
 
-use super::backend::{AbortContext, AgentSessionRun, RunOutcome, Runner, StartContext};
+use super::backend::{
+    AbortContext, AbortOutcome, AgentSessionRun, RunOutcome, Runner, StartContext,
+};
 use super::commands::Command;
 
 pub(super) struct OpencodeBackend {
@@ -50,9 +52,12 @@ impl OpencodeBackend {
             receiver,
         ))
     }
-    pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
-        let root = opencode_repository_root(context.waap_root)?;
-        abort_opencode_session(&self.config, context.session_id, &root).await
+    pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<AbortOutcome> {
+        if let Some(session_id) = context.session_id {
+            let root = opencode_repository_root(context.waap_root)?;
+            abort_opencode_session(&self.config, session_id, &root).await?;
+        }
+        Ok(AbortOutcome::Stopped)
     }
 }
 

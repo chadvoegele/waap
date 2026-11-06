@@ -87,9 +87,18 @@ impl Runner {
     }
 }
 
+/// Acceptance leaves cleanup and terminal persistence to the live run owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AbortOutcome {
+    StopAccepted,
+    Stopped,
+}
+
 pub(super) struct AbortContext<'a> {
     pub(super) waap_root: &'a Path,
-    pub(super) session_id: &'a str,
+    pub(super) session_id: Option<&'a str>,
+    pub(super) agent_id: &'a str,
+    pub(super) control_root: &'a io::Result<crate::root::ControlRoot>,
 }
 
 pub(super) enum Backend {
@@ -113,12 +122,10 @@ impl Backend {
             Self::Fake(b) => b.start(context, receiver).await,
         }
     }
-    pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
+    pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<AbortOutcome> {
         match self {
             Self::Claude(b) => b.abort(context).await,
-            Self::Codex(_) => Err(io::Error::other(
-                "running Codex agents must be stopped through their control socket",
-            )),
+            Self::Codex(b) => b.abort(context).await,
             Self::Opencode(b) => b.abort(context).await,
             #[cfg(test)]
             Self::Fake(b) => b.abort(context).await,
@@ -165,7 +172,8 @@ pub(super) mod fake {
     #[derive(Debug, PartialEq, Eq)]
     pub(crate) struct AbortCall {
         pub(crate) waap_root: PathBuf,
-        pub(crate) session_id: String,
+        pub(crate) session_id: Option<String>,
+        pub(crate) agent_id: String,
     }
 
     pub(crate) struct FakeBackend {
@@ -175,6 +183,7 @@ pub(super) mod fake {
         pub(crate) wait_error: Option<String>,
         pub(crate) wait_action: Option<Box<dyn FnOnce() -> io::Result<()> + Send>>,
         pub(crate) abort_error: Option<String>,
+        pub(crate) abort_outcome: AbortOutcome,
         pub(crate) start_calls: Vec<StartCall>,
         pub(crate) wait_calls: Arc<AtomicUsize>,
         pub(crate) steer_calls: Arc<Mutex<Vec<(String, Instant, std::thread::ThreadId)>>>,
@@ -190,6 +199,7 @@ pub(super) mod fake {
                 wait_error: None,
                 wait_action: None,
                 abort_error: None,
+                abort_outcome: AbortOutcome::Stopped,
                 start_calls: Vec::new(),
                 wait_calls: Arc::new(AtomicUsize::new(0)),
                 steer_calls: Arc::new(Mutex::new(Vec::new())),
@@ -271,14 +281,20 @@ pub(super) mod fake {
                 receiver,
             ))
         }
-        pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<()> {
+        pub(super) async fn abort(
+            &mut self,
+            context: AbortContext<'_>,
+        ) -> io::Result<AbortOutcome> {
             self.abort_calls.push(AbortCall {
                 waap_root: context.waap_root.into(),
-                session_id: context.session_id.into(),
+                session_id: context.session_id.map(str::to_owned),
+                agent_id: context.agent_id.into(),
             });
             self.abort_error
                 .as_ref()
-                .map_or(Ok(()), |error| Err(io::Error::other(error.clone())))
+                .map_or(Ok(self.abort_outcome), |error| {
+                    Err(io::Error::other(error.clone()))
+                })
         }
     }
 }

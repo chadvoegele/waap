@@ -3,8 +3,7 @@ use std::path::Path;
 
 use serde_json::json;
 
-use super::backend::{AbortContext, Backend};
-use super::control::{client::ControlClient, SocketPath};
+use super::backend::{AbortContext, AbortOutcome, Backend};
 use crate::agent::get::load_agent_report;
 use crate::agent::{
     agent_report_json, print_agent_report_human, read_agent_record, transition_agent_status,
@@ -58,23 +57,9 @@ pub(crate) fn stop_agents_with_systems(
     let mut stopped_agents = Vec::new();
     let mut commit = None;
     for report in selected {
-        let id = &report.agent_id;
         if report.metadata.status == AgentStatus::Running.as_str()
-            && report.metadata.system == Some(AgentSystem::Codex)
-        {
-            let root = control_root
-                .as_ref()
-                .map_err(|error| io::Error::new(error.kind(), error.to_string()))?;
-            let path = SocketPath::for_agent(root, id)?;
-            super::runtime::new()?
-                .block_on(async { ControlClient::connect(path.as_path()).await?.stop().await })
-                .map_err(|error| io::Error::new(error.kind(), format!("agent {id}: {error}")))?;
-            // Native acceptance precedes owner cleanup and terminal persistence.
-            stopped_agents.push(load_agent_report(waap_root, id)?);
-            continue;
-        }
-        if report.metadata.status == AgentStatus::Running.as_str()
-            && report.metadata.session_id.is_some()
+            && (report.metadata.session_id.is_some()
+                || report.metadata.system == Some(AgentSystem::Codex))
         {
             let mut backend = report
                 .metadata
@@ -82,7 +67,11 @@ pub(crate) fn stop_agents_with_systems(
                 .clone()
                 .unwrap_or_default()
                 .backend(None)?;
-            abort_agent_session(waap_root, &report, &mut backend)?;
+            let (stopped, state_commit) =
+                stop_agent_session(waap_root, &control_root, &report, &mut backend)?;
+            commit = state_commit.or(commit);
+            stopped_agents.push(stopped);
+            continue;
         }
         let (stopped, state_commit) = persist_stopped_agent(waap_root, &report)?;
         commit = state_commit.or(commit);
@@ -114,21 +103,32 @@ fn select_agents_to_stop(waap_root: &Path, agent_id: Option<&str>) -> io::Result
     }
 }
 
-fn abort_agent_session(
+fn stop_agent_session(
     waap_root: &Path,
+    control_root: &io::Result<ControlRoot>,
     report: &AgentReport,
     backend: &mut Backend,
-) -> io::Result<()> {
-    if report.metadata.status != AgentStatus::Running.as_str() {
-        return Ok(());
+) -> io::Result<(AgentReport, Option<String>)> {
+    match abort_agent_session(waap_root, control_root, report, backend)? {
+        AbortOutcome::StopAccepted => {
+            load_agent_report(waap_root, &report.agent_id).map(|report| (report, None))
+        }
+        AbortOutcome::Stopped => persist_stopped_agent(waap_root, report),
     }
-    if let Some(session_id) = &report.metadata.session_id {
-        super::runtime::new()?.block_on(backend.abort(AbortContext {
-            waap_root,
-            session_id,
-        }))?;
-    }
-    Ok(())
+}
+
+fn abort_agent_session(
+    waap_root: &Path,
+    control_root: &io::Result<ControlRoot>,
+    report: &AgentReport,
+    backend: &mut Backend,
+) -> io::Result<AbortOutcome> {
+    super::runtime::new()?.block_on(backend.abort(AbortContext {
+        waap_root,
+        session_id: report.metadata.session_id.as_deref(),
+        agent_id: &report.agent_id,
+        control_root,
+    }))
 }
 
 fn persist_stopped_agent(
@@ -177,8 +177,13 @@ fn stop_agent_with_backend(
         return Ok(None);
     }
 
-    abort_agent_session(waap_root, &report, backend)?;
-    persist_stopped_agent(waap_root, &report).map(|(report, _)| Some(report))
+    stop_agent_session(
+        waap_root,
+        &Err(io::Error::other("no control root")),
+        &report,
+        backend,
+    )
+    .map(|(report, _)| Some(report))
 }
 
 fn mark_agent_aborted(waap_root: &Path, agent_id: &str) -> io::Result<AgentReport> {
@@ -202,6 +207,125 @@ mod tests {
     use crate::agent::backend::{fake::FakeBackend, Backend};
     use crate::agent::get::load_agent_report;
     use crate::agent::{AgentMetadata, AgentReport};
+
+    #[test]
+    fn abort_outcome_controls_persistence_independently_of_agent_system() {
+        use crate::agent::backend::AbortOutcome;
+        for outcome in [AbortOutcome::StopAccepted, AbortOutcome::Stopped] {
+            let dir = tempdir().unwrap();
+            crate::test_git::init_repo_with_commit(dir.path());
+            write_agent_with_session(dir.path(), "aa-test", "running", Some("ses_test"));
+            let expected = load_agent_report(dir.path(), "aa-test").unwrap();
+            let before = fs::read(&expected.path).unwrap();
+            let mut backend = Backend::Fake(FakeBackend {
+                abort_outcome: outcome,
+                ..FakeBackend::default()
+            });
+            let (report, commit) = super::stop_agent_session(
+                dir.path(),
+                &Err(io::Error::other("invalid control root")),
+                &expected,
+                &mut backend,
+            )
+            .unwrap();
+            assert_eq!(backend.fake().abort_calls[0].agent_id, "aa-test");
+            match outcome {
+                AbortOutcome::StopAccepted => {
+                    assert_eq!(report, expected);
+                    assert!(commit.is_none());
+                    assert_eq!(fs::read(&expected.path).unwrap(), before);
+                }
+                AbortOutcome::Stopped => {
+                    assert_eq!(report.metadata.status, "aborted");
+                    assert!(commit.is_some());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn codex_backend_abort_dispatches_stop_without_claiming_terminal_persistence() {
+        use crate::agent::codex::CodexBackend;
+        use crate::agent::control::SocketPath;
+        use crate::root::find_control_root_in;
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        for reply in ["accepted", "rejected", "uncertain", "malformed", "eof"] {
+            let dir = tempdir().unwrap();
+            let runtime = tempdir().unwrap();
+            fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            crate::test_git::init_repo_with_commit(dir.path());
+            // No session ID: Codex addresses the owner by agent ID.
+            write_agent(dir.path(), "aa-test", "running");
+            let expected = load_agent_report(dir.path(), "aa-test").unwrap();
+            let before = fs::read(&expected.path).unwrap();
+            let root =
+                Ok(find_control_root_in(dir.path(), Some(runtime.path().as_os_str())).unwrap());
+            let path = SocketPath::for_agent(root.as_ref().unwrap(), "aa-test").unwrap();
+            fs::create_dir_all(path.as_path().parent().unwrap()).unwrap();
+            let listener = UnixListener::bind(path.as_path()).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            std::thread::scope(|scope| {
+                let server = scope.spawn(|| {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    let mut stream = loop {
+                        match listener.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                assert!(std::time::Instant::now() < deadline, "backend did not connect");
+                                std::thread::sleep(std::time::Duration::from_millis(5));
+                            }
+                            Err(error) => panic!("{error}"),
+                        }
+                    };
+                    stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                    let mut line = String::new();
+                    BufReader::new(stream.try_clone().unwrap()).read_line(&mut line).unwrap();
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    assert_eq!(request["method"], "stop");
+                    assert_eq!(request["version"], 1);
+                    // The caller must release the state lock before any socket wait.
+                    let _lock = crate::state::StateLock::acquire(dir.path()).unwrap();
+                    let response = match reply {
+                        "accepted" => json!({"version": 1, "request_id": request["request_id"], "accepted": true}),
+                        "rejected" => json!({"version": 1, "request_id": request["request_id"], "accepted": false, "error": {"code": "busy", "message": "busy"}}),
+                        "uncertain" => json!({"version": 1, "request_id": request["request_id"], "accepted": null, "error": {"code": "acceptance_unknown", "message": "lost acknowledgement"}}),
+                        "malformed" => json!({}),
+                        "eof" => return,
+                        _ => unreachable!(),
+                    };
+                    writeln!(stream, "{response}").unwrap();
+                    assert_eq!(stream.read(&mut [0]).unwrap(), 0, "no retry on this connection");
+                });
+                let result = super::stop_agent_session(
+                    dir.path(),
+                    &root,
+                    &expected,
+                    &mut Backend::Codex(CodexBackend::default()),
+                );
+                if reply == "accepted" {
+                    let (report, commit) = result.unwrap();
+                    assert_eq!(report, expected);
+                    assert!(commit.is_none());
+                } else {
+                    let error = result.unwrap_err().to_string();
+                    assert!(error.contains("agent aa-test"), "{error}");
+                    if reply != "rejected" {
+                        assert!(error.contains("acceptance is unknown"), "{error}");
+                        assert!(error.contains("no automatic retry"), "{error}");
+                    }
+                }
+                server.join().unwrap();
+            });
+            assert_eq!(fs::read(&expected.path).unwrap(), before);
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+        }
+    }
 
     #[test]
     fn agent_stop_stops_one_running_agent() {
@@ -384,7 +508,7 @@ mod tests {
         assert_eq!(backend.fake().abort_calls.len(), 1);
         let call = &backend.fake().abort_calls[0];
         assert_eq!(call.waap_root, dir.path());
-        assert_eq!(call.session_id, "ses_123");
+        assert_eq!(call.session_id.as_deref(), Some("ses_123"));
     }
 
     #[test]
@@ -400,7 +524,10 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(agent_ids(&reports), vec!["aa-00000001"]);
-        assert_eq!(backend.fake().abort_calls[0].session_id, "ses_claude");
+        assert_eq!(
+            backend.fake().abort_calls[0].session_id.as_deref(),
+            Some("ses_claude")
+        );
         assert_eq!(
             load_agent_report(dir.path(), "aa-00000001")
                 .unwrap()
@@ -428,8 +555,14 @@ mod tests {
         .collect::<Vec<_>>();
 
         assert_eq!(agent_ids(&reports), vec!["aa-00000001", "aa-00000002"]);
-        assert_eq!(opencode.fake().abort_calls[0].session_id, "ses_open");
-        assert_eq!(claude.fake().abort_calls[0].session_id, "ses_claude");
+        assert_eq!(
+            opencode.fake().abort_calls[0].session_id.as_deref(),
+            Some("ses_open")
+        );
+        assert_eq!(
+            claude.fake().abort_calls[0].session_id.as_deref(),
+            Some("ses_claude")
+        );
     }
 
     #[test]
