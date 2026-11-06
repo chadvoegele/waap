@@ -14,15 +14,23 @@ use super::backend::{
 };
 use super::commands::Command;
 
+#[derive(Default)]
 pub(super) struct OpencodeBackend {
-    config: OpencodeRunConfig,
+    config: Option<OpencodeRunConfig>,
 }
 
 impl OpencodeBackend {
     pub(super) fn from_env() -> io::Result<Self> {
         Ok(Self {
-            config: opencode_run_config_from_env()?,
+            config: Some(opencode_run_config_from_env()?),
         })
+    }
+
+    fn config(&mut self) -> io::Result<&OpencodeRunConfig> {
+        if self.config.is_none() {
+            self.config = Some(opencode_run_config_from_env()?);
+        }
+        Ok(self.config.as_ref().expect("configuration initialized"))
     }
 
     pub(super) async fn start(
@@ -30,14 +38,15 @@ impl OpencodeBackend {
         context: StartContext<'_>,
         receiver: Receiver<Command>,
     ) -> io::Result<AgentSessionRun> {
+        let config = self.config()?;
         let repository_root = opencode_repository_root(context.repository_root)?;
         let client = opencode_client()?;
-        let session_id = create_opencode_session(&client, &self.config, &repository_root).await?;
+        let session_id = create_opencode_session(&client, config, &repository_root).await?;
         // Subscribe first so a fast agent cannot finish before monitoring begins.
-        let events = subscribe_opencode_events(&client, &self.config, &repository_root).await?;
+        let events = subscribe_opencode_events(&client, config, &repository_root).await?;
         submit_opencode_prompt(
             &client,
-            &self.config,
+            config,
             &session_id,
             &repository_root,
             context.prompt,
@@ -54,8 +63,9 @@ impl OpencodeBackend {
     }
     pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<AbortOutcome> {
         if let Some(session_id) = context.session_id {
+            let config = self.config()?;
             let root = opencode_repository_root(context.waap_root)?;
-            abort_opencode_session(&self.config, session_id, &root).await?;
+            abort_opencode_session(config, session_id, &root).await?;
         }
         Ok(AbortOutcome::Stopped)
     }
@@ -818,10 +828,10 @@ mod tests {
                 .unwrap();
         });
         let mut backend = OpencodeBackend {
-            config: OpencodeRunConfig {
+            config: Some(OpencodeRunConfig {
                 server_url: format!("http://{address}"),
                 ..OpencodeRunConfig::for_test()
-            },
+            }),
         };
 
         let mut started = backend
@@ -982,10 +992,10 @@ mod tests {
             );
         });
         let mut backend = OpencodeBackend {
-            config: OpencodeRunConfig {
+            config: Some(OpencodeRunConfig {
                 server_url: format!("http://{address}"),
                 ..OpencodeRunConfig::for_test()
-            },
+            }),
         };
 
         let error = match backend
