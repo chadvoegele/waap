@@ -61,29 +61,42 @@ pub(crate) fn stop_agents_with_systems(
     control_root: io::Result<ControlRoot>,
     agent_id: Option<&str>,
 ) -> io::Result<AgentStopReport> {
-    let selected = select_agents_to_stop(waap_root, agent_id)?;
+    let selected = {
+        let lock = crate::state::StateLock::acquire(waap_root)?;
+        let selected = select_agents_to_stop(waap_root, agent_id, &lock)?;
+        #[cfg(test)]
+        tests::AFTER_SELECTION.with_borrow_mut(|hook| {
+            if let Some(hook) = hook.take() {
+                hook();
+            }
+        });
+        if let [report] = selected.as_slice() {
+            if report.metadata.status == AgentStatus::Ready.as_str() {
+                let (report, commit) = persist_stopped_agent_locked(waap_root, report, &lock)?;
+                return Ok(AgentStopReport {
+                    agent_stops: vec![AgentStop {
+                        report,
+                        outcome: AbortOutcome::Stopped,
+                    }],
+                    commit,
+                });
+            }
+        }
+        selected
+    };
     let mut agent_stops = Vec::new();
     let mut commit = None;
     for report in selected {
-        if report.metadata.status == AgentStatus::Running.as_str() {
-            let mut backend = report
-                .metadata
-                .system
-                .clone()
-                .unwrap_or_default()
-                .backend(None)?;
-            let (stopped, state_commit) =
-                stop_agent_session(waap_root, &control_root, &report, &mut backend)?;
-            commit = state_commit.or(commit);
-            agent_stops.push(stopped);
-            continue;
-        }
-        let (stopped, state_commit) = persist_stopped_agent(waap_root, &report)?;
+        let mut backend = report
+            .metadata
+            .system
+            .clone()
+            .unwrap_or_default()
+            .backend(None)?;
+        let (stopped, state_commit) =
+            stop_agent_session(waap_root, &control_root, &report, &mut backend)?;
         commit = state_commit.or(commit);
-        agent_stops.push(AgentStop {
-            report: stopped,
-            outcome: AbortOutcome::Stopped,
-        });
+        agent_stops.push(stopped);
     }
     Ok(AgentStopReport {
         agent_stops,
@@ -91,8 +104,11 @@ pub(crate) fn stop_agents_with_systems(
     })
 }
 
-fn select_agents_to_stop(waap_root: &Path, agent_id: Option<&str>) -> io::Result<Vec<AgentReport>> {
-    let _lock = crate::state::StateLock::acquire(waap_root)?;
+fn select_agents_to_stop(
+    waap_root: &Path,
+    agent_id: Option<&str>,
+    _lock: &crate::state::StateLock,
+) -> io::Result<Vec<AgentReport>> {
     match agent_id {
         Some(id) => {
             let report = load_agent_report(waap_root, id)?;
@@ -229,6 +245,11 @@ mod tests {
     use crate::agent::backend::{fake::FakeBackend, Backend};
     use crate::agent::get::load_agent_report;
     use crate::agent::{AgentMetadata, AgentReport};
+
+    thread_local! {
+        pub(super) static AFTER_SELECTION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            std::cell::RefCell::new(None);
+    }
 
     #[test]
     fn stop_output_uses_explicit_outcome_for_every_system_and_status() {
@@ -582,6 +603,75 @@ mod tests {
 
         assert_eq!(agent_ids(&reports), vec!["aa-3881fda0"]);
         assert_eq!(reports[0].metadata.status, "aborted");
+    }
+
+    #[test]
+    fn ready_cancellation_keeps_selection_locked_against_concurrent_start() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = tempdir().unwrap();
+        crate::test_git::init_repo_with_commit(dir.path());
+        write_agent(dir.path(), "aa-test", "ready");
+        let root = dir.path().to_path_buf();
+        let (selected_tx, selected_rx) = mpsc::channel();
+        let (contending_tx, contending_rx) = mpsc::channel();
+        AFTER_SELECTION.set(Some(Box::new(move || {
+            selected_tx.send(()).unwrap();
+            contending_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        })));
+
+        let starter = std::thread::spawn(move || {
+            selected_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(
+                load_agent_report(&root, "aa-test").unwrap().metadata.status,
+                "ready"
+            );
+            let contender = fs::OpenOptions::new()
+                .write(true)
+                .open(root.join(".git/waap-state.lock"))
+                .unwrap();
+            let locked = matches!(contender.try_lock(), Err(fs::TryLockError::WouldBlock));
+            contending_tx.send(()).unwrap();
+            assert!(locked, "ready selection must retain the cancellation lock");
+
+            let error = crate::agent::run::run_agent(
+                &root,
+                &root,
+                Err(io::Error::other("backend must not start")),
+                &crate::cli::OutputFormat::Json,
+                "aa-test",
+                &crate::agent::AgentSystem::Codex,
+                &crate::agent::AgentRunOptions::default(),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains("aborted"), "{error}");
+            let _lock = crate::state::StateLock::acquire(&root).unwrap();
+            assert_eq!(
+                load_agent_report(&root, "aa-test").unwrap().metadata.status,
+                "aborted"
+            );
+            let committed = crate::test_git::run(&root, &["show", "HEAD:agents/aa-test/agent.md"]);
+            assert!(committed.contains("status = \"aborted\""));
+        });
+
+        let stopped = super::stop_agents_with_systems(
+            dir.path(),
+            Err(io::Error::other("ready cancellation needs no backend")),
+            Some("aa-test"),
+        )
+        .unwrap();
+        starter.join().unwrap();
+        assert_eq!(stopped.agent_stops[0].report.metadata.status, "aborted");
+        assert_eq!(
+            stopped.agent_stops[0].outcome,
+            crate::agent::backend::AbortOutcome::Stopped
+        );
+        assert_eq!(
+            stopped.commit.unwrap(),
+            crate::test_git::run(dir.path(), &["rev-parse", "HEAD"])
+        );
     }
 
     #[test]
