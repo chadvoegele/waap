@@ -63,14 +63,14 @@ pub(crate) enum AgentCommand {
         agent_id: String,
 
         /// Agent system used to run the agent.
-        #[arg(long, value_enum, default_value = "opencode")]
+        #[arg(long, value_enum, default_value = "pi")]
         system: AgentSystem,
 
-        /// Codex model for this run (overrides CODEX_MODEL).
+        /// Pi or Codex model (overrides the selected system's environment setting).
         #[arg(long, value_parser = parse_non_empty_model)]
         model: Option<String>,
 
-        /// Codex reasoning effort for this run (overrides CODEX_REASONING_EFFORT).
+        /// Pi or Codex reasoning effort; Pi does not accept ultra.
         #[arg(long, value_enum)]
         reasoning_effort: Option<ReasoningEffort>,
     },
@@ -87,7 +87,7 @@ pub(crate) enum AgentCommand {
         #[arg(long)]
         prompt: String,
     },
-    /// Stop running agents, aborting OpenCode sessions when session_id is present.
+    /// Stop an agent, or all running agents when no ID is given.
     Stop {
         #[arg(long)]
         agent_id: Option<String>,
@@ -494,7 +494,7 @@ mod tests {
             Command::Agent {
                 command: AgentCommand::Run {
                     agent_id,
-                    system: AgentSystem::Opencode,
+                    system: AgentSystem::Pi,
                     ..
                 }
             } if agent_id == "aa-3881fda0"

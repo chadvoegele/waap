@@ -26,6 +26,7 @@ mod get;
 mod list;
 mod new;
 mod opencode;
+mod pi;
 mod process;
 mod run;
 mod runtime;
@@ -39,6 +40,8 @@ mod worktree;
 static OPENCODE_ENV_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(test)]
 static CODEX_ENV_LOCK: Mutex<()> = Mutex::new(());
+#[cfg(test)]
+static PI_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 pub(crate) use get::{load_agent_content, load_agent_report, print_agent_content_report};
 pub(crate) use list::{list_agents, print_agent_list};
@@ -261,10 +264,11 @@ pub(crate) fn transition_agent_status(
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub(crate) enum AgentSystem {
-    #[default]
     Opencode,
     Claude,
     Codex,
+    #[default]
+    Pi,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -327,7 +331,7 @@ impl AgentSystem {
                     "model must not be empty",
                 ));
             }
-            if self != &AgentSystem::Codex {
+            if !matches!(self, AgentSystem::Codex | AgentSystem::Pi) {
                 let option = if options.model.is_some() {
                     Some("--model")
                 } else if options.reasoning_effort.is_some() {
@@ -338,7 +342,7 @@ impl AgentSystem {
                 if let Some(option) = option {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        format!("{option} is only supported with --system codex"),
+                        format!("{option} is only supported with --system codex or pi"),
                     ));
                 }
             }
@@ -356,6 +360,10 @@ impl AgentSystem {
                 )?)),
                 None => Ok(backend::Backend::Codex(codex::CodexBackend::default())),
             },
+            AgentSystem::Pi => match options {
+                Some(options) => Ok(backend::Backend::Pi(pi::PiBackend::from_env(options)?)),
+                None => Ok(backend::Backend::Pi(pi::PiBackend::default())),
+            },
         }
     }
 
@@ -364,6 +372,7 @@ impl AgentSystem {
             AgentSystem::Opencode => "opencode",
             AgentSystem::Claude => "claude",
             AgentSystem::Codex => "codex",
+            AgentSystem::Pi => "pi",
         }
     }
 
@@ -509,12 +518,15 @@ mod tests {
     }
 
     #[test]
-    fn agent_metadata_system_codex_passes() {
+    fn agent_metadata_system_codex_and_pi_pass() {
         let path = PathBuf::from("agent.md");
-        let toml = "creation_date = 2026-06-18T15:00:34Z\nstatus = \"ready\"\nsystem = \"codex\"\n";
-        let value: ::toml::Value = toml.parse().unwrap();
-
-        assert!(AgentMetadata::from_frontmatter(&value, &path).is_ok());
+        for system in ["codex", "pi"] {
+            let toml = format!(
+                "creation_date = 2026-06-18T15:00:34Z\nstatus = \"ready\"\nsystem = \"{system}\"\n"
+            );
+            let value: ::toml::Value = toml.parse().unwrap();
+            assert!(AgentMetadata::from_frontmatter(&value, &path).is_ok());
+        }
     }
 
     #[test]
@@ -577,10 +589,14 @@ mod tests {
     }
 
     #[test]
-    fn agent_system_codex_round_trips() {
+    fn agent_system_codex_and_pi_round_trip_and_pi_is_default() {
         assert_eq!(AgentSystem::parse("codex"), Some(AgentSystem::Codex));
         assert_eq!(AgentSystem::Codex.as_str(), "codex");
         assert!(AgentSystem::labels().contains(&"codex"));
+        assert_eq!(AgentSystem::parse("pi"), Some(AgentSystem::Pi));
+        assert_eq!(AgentSystem::Pi.as_str(), "pi");
+        assert!(AgentSystem::labels().contains(&"pi"));
+        assert_eq!(AgentSystem::default(), AgentSystem::Pi);
     }
 
     #[test]
@@ -608,6 +624,7 @@ mod tests {
             (AgentSystem::Opencode, "agent::opencode::OpencodeBackend"),
             (AgentSystem::Claude, "agent::claude::ClaudeBackend"),
             (AgentSystem::Codex, "agent::codex::CodexBackend"),
+            (AgentSystem::Pi, "agent::pi::PiBackend"),
         ] {
             let backend = system.backend(None).unwrap();
             assert!(backend.type_name().ends_with(expected_type));
@@ -622,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_and_codex_backend_construction_ignores_opencode_environment() {
+    fn direct_backend_construction_ignores_opencode_environment() {
         let _lock = OPENCODE_ENV_LOCK.lock().unwrap();
         let names = [
             "OPENCODE_SERVER_URL",
@@ -637,6 +654,7 @@ mod tests {
 
         AgentSystem::Claude.backend(None).unwrap();
         AgentSystem::Codex.backend(None).unwrap();
+        AgentSystem::Pi.backend(None).unwrap();
 
         for (name, value) in names.into_iter().zip(previous) {
             if let Some(value) = value {

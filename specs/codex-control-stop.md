@@ -92,6 +92,14 @@ publication, or older runners lacking stop support return errors without changin
 state. Lost delivery or acknowledgement reports unknown acceptance without retry
 or signal fallback.
 
+## Pi integration
+
+Pi reuses the same stop operation, client, server, dispatcher, acceptance
+reporting, owner-only terminal persistence, and cleanup contracts. Its native
+clear-queue/abort sequence and preflight ordering differ from Codex and are
+specified in [Pi agent system](pi-agent-system.md). Codex interruption continues
+to use its existing native turn/interrupt path.
+
 ## Verification
 
 - Protocol/client/dispatcher tests for stop, malformed frames, method-specific prompt validation, correlation, rejection, uncertainty, bounded queues and deadlines; steering regressions remain green.

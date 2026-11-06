@@ -61,6 +61,7 @@ pub(super) enum Runner {
     Claude(super::claude::ClaudeRunner),
     Codex(Box<super::codex::CodexRunner>),
     Opencode(super::opencode::OpencodeRunner),
+    Pi(Box<super::pi::PiRunner>),
     #[cfg(test)]
     Fake(fake::FakeRunner),
 }
@@ -71,6 +72,7 @@ impl Runner {
             Self::Claude(runner) => runner.run(receiver).await,
             Self::Codex(runner) => runner.run(receiver).await,
             Self::Opencode(runner) => runner.run(receiver).await,
+            Self::Pi(runner) => runner.run(receiver).await,
             #[cfg(test)]
             Self::Fake(runner) => runner.run(receiver).await,
         }
@@ -81,6 +83,7 @@ impl Runner {
             Self::Claude(runner) => runner.cleanup().await,
             Self::Codex(runner) => runner.cleanup().await,
             Self::Opencode(_) => Ok(()),
+            Self::Pi(runner) => runner.cleanup().await,
             #[cfg(test)]
             Self::Fake(_) => Ok(()),
         }
@@ -105,6 +108,7 @@ pub(super) enum Backend {
     Claude(ClaudeBackend),
     Codex(CodexBackend),
     Opencode(OpencodeBackend),
+    Pi(super::pi::PiBackend),
     #[cfg(test)]
     Fake(fake::FakeBackend),
 }
@@ -118,6 +122,7 @@ impl Backend {
             Self::Claude(b) => b.start(context, receiver).await,
             Self::Codex(b) => b.start(context, receiver).await,
             Self::Opencode(b) => b.start(context, receiver).await,
+            Self::Pi(b) => b.start(context, receiver).await,
             #[cfg(test)]
             Self::Fake(b) => b.start(context, receiver).await,
         }
@@ -127,6 +132,7 @@ impl Backend {
             Self::Claude(b) => b.abort(context).await,
             Self::Codex(b) => b.abort(context).await,
             Self::Opencode(b) => b.abort(context).await,
+            Self::Pi(b) => b.abort(context).await,
             #[cfg(test)]
             Self::Fake(b) => b.abort(context).await,
         }
@@ -146,6 +152,7 @@ impl Backend {
             Self::Claude(_) => std::any::type_name::<ClaudeBackend>(),
             Self::Codex(_) => std::any::type_name::<CodexBackend>(),
             Self::Opencode(_) => std::any::type_name::<OpencodeBackend>(),
+            Self::Pi(_) => std::any::type_name::<super::pi::PiBackend>(),
             Self::Fake(_) => std::any::type_name::<fake::FakeBackend>(),
         }
     }
