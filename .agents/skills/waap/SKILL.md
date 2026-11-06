@@ -41,6 +41,23 @@ Then run the agent with `waap agent run --agent-id aa-1234abcd`.
 Steer a running agent with `waap agent steer --agent-id aa-1234abcd --prompt "Focus on keyboard navigation"`.
 Steering currently supports Codex; Claude and OpenCode return an unsupported-backend error.
 
+Stop one agent, or omit `--agent-id` to stop all running agents in this repository:
+
+```sh
+waap agent stop --agent-id aa-1234abcd
+waap agent stop
+```
+
+For Codex, `Stop accepted for agent` acknowledges native interruption acceptance.
+The `waap agent run` owner still completes cleanup and persists terminal status;
+check `waap agent get --agent-id aa-1234abcd` to confirm the final result. Even
+JSON `stopped_agents` can contain an agent still marked `running` at acknowledgement.
+
+A Codex control connection error can mean the agent is starting, has exited, or
+has a stale endpoint. If an error says acceptance is unknown, the stop may have
+been accepted; waap does not retry automatically. Inspect the run and its status
+before deciding whether to retry.
+
 ## State Model
 
 waap tracks `${waap_data}` on the dedicated `waap` branch.
