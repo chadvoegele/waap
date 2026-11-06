@@ -953,6 +953,7 @@ mod tests {
         let error = run_agent(
             dir.path(),
             dir.path(),
+            Err(std::io::Error::other("unused control root")),
             &OutputFormat::Json,
             agent_id,
             &AgentSystem::Pi,

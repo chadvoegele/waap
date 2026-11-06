@@ -231,7 +231,6 @@ impl AgentStatus {
                     Self::Running,
                     Self::Completed | Self::Failed | Self::Aborted
                 )
-                | (Self::Aborted, Self::Aborted)
         );
         if allowed {
             Ok(())
@@ -362,8 +361,8 @@ impl AgentSystem {
                 None => Ok(backend::Backend::Codex(codex::CodexBackend::default())),
             },
             AgentSystem::Pi => match options {
-                Some(options) => Ok(Box::new(pi::PiBackend::from_env(options)?)),
-                None => Ok(Box::new(pi::PiBackend::default())),
+                Some(options) => Ok(backend::Backend::Pi(pi::PiBackend::from_env(options)?)),
+                None => Ok(backend::Backend::Pi(pi::PiBackend::default())),
             },
         }
     }
@@ -555,7 +554,6 @@ mod tests {
             (AgentStatus::Running, AgentStatus::Completed),
             (AgentStatus::Running, AgentStatus::Failed),
             (AgentStatus::Running, AgentStatus::Aborted),
-            (AgentStatus::Aborted, AgentStatus::Aborted),
         ];
 
         for current in statuses {

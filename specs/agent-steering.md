@@ -9,7 +9,7 @@ last_update = 2026-10-29
 ## Purpose
 
 Let users redirect a running waap agent without stopping or restarting it.
-The first implementation supports Codex; other backends explicitly reject steering.
+Codex and Pi support native steering; Claude and OpenCode explicitly reject it.
 
 ## Context
 
@@ -261,6 +261,14 @@ method. It must not emulate steering by restarting, resuming, or starting a turn
 Existing run, stop, state, and worktree behavior must remain unchanged. Steering
 must not mark a run completed, aborted, or otherwise alter its lifecycle status,
 including on delivery failure. No persistent state migration is required.
+
+### Pi driver
+
+Pi uses this same control server, dispatcher, runtime, and acknowledgement
+contract. Its native `steer` command and asynchronous preflight/settlement rules
+are defined in [Pi agent system](pi-agent-system.md). Pi success can mean queued
+or handled input; it does not promise model execution. Pi stop uses the shared
+prompt-free stop operation and waits for clear-queue/abort acknowledgement.
 
 ## Verification
 

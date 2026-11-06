@@ -88,6 +88,16 @@ disposable repository.
 
 Steer a running agent with `waap agent steer --agent-id aa-file-picker-implementer --prompt "Focus on keyboard navigation"`.
 Stop a running agent with `waap agent stop --agent-id aa-file-picker-implementer`.
+Pi and Codex use the shared control socket for native steering and stop.
+Steering success confirms native acceptance. Stop success confirms acceptance;
+the owner then cleans up and commits `aborted`. Check `agent get` for completion.
+Lost acknowledgements report unknown acceptance and are never retried automatically.
+Pi stop clears queued messages before aborting. Claude and OpenCode retain their
+existing stop behavior and do not support steering.
+
+For a provider-free smoke with a real Pi installation, run
+`python3 tests/pi_real_smoke.py /absolute/path/to/waap`. It uses isolated Pi
+configuration and a local provider fixture.
 
 ## `waap` Loop
 

@@ -39,7 +39,7 @@ This creates an agent at `${waap_data}/agents/<agent-id>/agent.md`. Agent IDs st
 Then run the agent with `waap agent run --agent-id aa-1234abcd`.
 
 Steer a running agent with `waap agent steer --agent-id aa-1234abcd --prompt "Focus on keyboard navigation"`.
-Steering currently supports Codex; Claude and OpenCode return an unsupported-backend error.
+Steering supports Pi and Codex; Claude and OpenCode return an unsupported-backend error.
 
 Stop one agent, or omit `--agent-id` to stop all running agents in this repository:
 
@@ -47,6 +47,11 @@ Stop one agent, or omit `--agent-id` to stop all running agents in this reposito
 waap agent stop --agent-id aa-1234abcd
 waap agent stop
 ```
+
+For live Pi and Codex runs, success confirms native stop acceptance. The owner
+cleans up and commits `aborted`; inspect `agent get` for completion. Lost
+acknowledgements report unknown acceptance and are not retried automatically.
+Pi clears queued messages before aborting.
 
 ## State Model
 
