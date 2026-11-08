@@ -48,11 +48,6 @@ waap agent stop --agent-id aa-1234abcd
 waap agent stop
 ```
 
-For live Pi and Codex runs, success confirms native stop acceptance. The owner
-cleans up and commits `aborted`; inspect `agent get` for completion. Lost
-acknowledgements report unknown acceptance and are not retried automatically.
-Pi clears queued messages before aborting.
-
 ## State Model
 
 waap tracks `${waap_data}` on the dedicated `waap` branch.
@@ -176,10 +171,6 @@ Run an agent:
 waap agent run --agent-id aa-1234abcd
 ```
 
-Pi RPC is the default system. It requires Pi Coding Agent 0.82.1 or newer,
-installed as `pi` and authenticated in the current environment. Set
-`WAAP_PI_BIN` to select another executable.
-
 Run an agent with a different system:
 
 ```sh
@@ -194,11 +185,17 @@ waap agent run --agent-id aa-1234abcd --system codex \
   --model gpt-5.4 --reasoning-effort high
 ```
 
-For Codex, these options override `CODEX_MODEL` and `CODEX_REASONING_EFFORT`.
-For Pi, they override `WAAP_PI_MODEL` and `WAAP_PI_REASONING_EFFORT`; set
-`WAAP_PI_BIN` to choose the executable. Accepted efforts are `none`,
-`minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; Codex also accepts
-`ultra`. Pi maps `none` to `off` for its `--thinking` option.
+- Codex:
+  - `CODEX_MODEL`: overridden by `--model`.
+  - `CODEX_REASONING_EFFORT`: overridden by `--reasoning-effort`.
+- Pi:
+  - `WAAP_PI_MODEL`: overridden by `--model`.
+  - `WAAP_PI_REASONING_EFFORT`: overridden by `--reasoning-effort`.
+  - `WAAP_PI_BIN`: selects the executable.
+
+Accepted efforts are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and
+`max`; Codex also accepts `ultra`. Pi maps `none` to `off` for its `--thinking`
+option.
 
 For OpenCode, set `OPENCODE_SERVER_URL`, `OPENCODE_SERVER_USERNAME`, `OPENCODE_SERVER_PASSWORD`, and `OPENCODE_SERVER_MODEL`. The model accepts `provider/model` or `provider/model/variant`; recognized variants are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 

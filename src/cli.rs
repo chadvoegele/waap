@@ -66,11 +66,9 @@ pub(crate) enum AgentCommand {
         #[arg(long, value_enum, default_value = "pi")]
         system: AgentSystem,
 
-        /// Pi or Codex model (overrides the selected system's environment setting).
         #[arg(long, value_parser = parse_non_empty_model)]
         model: Option<String>,
 
-        /// Pi or Codex reasoning effort; Pi does not accept ultra.
         #[arg(long, value_enum)]
         reasoning_effort: Option<ReasoningEffort>,
     },
@@ -87,7 +85,6 @@ pub(crate) enum AgentCommand {
         #[arg(long)]
         prompt: String,
     },
-    /// Stop an agent, or all running agents when no ID is given.
     Stop {
         #[arg(long)]
         agent_id: Option<String>,

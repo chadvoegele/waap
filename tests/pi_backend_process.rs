@@ -1,5 +1,3 @@
-//! Pi uses the shared control server and owner lifecycle.
-
 mod common;
 
 use std::fs;
@@ -298,7 +296,6 @@ fn stop_uses_shared_socket_after_steering_and_owner_persists_aborted() {
     *'"type":"abort"'*)
       printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"aborted"}}'
       printf '%s\n' '{"type":"agent_settled"}'
-      # Pi abort waits for idle, so settlement can precede this reply.
       printf '%s\n' '{"type":"response","id":"waap-5","command":"abort","success":true}'
       ;;
   esac
@@ -666,7 +663,6 @@ while IFS= read -r ignored; do :; done
     let output = wait_output(runner);
     let descendant_id = fs::read_to_string(descendant).unwrap();
     let alive = Path::new("/proc").join(&descendant_id).exists();
-    // The fixture owns this deliberately detached child; clean it even on failure.
     let _ = Command::new("kill")
         .args(["-KILL", &descendant_id])
         .status();

@@ -247,8 +247,6 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> PiCl
         let Some(stop) = &mut session.stop else {
             return Ok(());
         };
-        // Pi preflight is asynchronous. Wait before clearing so an earlier prompt
-        // or steer cannot enqueue new work after the queue has been cleared.
         if !matches!(stop.phase, StopPhase::Waiting)
             || session.prompt_id.is_some()
             || session.steer.is_some()
@@ -270,8 +268,6 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> PiCl
         Ok(())
     }
 
-    // True means a correlated native abort acknowledged idle; cleanup is now
-    // the run owner's responsibility, even if agent_settled preceded this reply.
     async fn handle_response(
         &mut self,
         record: &Value,

@@ -4,7 +4,6 @@ use std::time::Instant;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
-// Native Pi messages can include snapshots much larger than external control frames.
 const MAX_RECORD_BYTES: usize = 64 * 1024 * 1024;
 
 pub(super) struct PiClient<R, W, O> {
@@ -63,7 +62,6 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> PiCl
         })?
     }
 
-    // fill_buf is cancellation-safe; consumed partial bytes stay in this client.
     pub(super) async fn receive(&mut self) -> io::Result<Value> {
         self.read_record().await?.ok_or_else(|| {
             io::Error::new(
@@ -73,8 +71,6 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> PiCl
         })
     }
 
-    // After stdin closes, validate and discard shutdown notifications. The run
-    // outcome is already known and UI replies can no longer be sent.
     pub(super) async fn drain_shutdown(&mut self) -> io::Result<()> {
         while self.read_record().await?.is_some() {}
         Ok(())
