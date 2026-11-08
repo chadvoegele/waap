@@ -4,10 +4,8 @@ use std::env;
 use std::ffi::OsString;
 use std::io;
 use std::path::Path;
-use std::time::Duration;
 use tokio::process::Command;
 
-pub(super) const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const SCRUBBED_PI_ENV: [&str; 5] = [
     "PI_SESSION_ID",
     "PI_SESSION_FILE",
@@ -21,7 +19,6 @@ pub(super) struct PiRunConfig {
     executable: OsString,
     model: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
-    pub(super) command_timeout: Duration,
 }
 
 impl Default for PiRunConfig {
@@ -30,7 +27,6 @@ impl Default for PiRunConfig {
             executable: OsString::from("pi"),
             model: None,
             reasoning_effort: None,
-            command_timeout: DEFAULT_COMMAND_TIMEOUT,
         }
     }
 }
@@ -55,7 +51,6 @@ impl PiRunConfig {
             executable,
             model,
             reasoning_effort,
-            command_timeout: DEFAULT_COMMAND_TIMEOUT,
         })
     }
 }

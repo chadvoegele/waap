@@ -1,6 +1,6 @@
 use std::io;
 use std::process::Stdio;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::io::BufReader;
 use tokio::process::{ChildStdin, ChildStdout};
@@ -20,6 +20,8 @@ use rpc::PiClient;
 mod config;
 mod rpc;
 mod session;
+
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 pub(super) struct PiBackend {
@@ -66,7 +68,7 @@ impl PiBackend {
                 process.take_stdin()?,
                 tokio::io::stdout(),
             );
-            let deadline = Instant::now() + self.config.command_timeout;
+            let deadline = Instant::now() + COMMAND_TIMEOUT;
             let session_id = client.session_id(deadline).await?;
             Ok::<_, io::Error>((client, session_id))
         };
@@ -89,7 +91,6 @@ impl PiBackend {
                 sigterm,
                 sigint,
                 prompt: context.prompt.into(),
-                timeout: self.config.command_timeout,
             })),
             receiver,
         ))
@@ -102,7 +103,6 @@ pub(super) struct PiRunner {
     sigterm: Signal,
     sigint: Signal,
     prompt: String,
-    timeout: std::time::Duration,
 }
 
 impl PiRunner {
@@ -117,11 +117,11 @@ impl PiRunner {
                 async {
                     tokio::select! { _ = sigterm.recv() => {}, _ = sigint.recv() => {} }
                 },
-                self.timeout,
+                COMMAND_TIMEOUT,
             )
             .await?;
         self.client.close();
-        let status = tokio::time::timeout(self.timeout, async {
+        let status = tokio::time::timeout(COMMAND_TIMEOUT, async {
             tokio::select! {
                 result = self.process.wait() => result,
                 result = self.client.drain_shutdown() => {
