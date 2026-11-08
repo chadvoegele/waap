@@ -63,14 +63,12 @@ pub(crate) enum AgentCommand {
         agent_id: String,
 
         /// Agent system used to run the agent.
-        #[arg(long, value_enum, default_value = "opencode")]
+        #[arg(long, value_enum, default_value = "pi")]
         system: AgentSystem,
 
-        /// Codex model for this run (overrides CODEX_MODEL).
         #[arg(long, value_parser = parse_non_empty_model)]
         model: Option<String>,
 
-        /// Codex reasoning effort for this run (overrides CODEX_REASONING_EFFORT).
         #[arg(long, value_enum)]
         reasoning_effort: Option<ReasoningEffort>,
     },
@@ -87,7 +85,6 @@ pub(crate) enum AgentCommand {
         #[arg(long)]
         prompt: String,
     },
-    /// Stop running agents, aborting OpenCode sessions when session_id is present.
     Stop {
         #[arg(long)]
         agent_id: Option<String>,
@@ -159,7 +156,7 @@ pub(crate) enum TicketCommand {
 mod tests {
     use std::path::PathBuf;
 
-    use clap::Parser;
+    use clap::{Parser, ValueEnum};
 
     use super::{AgentCommand, Cli, Command, TicketCommand};
     use crate::agent::{AgentStatus, AgentSystem, ReasoningEffort};
@@ -494,7 +491,7 @@ mod tests {
             Command::Agent {
                 command: AgentCommand::Run {
                     agent_id,
-                    system: AgentSystem::Opencode,
+                    system: AgentSystem::Pi,
                     ..
                 }
             } if agent_id == "aa-3881fda0"
@@ -623,6 +620,31 @@ mod tests {
                 }
             }
         ));
+    }
+
+    #[test]
+    fn parses_all_reasoning_efforts_before_backend_validation() {
+        for effort in ReasoningEffort::value_variants() {
+            let cli = Cli::try_parse_from([
+                "waap",
+                "agent",
+                "run",
+                "--agent-id",
+                "aa-3881fda0",
+                "--reasoning-effort",
+                effort.as_str(),
+            ])
+            .unwrap();
+            assert!(matches!(
+                cli.command,
+                Command::Agent {
+                    command: AgentCommand::Run {
+                        reasoning_effort: Some(parsed),
+                        ..
+                    }
+                } if parsed == *effort
+            ));
+        }
     }
 
     #[test]

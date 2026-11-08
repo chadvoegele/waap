@@ -39,7 +39,7 @@ This creates an agent at `${waap_data}/agents/<agent-id>/agent.md`. Agent IDs st
 Then run the agent with `waap agent run --agent-id aa-1234abcd`.
 
 Steer a running agent with `waap agent steer --agent-id aa-1234abcd --prompt "Focus on keyboard navigation"`.
-Steering currently supports Codex; Claude and OpenCode return an unsupported-backend error.
+Steering supports Pi and Codex; Claude and OpenCode return an unsupported-backend error.
 
 Stop one agent, or omit `--agent-id` to stop all running agents in this repository:
 
@@ -125,7 +125,7 @@ Agent metadata is stored as TOML frontmatter at the top of the agent markdown fi
 creation_date = 2026-06-18T15:00:34Z
 status = "ready"
 session_id = "ses_9032dd..."
-system = "opencode"
+system = "pi"
 +++
 ```
 
@@ -177,20 +177,26 @@ Run an agent with a different system:
 waap agent run --agent-id aa-1234abcd --system claude
 waap agent run --agent-id aa-1234abcd --system codex
 waap agent run --agent-id aa-1234abcd --system opencode
+waap agent run --agent-id aa-1234abcd --system pi
 ```
 
-Set a Codex model and reasoning effort for one run:
+Set a model and reasoning effort for one run:
 
 ```sh
 waap agent run --agent-id aa-1234abcd --system codex \
   --model gpt-5.4 --reasoning-effort high
 ```
 
-`--model` and `--reasoning-effort` override `CODEX_MODEL` and
-`CODEX_REASONING_EFFORT`. Accepted efforts are `none`, `minimal`, `low`,
-`medium`, `high`, `xhigh`, `max`, and `ultra`. Both options are Codex-only;
-when neither an option nor its environment fallback is set, Codex uses its
-configured default.
+- Codex:
+  - `CODEX_MODEL`: overridden by `--model`.
+  - `CODEX_REASONING_EFFORT`: overridden by `--reasoning-effort`.
+- Pi:
+  - `WAAP_PI_MODEL`: overridden by `--model`.
+  - `WAAP_PI_REASONING_EFFORT`: overridden by `--reasoning-effort`.
+  - `WAAP_PI_BIN`: selects the executable.
+
+Accepted efforts are `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
+Codex also accepts `none` and `ultra`; Pi also accepts `off`.
 
 For OpenCode, set `OPENCODE_SERVER_URL`, `OPENCODE_SERVER_USERNAME`, `OPENCODE_SERVER_PASSWORD`, and `OPENCODE_SERVER_MODEL`. The model accepts `provider/model` or `provider/model/variant`; recognized variants are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 

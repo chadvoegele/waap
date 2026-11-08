@@ -160,29 +160,48 @@ struct CodexRunConfig {
     reasoning_effort: Option<ReasoningEffort>,
 }
 
+fn get_codex_effort_labels() -> Vec<&'static str> {
+    ReasoningEffort::labels()
+        .into_iter()
+        .filter(|label| *label != "off")
+        .collect()
+}
+
 fn get_codex_reasoning_effort_from_env() -> io::Result<Option<ReasoningEffort>> {
     match env::var("CODEX_REASONING_EFFORT") {
-        Ok(value) => ReasoningEffort::parse(&value).map(Some).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "invalid CODEX_REASONING_EFFORT {value:?}; accepted values: {}",
-                    ReasoningEffort::labels().join(", ")
-                ),
-            )
-        }),
+        Ok(value) => ReasoningEffort::parse(&value)
+            .filter(|effort| *effort != ReasoningEffort::Off)
+            .map(Some)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "invalid CODEX_REASONING_EFFORT {value:?}; accepted values: {}",
+                        get_codex_effort_labels().join(", ")
+                    ),
+                )
+            }),
         Err(env::VarError::NotPresent) => Ok(None),
         Err(env::VarError::NotUnicode(_)) => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
                 "invalid CODEX_REASONING_EFFORT; accepted values: {}",
-                ReasoningEffort::labels().join(", ")
+                get_codex_effort_labels().join(", ")
             ),
         )),
     }
 }
 
 fn get_codex_run_config(options: &AgentRunOptions) -> io::Result<CodexRunConfig> {
+    if options.reasoning_effort == Some(ReasoningEffort::Off) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "--reasoning-effort does not support off for Codex; accepted values: {}",
+                get_codex_effort_labels().join(", ")
+            ),
+        ));
+    }
     let model = options.model.clone().or_else(|| {
         env::var("CODEX_MODEL")
             .ok()
@@ -2373,23 +2392,33 @@ mod tests {
         let previous_effort = env::var_os("CODEX_REASONING_EFFORT");
         env::remove_var("CODEX_MODEL");
 
-        for expected in ReasoningEffort::value_variants() {
+        for expected in ReasoningEffort::value_variants()
+            .iter()
+            .filter(|effort| **effort != ReasoningEffort::Off)
+        {
             env::set_var("CODEX_REASONING_EFFORT", expected.as_str());
             let config = get_codex_run_config(&AgentRunOptions::default()).unwrap();
             assert_eq!(config.reasoning_effort, Some(*expected));
         }
-        for invalid in ["", "HIGH", "extreme"] {
+        for invalid in ["", "HIGH", "extreme", "off"] {
             env::set_var("CODEX_REASONING_EFFORT", invalid);
             let error = get_codex_run_config(&AgentRunOptions::default()).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
             let message = error.to_string();
             assert!(message.contains("CODEX_REASONING_EFFORT"));
-            for accepted in ReasoningEffort::labels() {
+            for accepted in get_codex_effort_labels() {
                 assert!(message.contains(accepted));
             }
         }
 
         env::remove_var("CODEX_REASONING_EFFORT");
+        assert!(get_codex_run_config(&AgentRunOptions {
+            model: None,
+            reasoning_effort: Some(ReasoningEffort::Off),
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("does not support off"));
         assert_eq!(
             get_codex_run_config(&AgentRunOptions::default()).unwrap(),
             CodexRunConfig::default()

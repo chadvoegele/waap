@@ -84,8 +84,16 @@ pub(crate) fn stop_agents_with_systems(
         let mut backend = report
             .metadata
             .system
-            .clone()
-            .unwrap_or_default()
+            .as_ref()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "invalid agent metadata: running agent {} has no persisted system; restore its system field before retrying stop",
+                        report.agent_id
+                    ),
+                )
+            })?
             .backend(None)?;
         let (stopped, state_commit) =
             stop_agent_session(waap_root, &control_root, &report, &mut backend)?;
@@ -301,11 +309,9 @@ mod tests {
             crate::test_git::init_repo_with_commit(dir.path());
             write_agent(dir.path(), "aa-test", "running");
             let path = dir.path().join("agents/aa-test/agent.md");
-            let text = fs::read_to_string(&path).unwrap().replacen(
-                "+++\n",
-                &format!("+++\nsystem = \"{system}\"\n"),
-                1,
-            );
+            let text = fs::read_to_string(&path)
+                .unwrap()
+                .replace("system = \"opencode\"", &format!("system = \"{system}\""));
             fs::write(path, text).unwrap();
             // An invalid control root is irrelevant to these backends.
             let result = super::stop_agents_with_systems(
@@ -379,11 +385,9 @@ mod tests {
             // No session ID: Codex addresses the owner by agent ID.
             write_agent(dir.path(), "aa-test", "running");
             let path = dir.path().join("agents/aa-test/agent.md");
-            let text = fs::read_to_string(&path).unwrap().replacen(
-                "+++\n",
-                "+++\nsystem = \"codex\"\n",
-                1,
-            );
+            let text = fs::read_to_string(&path)
+                .unwrap()
+                .replace("system = \"opencode\"", "system = \"codex\"");
             fs::write(path, text).unwrap();
             let expected = load_agent_report(dir.path(), "aa-test").unwrap();
             let before = fs::read(&expected.path).unwrap();
@@ -858,7 +862,7 @@ mod tests {
         write_file(
             &waap_root.join(format!("agents/{agent_id}/agent.md")),
             &format!(
-                "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"{status}\"\n{session_id}+++\n\n# Purpose\n"
+                "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"{status}\"\nsystem = \"opencode\"\n{session_id}+++\n\n# Purpose\n"
             ),
         );
     }
