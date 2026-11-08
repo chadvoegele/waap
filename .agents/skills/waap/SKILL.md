@@ -180,6 +180,8 @@ waap agent run --agent-id aa-1234abcd --system opencode
 waap agent run --agent-id aa-1234abcd --system pi
 ```
 
+Set a model and reasoning effort for one run:
+
 ```sh
 waap agent run --agent-id aa-1234abcd --system codex \
   --model gpt-5.4 --reasoning-effort high
