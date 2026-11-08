@@ -87,9 +87,10 @@ fn optional_pi_effort_env() -> io::Result<Option<ReasoningEffort>> {
 }
 
 fn validate_pi_effort(effort: ReasoningEffort, source: &str) -> io::Result<ReasoningEffort> {
-    if effort == ReasoningEffort::Ultra {
+    if matches!(effort, ReasoningEffort::None | ReasoningEffort::Ultra) {
         return Err(invalid_input(format!(
-            "{source} does not support ultra for Pi; accepted values: {}",
+            "{source} does not support {} for Pi; accepted values: {}",
+            effort.as_str(),
             pi_effort_labels().join(", ")
         )));
     }
@@ -100,16 +101,9 @@ fn pi_effort_labels() -> Vec<&'static str> {
     ReasoningEffort::value_variants()
         .iter()
         .copied()
-        .filter(|effort| *effort != ReasoningEffort::Ultra)
+        .filter(|effort| !matches!(effort, ReasoningEffort::None | ReasoningEffort::Ultra))
         .map(ReasoningEffort::as_str)
         .collect()
-}
-
-fn pi_thinking(effort: ReasoningEffort) -> &'static str {
-    match effort {
-        ReasoningEffort::None => "off",
-        _ => effort.as_str(),
-    }
 }
 
 fn invalid_input(message: impl Into<String>) -> io::Error {
@@ -129,7 +123,7 @@ pub(super) fn pi_command(config: &PiRunConfig, agent_id: &str, worktree_dir: &Pa
         command.arg("--model").arg(model);
     }
     if let Some(effort) = config.reasoning_effort {
-        command.arg("--thinking").arg(pi_thinking(effort));
+        command.arg("--thinking").arg(effort.as_str());
     }
     for name in SCRUBBED_PI_ENV {
         command.env_remove(name);
@@ -142,7 +136,7 @@ mod tests {
     use super::*;
     use crate::agent::PI_ENV_LOCK;
     #[test]
-    fn config_uses_cli_precedence_maps_none_and_rejects_ultra() {
+    fn config_uses_cli_precedence_and_passes_native_efforts() {
         let _lock = PI_ENV_LOCK.lock().unwrap();
         let previous = [
             env::var_os("WAAP_PI_BIN"),
@@ -156,20 +150,26 @@ mod tests {
         let fallback = PiRunConfig::from_env(&AgentRunOptions::default()).unwrap();
         let overridden = PiRunConfig::from_env(&AgentRunOptions {
             model: Some("cli-model".to_string()),
-            reasoning_effort: Some(ReasoningEffort::None),
+            reasoning_effort: Some(ReasoningEffort::Off),
         })
         .unwrap();
         assert_eq!(fallback.model.as_deref(), Some("env-model"));
         assert_eq!(fallback.executable, OsString::from("/tmp/pi-bin"));
         assert_eq!(fallback.reasoning_effort, Some(ReasoningEffort::Low));
         assert_eq!(overridden.model.as_deref(), Some("cli-model"));
-        assert_eq!(pi_thinking(overridden.reasoning_effort.unwrap()), "off");
+        assert_eq!(overridden.reasoning_effort, Some(ReasoningEffort::Off));
         for effort in ReasoningEffort::value_variants()
             .iter()
             .copied()
             .filter(|effort| !matches!(effort, ReasoningEffort::None | ReasoningEffort::Ultra))
         {
-            assert_eq!(pi_thinking(effort), effort.as_str());
+            env::set_var("WAAP_PI_REASONING_EFFORT", effort.as_str());
+            let config = PiRunConfig::from_env(&AgentRunOptions::default()).unwrap();
+            assert_eq!(config.reasoning_effort, Some(effort));
+            let command = pi_command(&config, "aa-12345678", Path::new("/repo"));
+            let args = command.as_std().get_args().collect::<Vec<_>>();
+            assert_eq!(args[args.len() - 2], "--thinking");
+            assert_eq!(args[args.len() - 1], effort.as_str());
         }
         assert!(PiRunConfig::from_env(&AgentRunOptions {
             model: None,
@@ -199,8 +199,15 @@ mod tests {
         env::set_var("WAAP_PI_MODEL", "  ");
         assert!(PiRunConfig::from_env(&AgentRunOptions::default()).is_err());
         env::set_var("WAAP_PI_MODEL", "valid");
-        env::set_var("WAAP_PI_REASONING_EFFORT", "off");
+        env::set_var("WAAP_PI_REASONING_EFFORT", "none");
         assert!(PiRunConfig::from_env(&AgentRunOptions::default()).is_err());
+        assert!(PiRunConfig::from_env(&AgentRunOptions {
+            model: None,
+            reasoning_effort: Some(ReasoningEffort::None),
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("does not support none"));
         assert!(PiRunConfig::from_env(&AgentRunOptions {
             model: Some("cli".to_string()),
             reasoning_effort: Some(ReasoningEffort::High),

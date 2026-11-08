@@ -156,7 +156,7 @@ pub(crate) enum TicketCommand {
 mod tests {
     use std::path::PathBuf;
 
-    use clap::Parser;
+    use clap::{Parser, ValueEnum};
 
     use super::{AgentCommand, Cli, Command, TicketCommand};
     use crate::agent::{AgentStatus, AgentSystem, ReasoningEffort};
@@ -620,6 +620,31 @@ mod tests {
                 }
             }
         ));
+    }
+
+    #[test]
+    fn parses_all_reasoning_efforts_before_backend_validation() {
+        for effort in ReasoningEffort::value_variants() {
+            let cli = Cli::try_parse_from([
+                "waap",
+                "agent",
+                "run",
+                "--agent-id",
+                "aa-3881fda0",
+                "--reasoning-effort",
+                effort.as_str(),
+            ])
+            .unwrap();
+            assert!(matches!(
+                cli.command,
+                Command::Agent {
+                    command: AgentCommand::Run {
+                        reasoning_effort: Some(parsed),
+                        ..
+                    }
+                } if parsed == *effort
+            ));
+        }
     }
 
     #[test]

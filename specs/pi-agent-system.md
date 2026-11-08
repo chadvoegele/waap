@@ -68,8 +68,9 @@ metadata error and no state change. Ready cancellation remains local and does
 not require a backend or socket.
 
 Pi and Codex accept `--model` and `--reasoning-effort`; Claude and OpenCode
-reject these options before state changes. Pi accepts `none`, `minimal`, `low`,
-`medium`, `high`, `xhigh`, and `max`, maps `none` to `off`, and rejects `ultra`.
+reject these options before state changes. Pi accepts `off`, `minimal`, `low`,
+`medium`, `high`, `xhigh`, and `max`, forwards the value unchanged to
+`--thinking`, and rejects `none` and `ultra`.
 
 | Setting | Pi fallback | Precedence |
 | --- | --- | --- |

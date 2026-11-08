@@ -273,6 +273,7 @@ pub(crate) enum AgentSystem {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum ReasoningEffort {
+    Off,
     None,
     Minimal,
     Low,
@@ -286,6 +287,7 @@ pub(crate) enum ReasoningEffort {
 impl ReasoningEffort {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
+            Self::Off => "off",
             Self::None => "none",
             Self::Minimal => "minimal",
             Self::Low => "low",
