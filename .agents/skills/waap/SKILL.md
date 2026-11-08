@@ -196,8 +196,7 @@ waap agent run --agent-id aa-1234abcd --system codex \
   - `WAAP_PI_BIN`: selects the executable.
 
 Accepted efforts are `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
-Codex also accepts `none` and `ultra`; Pi also accepts `off`. Pi forwards the
-value unchanged to `--thinking`.
+Codex also accepts `none` and `ultra`; Pi also accepts `off`.
 
 For OpenCode, set `OPENCODE_SERVER_URL`, `OPENCODE_SERVER_USERNAME`, `OPENCODE_SERVER_PASSWORD`, and `OPENCODE_SERVER_MODEL`. The model accepts `provider/model` or `provider/model/variant`; recognized variants are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 
