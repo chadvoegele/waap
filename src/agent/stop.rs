@@ -89,7 +89,7 @@ pub(crate) fn stop_agents_with_systems(
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
-                        "invalid agent metadata: running agent {} has no persisted system",
+                        "invalid agent metadata: running agent {} has no persisted system; restore its system field before retrying stop",
                         report.agent_id
                     ),
                 )

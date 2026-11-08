@@ -363,7 +363,7 @@ impl AgentSystem {
                 None => Ok(backend::Backend::Codex(codex::CodexBackend::default())),
             },
             AgentSystem::Pi => match options {
-                Some(options) => Ok(backend::Backend::Pi(pi::PiBackend::from_env(options)?)),
+                Some(options) => Ok(backend::Backend::Pi(pi::PiBackend::load_from_env(options)?)),
                 None => Ok(backend::Backend::Pi(pi::PiBackend::default())),
             },
         }

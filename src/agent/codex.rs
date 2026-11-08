@@ -160,7 +160,7 @@ struct CodexRunConfig {
     reasoning_effort: Option<ReasoningEffort>,
 }
 
-fn codex_effort_labels() -> Vec<&'static str> {
+fn get_codex_effort_labels() -> Vec<&'static str> {
     ReasoningEffort::labels()
         .into_iter()
         .filter(|label| *label != "off")
@@ -177,7 +177,7 @@ fn get_codex_reasoning_effort_from_env() -> io::Result<Option<ReasoningEffort>> 
                     io::ErrorKind::InvalidInput,
                     format!(
                         "invalid CODEX_REASONING_EFFORT {value:?}; accepted values: {}",
-                        codex_effort_labels().join(", ")
+                        get_codex_effort_labels().join(", ")
                     ),
                 )
             }),
@@ -186,7 +186,7 @@ fn get_codex_reasoning_effort_from_env() -> io::Result<Option<ReasoningEffort>> 
             io::ErrorKind::InvalidInput,
             format!(
                 "invalid CODEX_REASONING_EFFORT; accepted values: {}",
-                codex_effort_labels().join(", ")
+                get_codex_effort_labels().join(", ")
             ),
         )),
     }
@@ -198,7 +198,7 @@ fn get_codex_run_config(options: &AgentRunOptions) -> io::Result<CodexRunConfig>
             io::ErrorKind::InvalidInput,
             format!(
                 "--reasoning-effort does not support off for Codex; accepted values: {}",
-                codex_effort_labels().join(", ")
+                get_codex_effort_labels().join(", ")
             ),
         ));
     }
@@ -2406,7 +2406,7 @@ mod tests {
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
             let message = error.to_string();
             assert!(message.contains("CODEX_REASONING_EFFORT"));
-            for accepted in codex_effort_labels() {
+            for accepted in get_codex_effort_labels() {
                 assert!(message.contains(accepted));
             }
         }

@@ -33,12 +33,12 @@ impl Project {
             root,
             state,
         };
-        let output = project.output("", &["init"]);
+        let output = project.run_command("", &["init"]);
         assert_success(&output);
         project
     }
 
-    fn command(&self) -> Command {
+    fn build_command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_waap"));
         isolate_git_config(&mut command);
         command
@@ -49,9 +49,9 @@ impl Project {
         command
     }
 
-    fn output(&self, stdin: &str, args: &[&str]) -> Output {
+    fn run_command(&self, stdin: &str, args: &[&str]) -> Output {
         let mut child = self
-            .command()
+            .build_command()
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -66,7 +66,7 @@ impl Project {
     }
 
     fn create_agent(&self, name: &str) -> String {
-        let output = self.output(
+        let output = self.run_command(
             "Complete the deterministic fixture.\n",
             &["--output-format", "json", "agent", "new", "--name", name],
         );
@@ -77,11 +77,11 @@ impl Project {
             .to_string()
     }
 
-    fn agent_record(&self, agent_id: &str) -> PathBuf {
+    fn get_agent_record_path(&self, agent_id: &str) -> PathBuf {
         self.state.join("agents").join(agent_id).join("agent.md")
     }
 
-    fn socket(&self, agent_id: &str) -> PathBuf {
+    fn get_socket_path(&self, agent_id: &str) -> PathBuf {
         use std::os::unix::ffi::OsStrExt;
         let digest = ring::digest::digest(
             &ring::digest::SHA256,
@@ -98,7 +98,7 @@ impl Project {
             .join(format!("{agent_id}.sock"))
     }
 
-    fn worktree(&self, agent_id: &str) -> PathBuf {
+    fn get_worktree_path(&self, agent_id: &str) -> PathBuf {
         self.root.join("worktrees").join(agent_id)
     }
 }
@@ -127,7 +127,7 @@ fn write_pi_script(path: &Path, body: &str) {
     .unwrap();
 }
 
-fn shutdown_notification_script() -> String {
+fn build_shutdown_notification_script() -> String {
     let record = serde_json::json!({
         "type": "extension_ui_request",
         "method": "notify",
@@ -136,7 +136,7 @@ fn shutdown_notification_script() -> String {
     format!("printf '%s\\n' '{record}'\n")
 }
 
-fn fake_pi_runner() -> PathBuf {
+fn get_fake_pi_runner_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-pi-runner")
 }
 
@@ -170,7 +170,7 @@ fn wait_output(mut child: Child) -> Output {
 }
 
 fn assert_record(project: &Project, agent_id: &str, status: &str, system: &str, session: &str) {
-    let record = fs::read_to_string(project.agent_record(agent_id)).unwrap();
+    let record = fs::read_to_string(project.get_agent_record_path(agent_id)).unwrap();
     assert!(
         record.contains(&format!("status = \"{status}\"")),
         "{record}"
@@ -186,7 +186,7 @@ fn assert_record(project: &Project, agent_id: &str, status: &str, system: &str, 
 }
 
 #[test]
-fn omitted_system_runs_fake_pi_after_authentic_session_is_persisted() {
+fn test_omitted_system_runs_fake_pi_after_authentic_session_is_persisted() {
     let project = Project::new();
     let agent_id = project.create_agent("pi-process-success");
     let fake = project.root.join("fake-pi-success");
@@ -208,12 +208,12 @@ while IFS= read -r ignored; do :; done
     );
 
     let output = project
-        .command()
+        .build_command()
         .args(["agent", "run", "--agent-id", &agent_id])
-        .env("WAAP_PI_BIN", fake_pi_runner())
+        .env("WAAP_PI_BIN", get_fake_pi_runner_path())
         .env("WAAP_FAKE_PI_SCRIPT", &fake)
         .env("WAAP_FAKE_PID", &pid)
-        .env("WAAP_FAKE_RECORD", project.agent_record(&agent_id))
+        .env("WAAP_FAKE_RECORD", project.get_agent_record_path(&agent_id))
         .env("WAAP_FAKE_SNAPSHOT", &snapshot)
         .output()
         .unwrap();
@@ -226,7 +226,7 @@ while IFS= read -r ignored; do :; done
     assert!(prompt_state.contains("system = \"pi\""));
     assert!(prompt_state.contains("session_id = \"pi-process-session\""));
     assert!(prompt_state.contains("Complete when instructions in"));
-    assert!(!project.worktree(&agent_id).exists());
+    assert!(!project.get_worktree_path(&agent_id).exists());
     let subjects = git(&project.state, &["log", "--pretty=%s"]);
     assert!(subjects.contains(&format!("waap agent run {agent_id}")));
     assert!(subjects.contains(&format!("waap agent pi session {agent_id}")));
@@ -235,7 +235,7 @@ while IFS= read -r ignored; do :; done
 }
 
 #[test]
-fn fake_pi_failure_exits_nonzero_persists_failed_and_cleans_worktree() {
+fn test_fake_pi_failure_exits_nonzero_persists_failed_and_cleans_worktree() {
     let project = Project::new();
     let agent_id = project.create_agent("pi-process-failure");
     let fake = project.root.join("fake-pi-failure");
@@ -253,9 +253,9 @@ while IFS= read -r ignored; do :; done
     );
 
     let output = project
-        .command()
+        .build_command()
         .args(["agent", "run", "--system", "pi", "--agent-id", &agent_id])
-        .env("WAAP_PI_BIN", fake_pi_runner())
+        .env("WAAP_PI_BIN", get_fake_pi_runner_path())
         .env("WAAP_FAKE_PI_SCRIPT", fake)
         .env("WAAP_FAKE_PID", &pid)
         .output()
@@ -263,12 +263,12 @@ while IFS= read -r ignored; do :; done
 
     assert!(!output.status.success());
     assert_record(&project, &agent_id, "failed", "pi", "pi-failed-session");
-    assert!(!project.worktree(&agent_id).exists());
+    assert!(!project.get_worktree_path(&agent_id).exists());
     assert_reaped(&pid);
 }
 
 #[test]
-fn stop_uses_shared_socket_after_steering_and_owner_persists_aborted() {
+fn test_stop_uses_shared_socket_after_steering_and_owner_persists_aborted() {
     let project = Project::new();
     let agent_id = project.create_agent("pi-process-abort");
     let fake = project.root.join("fake-pi-abort");
@@ -300,12 +300,12 @@ fn stop_uses_shared_socket_after_steering_and_owner_persists_aborted() {
       ;;
   esac
 done
-"#.to_owned() + &shutdown_notification_script()),
+"#.to_owned() + &build_shutdown_notification_script()),
     );
     let runner = project
-        .command()
+        .build_command()
         .args(["agent", "run", "--system", "pi", "--agent-id", &agent_id])
-        .env("WAAP_PI_BIN", fake_pi_runner())
+        .env("WAAP_PI_BIN", get_fake_pi_runner_path())
         .env("WAAP_FAKE_PI_SCRIPT", fake)
         .env("WAAP_FAKE_PID", &pid)
         .env("WAAP_FAKE_LOG", &log)
@@ -317,8 +317,8 @@ done
     wait_for("Pi prompt acceptance", || ready.exists());
 
     let prompt = "  雪\n'quoted' $(touch injected) `pwd`  ";
-    let before_record = fs::read(project.agent_record(&agent_id)).unwrap();
-    let steer = project.output(
+    let before_record = fs::read(project.get_agent_record_path(&agent_id)).unwrap();
+    let steer = project.run_command(
         "",
         &[
             "agent",
@@ -331,10 +331,10 @@ done
     );
     assert_success(&steer);
     assert_eq!(
-        fs::read(project.agent_record(&agent_id)).unwrap(),
+        fs::read(project.get_agent_record_path(&agent_id)).unwrap(),
         before_record
     );
-    let stop = project.output("", &["agent", "stop", "--agent-id", &agent_id]);
+    let stop = project.run_command("", &["agent", "stop", "--agent-id", &agent_id]);
     assert_success(&stop);
     let owner = wait_output(runner);
 
@@ -377,16 +377,16 @@ done
                 .unwrap()
     );
     assert!(!project.root.join("injected").exists());
-    assert!(!project.worktree(&agent_id).exists());
-    assert!(!project.socket(&agent_id).exists());
+    assert!(!project.get_worktree_path(&agent_id).exists());
+    assert!(!project.get_socket_path(&agent_id).exists());
     assert_reaped(&pid);
 }
 
 #[test]
-fn stop_rejects_running_record_without_system_without_mutation() {
+fn test_stop_rejects_running_record_without_system_without_mutation() {
     let project = Project::new();
     let agent_id = project.create_agent("legacy-sessionless-system");
-    let record_path = project.agent_record(&agent_id);
+    let record_path = project.get_agent_record_path(&agent_id);
     let ready = fs::read_to_string(&record_path).unwrap();
     fs::write(
         &record_path,
@@ -404,7 +404,7 @@ fn stop_rejects_running_record_without_system_without_mutation() {
     let before_record = fs::read(&record_path).unwrap();
     let before_head = git(&project.state, &["rev-parse", "HEAD"]);
 
-    let output = project.output("", &["agent", "stop", "--agent-id", &agent_id]);
+    let output = project.run_command("", &["agent", "stop", "--agent-id", &agent_id]);
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("no persisted system"));
@@ -413,7 +413,7 @@ fn stop_rejects_running_record_without_system_without_mutation() {
 }
 
 #[test]
-fn codex_shared_control_stop_keeps_owner_outcome_and_cleanup() {
+fn test_codex_shared_control_stop_keeps_owner_outcome_and_cleanup() {
     let project = Project::new();
     let agent_id = project.create_agent("codex-process-abort");
     let bin = project.root.join("fake-bin");
@@ -456,7 +456,7 @@ done
         std::env::var("PATH").unwrap_or_default()
     );
     let runner = project
-        .command()
+        .build_command()
         .args(["agent", "run", "--agent-id", &agent_id, "--system", "codex"])
         .env("PATH", path)
         .env("WAAP_FAKE_LOG", &log)
@@ -467,7 +467,7 @@ done
         .unwrap();
     wait_for("Codex turn start", || ready.exists());
 
-    let stop = project.output("", &["agent", "stop", "--agent-id", &agent_id]);
+    let stop = project.run_command("", &["agent", "stop", "--agent-id", &agent_id]);
     assert_success(&stop);
     let owner = wait_output(runner);
 
@@ -487,11 +487,11 @@ done
             .count(),
         1
     );
-    assert!(!project.worktree(&agent_id).exists());
+    assert!(!project.get_worktree_path(&agent_id).exists());
 }
 
 #[test]
-fn handled_prompt_with_or_without_extension_work_fails_and_reaps() {
+fn test_handled_prompt_with_or_without_extension_work_fails_and_reaps() {
     for extension_work in [false, true] {
         let project = Project::new();
         let agent_id = project.create_agent("handled");
@@ -517,9 +517,9 @@ while IFS= read -r ignored; do :; done
         );
         let output = wait_output(
             project
-                .command()
+                .build_command()
                 .args(["agent", "run", "--agent-id", &agent_id])
-                .env("WAAP_PI_BIN", fake_pi_runner())
+                .env("WAAP_PI_BIN", get_fake_pi_runner_path())
                 .env("WAAP_FAKE_PI_SCRIPT", fake)
                 .env("WAAP_FAKE_PID", &pid)
                 .stdout(Stdio::piped())
@@ -530,13 +530,13 @@ while IFS= read -r ignored; do :; done
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("handled"));
         assert_record(&project, &agent_id, "failed", "pi", "handled-session");
-        assert!(!project.worktree(&agent_id).exists());
+        assert!(!project.get_worktree_path(&agent_id).exists());
         assert_reaped(&pid);
     }
 }
 
 #[test]
-fn post_eof_protocol_output_larger_than_pipe_capacity_preserves_owner_outcome() {
+fn test_post_eof_protocol_output_larger_than_pipe_capacity_preserves_owner_outcome() {
     for (reason, status) in [("stop", "completed"), ("error", "failed")] {
         let project = Project::new();
         let agent_id = project.create_agent("shutdown-output");
@@ -550,13 +550,13 @@ printf '%s\n' '{"type":"response","id":"waap-2","command":"prompt","success":tru
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"STOP_REASON"}}'
 printf '%s\n' '{"type":"agent_settled"}'
 while IFS= read -r ignored; do :; done
-"#.replace("STOP_REASON", reason) + &shutdown_notification_script();
+"#.replace("STOP_REASON", reason) + &build_shutdown_notification_script();
         write_pi_script(&fake, &script);
         let output = wait_output(
             project
-                .command()
+                .build_command()
                 .args(["agent", "run", "--agent-id", &agent_id])
-                .env("WAAP_PI_BIN", fake_pi_runner())
+                .env("WAAP_PI_BIN", get_fake_pi_runner_path())
                 .env("WAAP_FAKE_PI_SCRIPT", fake)
                 .env("WAAP_FAKE_PID", &pid)
                 .stdout(Stdio::piped())
@@ -569,13 +569,13 @@ while IFS= read -r ignored; do :; done
         assert!(!String::from_utf8_lossy(&output.stderr).contains("Pi RPC did not exit"));
         assert_record(&project, &agent_id, status, "pi", "shutdown-session");
         assert_reaped(&pid);
-        assert!(!project.worktree(&agent_id).exists());
-        assert!(!project.socket(&agent_id).exists());
+        assert!(!project.get_worktree_path(&agent_id).exists());
+        assert!(!project.get_socket_path(&agent_id).exists());
     }
 }
 
 #[test]
-fn shutdown_protocol_errors_and_nonzero_exit_fail_and_reap_owner_child() {
+fn test_shutdown_protocol_errors_and_nonzero_exit_fail_and_reap_owner_child() {
     for (shutdown, error) in [
         ("exec 1>&-; sleep 0.1; exit 7", "Pi RPC exited with status"),
         ("printf 'not-json\\n'; exec sleep 30", "malformed JSON"),
@@ -600,9 +600,9 @@ while IFS= read -r ignored; do :; done
         write_pi_script(&fake, &script);
         let output = wait_output(
             project
-                .command()
+                .build_command()
                 .args(["agent", "run", "--agent-id", &agent_id])
-                .env("WAAP_PI_BIN", fake_pi_runner())
+                .env("WAAP_PI_BIN", get_fake_pi_runner_path())
                 .env("WAAP_FAKE_PI_SCRIPT", fake)
                 .env("WAAP_FAKE_PID", &pid)
                 .stdout(Stdio::piped())
@@ -623,13 +623,13 @@ while IFS= read -r ignored; do :; done
             "shutdown-error-session",
         );
         assert_reaped(&pid);
-        assert!(!project.worktree(&agent_id).exists());
-        assert!(!project.socket(&agent_id).exists());
+        assert!(!project.get_worktree_path(&agent_id).exists());
+        assert!(!project.get_socket_path(&agent_id).exists());
     }
 }
 
 #[test]
-fn descendant_holding_native_stdout_does_not_block_owner_cleanup() {
+fn test_descendant_holding_native_stdout_does_not_block_owner_cleanup() {
     let project = Project::new();
     let agent_id = project.create_agent("descendant");
     let fake = project.root.join("descendant-pi");
@@ -650,9 +650,9 @@ while IFS= read -r ignored; do :; done
 "#,
     );
     let runner = project
-        .command()
+        .build_command()
         .args(["agent", "run", "--agent-id", &agent_id])
-        .env("WAAP_PI_BIN", fake_pi_runner())
+        .env("WAAP_PI_BIN", get_fake_pi_runner_path())
         .env("WAAP_FAKE_PI_SCRIPT", fake)
         .env("WAAP_FAKE_PID", &pid)
         .env("WAAP_DESCENDANT_PID", &descendant)
@@ -673,11 +673,11 @@ while IFS= read -r ignored; do :; done
     assert_success(&output);
     assert_record(&project, &agent_id, "completed", "pi", "descendant-session");
     assert_reaped(&pid);
-    assert!(!project.worktree(&agent_id).exists());
+    assert!(!project.get_worktree_path(&agent_id).exists());
 }
 
 #[test]
-fn startup_protocol_failures_reap_child_without_submitting_task_work() {
+fn test_startup_protocol_failures_reap_child_without_submitting_task_work() {
     for response in [
         "{\"type\":\"response\",\"id\":\"waap-1\",\"command\":\"get_state\",\"success\":true,\"data\":{}}",
         "not-json",
@@ -688,21 +688,21 @@ fn startup_protocol_failures_reap_child_without_submitting_task_work() {
         let fake = project.root.join("startup-pi");
         let pid = project.root.join("startup-pi.pid");
         write_pi_script(&fake, &format!("IFS= read -r state\nprintf '%s\\n' '{response}'\n"));
-        let output = wait_output(project.command().args(["agent", "run", "--agent-id", &agent_id])
-            .env("WAAP_PI_BIN", fake_pi_runner()).env("WAAP_FAKE_PI_SCRIPT", fake).env("WAAP_FAKE_PID", &pid)
+        let output = wait_output(project.build_command().args(["agent", "run", "--agent-id", &agent_id])
+            .env("WAAP_PI_BIN", get_fake_pi_runner_path()).env("WAAP_FAKE_PI_SCRIPT", fake).env("WAAP_FAKE_PID", &pid)
             .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap());
         assert!(!output.status.success());
-        let record = fs::read_to_string(project.agent_record(&agent_id)).unwrap();
+        let record = fs::read_to_string(project.get_agent_record_path(&agent_id)).unwrap();
         assert!(record.contains("status = \"failed\""));
         assert!(!record.contains("session_id"));
-        assert!(!project.worktree(&agent_id).exists());
-        assert!(!project.socket(&agent_id).exists());
+        assert!(!project.get_worktree_path(&agent_id).exists());
+        assert!(!project.get_socket_path(&agent_id).exists());
         assert_reaped(&pid);
     }
 }
 
 #[test]
-fn socket_stop_acknowledgement_loss_remains_unknown_after_settlement() {
+fn test_socket_stop_acknowledgement_loss_remains_unknown_after_settlement() {
     let project = Project::new();
     let agent_id = project.create_agent("unknown-stop");
     let fake = project.root.join("unknown-pi");
@@ -729,9 +729,9 @@ done
 "#,
     );
     let runner = project
-        .command()
+        .build_command()
         .args(["agent", "run", "--agent-id", &agent_id])
-        .env("WAAP_PI_BIN", fake_pi_runner())
+        .env("WAAP_PI_BIN", get_fake_pi_runner_path())
         .env("WAAP_FAKE_PI_SCRIPT", fake)
         .env("WAAP_FAKE_PID", &pid)
         .env("WAAP_FAKE_READY", &ready)
@@ -741,7 +741,7 @@ done
         .spawn()
         .unwrap();
     wait_for("Pi prompt", || ready.exists());
-    let stopped = project.output("", &["agent", "stop", "--agent-id", &agent_id]);
+    let stopped = project.run_command("", &["agent", "stop", "--agent-id", &agent_id]);
     assert!(!stopped.status.success());
     let diagnostic = String::from_utf8_lossy(&stopped.stderr);
     assert!(diagnostic.contains("unknown"), "{diagnostic}");
@@ -756,13 +756,13 @@ done
             .count(),
         1
     );
-    assert!(!project.socket(&agent_id).exists());
-    assert!(!project.worktree(&agent_id).exists());
+    assert!(!project.get_socket_path(&agent_id).exists());
+    assert!(!project.get_worktree_path(&agent_id).exists());
     assert_reaped(&pid);
 }
 
 #[test]
-fn signals_and_stop_all_share_the_native_clear_abort_sequence() {
+fn test_signals_and_stop_all_share_the_native_clear_abort_sequence() {
     for operation in ["-INT", "-TERM", "all"] {
         let project = Project::new();
         let agent_id = project.create_agent("signal");
@@ -789,9 +789,9 @@ done
 "#,
         );
         let runner = project
-            .command()
+            .build_command()
             .args(["agent", "run", "--agent-id", &agent_id])
-            .env("WAAP_PI_BIN", fake_pi_runner())
+            .env("WAAP_PI_BIN", get_fake_pi_runner_path())
             .env("WAAP_FAKE_PI_SCRIPT", fake)
             .env("WAAP_FAKE_PID", &pid)
             .env("WAAP_FAKE_READY", &ready)
@@ -803,7 +803,7 @@ done
         wait_for("Pi prompt", || ready.exists());
         if operation == "all" {
             let stopped = project
-                .command()
+                .build_command()
                 .args(["agent", "stop"])
                 .env("WAAP_PI_REASONING_EFFORT", "ultra")
                 .output()
@@ -822,8 +822,8 @@ done
         let commands = fs::read_to_string(log).unwrap();
         assert_eq!(commands.matches("\"type\":\"clear_queue\"").count(), 1);
         assert_eq!(commands.matches("\"type\":\"abort\"").count(), 1);
-        assert!(!project.socket(&agent_id).exists());
-        assert!(!project.worktree(&agent_id).exists());
+        assert!(!project.get_socket_path(&agent_id).exists());
+        assert!(!project.get_worktree_path(&agent_id).exists());
         assert_reaped(&pid);
     }
 }

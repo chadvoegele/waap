@@ -14,7 +14,7 @@ use super::commands::Command;
 use super::control::{client::ControlClient, SocketPath};
 use super::process::AgentProcess;
 use super::AgentRunOptions;
-use config::{pi_command, PiRunConfig};
+use config::{build_pi_command, PiRunConfig};
 use rpc::PiClient;
 
 mod config;
@@ -29,9 +29,9 @@ pub(super) struct PiBackend {
 }
 
 impl PiBackend {
-    pub(super) fn from_env(options: &AgentRunOptions) -> io::Result<Self> {
+    pub(super) fn load_from_env(options: &AgentRunOptions) -> io::Result<Self> {
         Ok(Self {
-            config: PiRunConfig::from_env(options)?,
+            config: PiRunConfig::load_from_env(options)?,
         })
     }
 
@@ -56,7 +56,7 @@ impl PiBackend {
     ) -> io::Result<AgentSessionRun> {
         let mut sigterm = signal(SignalKind::terminate())?;
         let mut sigint = signal(SignalKind::interrupt())?;
-        let mut command = pi_command(&self.config, context.agent_id, context.worktree_dir);
+        let mut command = build_pi_command(&self.config, context.agent_id, context.worktree_dir);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -69,7 +69,7 @@ impl PiBackend {
                 tokio::io::stdout(),
             );
             let deadline = Instant::now() + COMMAND_TIMEOUT;
-            let session_id = client.session_id(deadline).await?;
+            let session_id = client.fetch_session_id(deadline).await?;
             Ok::<_, io::Error>((client, session_id))
         };
         let started = tokio::select! {
@@ -120,7 +120,7 @@ impl PiRunner {
                 COMMAND_TIMEOUT,
             )
             .await?;
-        self.client.close();
+        self.client.close_stdin();
         let status = tokio::time::timeout(COMMAND_TIMEOUT, async {
             tokio::select! {
                 result = self.process.wait() => result,

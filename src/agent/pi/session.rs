@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufRead, AsyncWrite};
 use tokio::sync::mpsc::Receiver;
 
-use super::rpc::{invalid_protocol, validate_response, PiClient};
+use super::rpc::{build_protocol_error, validate_response, PiClient};
 use crate::agent::backend::RunOutcome;
 use crate::agent::commands::{Command, CommandError, CommandRequest};
 
@@ -35,11 +35,24 @@ struct Session {
     steer: Option<PendingSteer>,
     stop: Option<PendingStop>,
     settled: bool,
+    interrupted: bool,
     latest_stop_reason: Option<String>,
 }
 
 impl Session {
-    fn deadline(&self) -> Option<Instant> {
+    fn new(prompt_deadline: Instant) -> Self {
+        Self {
+            prompt_id: None,
+            prompt_deadline,
+            steer: None,
+            stop: None,
+            settled: false,
+            interrupted: false,
+            latest_stop_reason: None,
+        }
+    }
+
+    fn get_next_deadline(&self) -> Option<Instant> {
         self.prompt_id
             .as_ref()
             .map(|_| self.prompt_deadline)
@@ -49,12 +62,12 @@ impl Session {
             .min()
     }
 
-    fn outcome(&self) -> io::Result<RunOutcome> {
+    fn determine_outcome(&self) -> io::Result<RunOutcome> {
         match self.latest_stop_reason.as_deref() {
             Some("stop") => Ok(RunOutcome::Completed),
             Some("aborted") => Ok(RunOutcome::Aborted),
             Some("error" | "length" | "toolUse") => Ok(RunOutcome::Failed(ExitCode::FAILURE)),
-            reason => Err(invalid_protocol(format!(
+            reason => Err(build_protocol_error(format!(
                 "Pi settled with missing or unknown assistant stopReason: {reason:?}"
             ))),
         }
@@ -69,7 +82,7 @@ impl Session {
                     record["message"]["stopReason"]
                         .as_str()
                         .ok_or_else(|| {
-                            invalid_protocol("Pi assistant message is missing stopReason")
+                            build_protocol_error("Pi assistant message is missing stopReason")
                         })?
                         .into(),
                 );
@@ -79,8 +92,76 @@ impl Session {
         Ok(())
     }
 
-    fn ready_to_finish(&self) -> bool {
+    fn is_ready_to_finish(&self) -> bool {
         self.settled && self.prompt_id.is_none() && self.steer.is_none() && self.stop.is_none()
+    }
+
+    fn reject_expired_stop(&mut self) -> io::Result<bool> {
+        let expired = self.stop.as_ref().is_some_and(|stop| {
+            matches!(stop.phase, StopPhase::Waiting) && Instant::now() >= stop.deadline
+        });
+        if !expired {
+            return Ok(false);
+        }
+        let mut stop = self.stop.take().unwrap();
+        if let Some(request) = &mut stop.request {
+            request.respond(Err(CommandError::Rejected {
+                code: "timeout",
+                message: "Stop expired before Pi dispatch".into(),
+            }));
+        }
+        if self.interrupted || stop.request.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Pi owner interruption expired before dispatch; inspect waap agent get before retrying",
+            ));
+        }
+        Ok(true)
+    }
+
+    fn handle_deadline(&mut self) -> io::Result<()> {
+        if self.reject_expired_stop()? {
+            return Ok(());
+        }
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "Pi command acknowledgement timed out; control acceptance is unknown; do not retry automatically",
+        ))
+    }
+
+    fn handle_prompt_response(&mut self, record: &Value) -> io::Result<()> {
+        validate_response(record, "prompt")?.map_err(io::Error::other)?;
+        match record["data"]["disposition"].as_str() {
+            Some("started" | "queued") => {}
+            Some("handled") => {
+                return Err(build_protocol_error(
+                    "Pi initial prompt was handled without starting an agent run",
+                ))
+            }
+            disposition => {
+                return Err(build_protocol_error(format!(
+                    "Pi initial prompt has missing or unknown disposition: {disposition:?}"
+                )))
+            }
+        }
+        self.prompt_id = None;
+        Ok(())
+    }
+
+    fn handle_steer_response(&mut self, record: &Value) -> io::Result<()> {
+        let result = parse_control_result(record, "steer")?;
+        if result.is_ok()
+            && !matches!(
+                record["data"]["disposition"].as_str(),
+                Some("queued" | "handled")
+            )
+        {
+            return Err(build_protocol_error(
+                "Pi steer response has missing or unknown disposition",
+            ));
+        }
+        self.steer.take().unwrap().request.respond(result);
+        Ok(())
     }
 }
 
@@ -94,7 +175,7 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> PiCl
     ) -> io::Result<RunOutcome> {
         let prompt_deadline = Instant::now() + timeout;
         tokio::pin!(interrupt);
-        let mut interrupted = interrupt.as_mut().now_or_never().is_some();
+        let interrupted = interrupt.as_mut().now_or_never().is_some();
         let mut session = self
             .prepare_session(prompt, commands, interrupted, prompt_deadline)
             .await?;
@@ -107,35 +188,26 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> PiCl
                     "Pi cancelled before prompt submission",
                 ));
             }
-            if session.ready_to_finish() {
-                return session.outcome();
+            if session.is_ready_to_finish() {
+                return session.determine_outcome();
             }
             let expires = async {
-                match session.deadline() {
+                match session.get_next_deadline() {
                     Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
                     None => std::future::pending().await,
                 }
             };
             tokio::select! {
-                _ = expires => {
-                    if session.stop.as_ref().is_some_and(|stop| matches!(stop.phase, StopPhase::Waiting) && Instant::now() >= stop.deadline) {
-                        let mut stop = session.stop.take().unwrap();
-                        if let Some(request) = &mut stop.request {
-                            request.respond(Err(CommandError::Rejected { code: "timeout", message: "Stop expired before Pi dispatch".into() }));
-                            continue;
-                        }
-                    }
-                    return Err(io::Error::new(io::ErrorKind::TimedOut, "Pi command acknowledgement timed out; control acceptance is unknown; do not retry automatically"));
-                },
-                _ = &mut interrupt, if !interrupted => {
-                    interrupted = true;
+                _ = expires => session.handle_deadline()?,
+                _ = &mut interrupt, if !session.interrupted => {
+                    session.interrupted = true;
                     if session.stop.is_none() {
                         session.stop = Some(PendingStop { phase: StopPhase::Waiting, deadline: Instant::now() + timeout, request: None });
                     }
                 }
                 record = self.receive() => {
                     let record = record?;
-                    if self.handle_response(&record, &mut session, interrupted).await? {
+                    if self.handle_response(&record, &mut session).await? {
                         return Ok(RunOutcome::Aborted);
                     }
                     session.observe(&record)?;
@@ -153,14 +225,8 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> PiCl
         interrupted: bool,
         prompt_deadline: Instant,
     ) -> io::Result<Session> {
-        let mut session = Session {
-            prompt_id: None,
-            prompt_deadline,
-            steer: None,
-            stop: None,
-            settled: false,
-            latest_stop_reason: None,
-        };
+        let mut session = Session::new(prompt_deadline);
+        session.interrupted = interrupted;
         if interrupted {
             session.stop = Some(PendingStop {
                 phase: StopPhase::Waiting,
@@ -244,6 +310,7 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> PiCl
     }
 
     async fn start_stop(&mut self, session: &mut Session) -> io::Result<()> {
+        session.reject_expired_stop()?;
         let Some(stop) = &mut session.stop else {
             return Ok(());
         };
@@ -253,27 +320,12 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> PiCl
         {
             return Ok(());
         }
-        if Instant::now() >= stop.deadline {
-            if let Some(request) = &mut stop.request {
-                request.respond(Err(CommandError::Rejected {
-                    code: "timeout",
-                    message: "Stop expired before Pi dispatch".into(),
-                }));
-            }
-            session.stop = None;
-            return Ok(());
-        }
         let id = self.send("clear_queue", json!({}), stop.deadline).await?;
         stop.phase = StopPhase::Clearing(id);
         Ok(())
     }
 
-    async fn handle_response(
-        &mut self,
-        record: &Value,
-        session: &mut Session,
-        interrupted: bool,
-    ) -> io::Result<bool> {
+    async fn handle_response(&mut self, record: &Value, session: &mut Session) -> io::Result<bool> {
         if record["type"] != "response" {
             return Ok(false);
         }
@@ -281,38 +333,22 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> PiCl
             return Ok(false);
         };
         if session.prompt_id.as_deref() == Some(id) {
-            validate_response(record, "prompt")?.map_err(io::Error::other)?;
-            session.prompt_id = None;
-            match record["data"]["disposition"].as_str() {
-                Some("started" | "queued") => {}
-                Some("handled") => {
-                    return Err(invalid_protocol(
-                        "Pi initial prompt was handled without starting an agent run",
-                    ))
-                }
-                disposition => {
-                    return Err(invalid_protocol(format!(
-                        "Pi initial prompt has missing or unknown disposition: {disposition:?}"
-                    )))
-                }
-            }
+            session.handle_prompt_response(record)?;
             return Ok(false);
         }
         if session.steer.as_ref().is_some_and(|steer| steer.id == id) {
-            let result = control_result(record, "steer")?;
-            if result.is_ok()
-                && !matches!(
-                    record["data"]["disposition"].as_str(),
-                    Some("queued" | "handled")
-                )
-            {
-                return Err(invalid_protocol(
-                    "Pi steer response has missing or unknown disposition",
-                ));
-            }
-            session.steer.take().unwrap().request.respond(result);
+            session.handle_steer_response(record)?;
             return Ok(false);
         }
+        self.handle_stop_response(record, id, session).await
+    }
+
+    async fn handle_stop_response(
+        &mut self,
+        record: &Value,
+        id: &str,
+        session: &mut Session,
+    ) -> io::Result<bool> {
         let Some(stop) = &mut session.stop else {
             return Ok(false);
         };
@@ -321,13 +357,13 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> PiCl
             StopPhase::Aborting(expected) if expected == id => "abort",
             _ => return Ok(false),
         };
-        let result = control_result(record, command)?;
+        let result = parse_control_result(record, command)?;
         if result.is_err() || command == "abort" {
             let accepted = result.is_ok();
             if let Some(request) = &mut stop.request {
                 request.respond(result);
             }
-            if !accepted && (interrupted || stop.request.is_none()) {
+            if !accepted && (session.interrupted || stop.request.is_none()) {
                 return Err(io::Error::other("Pi rejected owner interruption"));
             }
             session.stop = None;
@@ -339,7 +375,7 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> PiCl
     }
 }
 
-fn control_result(record: &Value, command: &str) -> io::Result<Result<(), CommandError>> {
+fn parse_control_result(record: &Value, command: &str) -> io::Result<Result<(), CommandError>> {
     Ok(
         validate_response(record, command)?.map_err(|message| CommandError::Rejected {
             code: "backend_rejected",
@@ -360,7 +396,7 @@ mod tests {
 
     type Driver = PiClient<BufReader<ReadHalf<DuplexStream>>, WriteHalf<DuplexStream>, Vec<u8>>;
 
-    fn pair() -> (Driver, Peer) {
+    fn create_client_pair() -> (Driver, Peer) {
         let (driver, peer) = duplex(1024 * 128);
         let (read, write) = tokio::io::split(driver);
         let (peer_read, peer_write) = tokio::io::split(peer);
@@ -403,14 +439,14 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
 
-    fn deadline() -> Instant {
+    fn get_test_deadline() -> Instant {
         Instant::now() + Duration::from_secs(2)
     }
 
     #[tokio::test]
-    async fn steer_preserves_text_correlates_and_waits_for_ack_in_both_settlement_orders() {
+    async fn test_steer_preserves_text_correlates_and_waits_for_ack_in_both_settlement_orders() {
         for settle_first in [false, true] {
-            let (mut client, mut peer) = pair();
+            let (mut client, mut peer) = create_client_pair();
             let (dispatcher, mut receiver) = CommandDispatcher::create_channel();
             let prompt = "  snow 雪\n\"quoted\" '$HOME' `echo hi` \u{2028}  ";
             let (outcome, ()) = tokio::join!(
@@ -422,7 +458,7 @@ mod tests {
                 ),
                 async {
                     accept_prompt(&mut peer).await;
-                    let steering = dispatcher.steer(prompt, deadline());
+                    let steering = dispatcher.steer(prompt, get_test_deadline());
                     let (result, ()) = tokio::join!(steering, async {
                         let steer = read(&mut peer, "steer").await;
                         assert_eq!(steer["message"], prompt);
@@ -444,8 +480,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_waits_for_slow_steer_preflight_clears_then_aborts_and_drains_settlement() {
-        let (mut client, mut peer) = pair();
+    async fn test_stop_waits_for_slow_steer_preflight_clears_then_aborts_and_drains_settlement() {
+        let (mut client, mut peer) = create_client_pair();
         let (dispatcher, mut receiver) = CommandDispatcher::create_channel();
         let (outcome, ()) = tokio::join!(
             client.run_session(
@@ -458,10 +494,10 @@ mod tests {
                 accept_prompt(&mut peer).await;
                 let (steer_seen, wait_for_steer) = tokio::sync::oneshot::channel();
                 let (steered, stopped, ()) = tokio::join!(
-                    dispatcher.steer("change", deadline()),
+                    dispatcher.steer("change", get_test_deadline()),
                     async {
                         wait_for_steer.await.unwrap();
-                        dispatcher.stop(deadline()).await
+                        dispatcher.stop(get_test_deadline()).await
                     },
                     async {
                         let steer = read(&mut peer, "steer").await;
@@ -488,11 +524,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pre_prompt_stop_and_already_ready_signal_suppress_prompt_submission() {
+    async fn test_pre_prompt_stop_and_already_ready_signal_suppress_prompt_submission() {
         for signal in [false, true] {
-            let (mut client, mut peer) = pair();
+            let (mut client, mut peer) = create_client_pair();
             let (_dispatcher, mut receiver) = CommandDispatcher::create_channel();
-            let (request, response) = CommandRequest::new(deadline());
+            let (request, response) = CommandRequest::new(get_test_deadline());
             let response = if signal {
                 drop(request);
                 None
@@ -529,9 +565,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handled_prompt_fails_without_waiting_even_if_extension_started_independent_work() {
+    async fn test_handled_prompt_fails_without_waiting_even_if_extension_started_independent_work()
+    {
         for extension_work in [false, true] {
-            let (mut client, mut peer) = pair();
+            let (mut client, mut peer) = create_client_pair();
             let (_dispatcher, mut receiver) = CommandDispatcher::create_channel();
             let (outcome, ()) = tokio::join!(
                 client.run_session(
@@ -553,9 +590,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_rejections_are_definite_and_do_not_abort_a_successful_run() {
+    async fn test_native_rejections_are_definite_and_do_not_abort_a_successful_run() {
         for operation in ["steer", "clear_queue", "abort"] {
-            let (mut client, mut peer) = pair();
+            let (mut client, mut peer) = create_client_pair();
             let (dispatcher, mut receiver) = CommandDispatcher::create_channel();
             let (outcome, ()) = tokio::join!(
                 client.run_session(
@@ -568,9 +605,9 @@ mod tests {
                     accept_prompt(&mut peer).await;
                     let dispatch = async {
                         if operation == "steer" {
-                            dispatcher.steer("rejected", deadline()).await
+                            dispatcher.steer("rejected", get_test_deadline()).await
                         } else {
-                            dispatcher.stop(deadline()).await
+                            dispatcher.stop(get_test_deadline()).await
                         }
                     };
                     let (result, ()) = tokio::join!(dispatch, async {
@@ -603,9 +640,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lost_malformed_or_missing_ack_is_unknown_and_never_retried() {
+    async fn test_lost_malformed_or_missing_ack_is_unknown_and_never_retried() {
         for failure in ["eof", "timeout", "malformed"] {
-            let (mut client, mut peer) = pair();
+            let (mut client, mut peer) = create_client_pair();
             let (dispatcher, mut receiver) = CommandDispatcher::create_channel();
             let (outcome, ()) = tokio::join!(
                 client.run_session(
@@ -641,7 +678,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blocked_partial_native_write_is_bounded_and_unknown() {
+    async fn test_blocked_partial_native_write_is_bounded_and_unknown() {
         let (driver, mut peer) = duplex(32);
         let (read, write) = tokio::io::split(driver);
         let mut client = PiClient::new(BufReader::new(read), write, Vec::new());
@@ -663,17 +700,101 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_expired_stop_is_rejected_before_dispatch_and_owner_interruption_fails() {
+        for (owner_interrupt, cli_stop) in [(false, true), (true, false), (true, true)] {
+            for deadline_event in [false, true] {
+                let (mut client, mut peer) = create_client_pair();
+                let mut session = Session::new(get_test_deadline());
+                session.prompt_id = Some("pending-prompt".into());
+                session.interrupted = owner_interrupt;
+                let (request, response) = CommandRequest::new(Instant::now());
+                session.stop = Some(PendingStop {
+                    phase: StopPhase::Waiting,
+                    deadline: request.deadline,
+                    request: if cli_stop { Some(request) } else { None },
+                });
+                let result = if deadline_event {
+                    session.handle_deadline()
+                } else {
+                    client.start_stop(&mut session).await
+                };
+                if owner_interrupt {
+                    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+                } else {
+                    result.unwrap();
+                }
+                if cli_stop {
+                    assert!(matches!(
+                        response.await.unwrap(),
+                        Err(CommandError::Rejected {
+                            code: "timeout",
+                            ..
+                        })
+                    ));
+                }
+                assert!(session.stop.is_none());
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(1), peer.0.fill_buf())
+                        .await
+                        .is_err()
+                );
+            }
+        }
+    }
+
     #[test]
-    fn outcome_uses_final_assistant_reason_and_rejects_missing_or_unknown() {
+    fn test_prompt_response_accepts_native_dispositions_and_rejects_invalid_values() {
+        for disposition in ["started", "queued", "handled", "unknown"] {
+            let mut session = Session::new(get_test_deadline());
+            session.prompt_id = Some("prompt".into());
+            let record = json!({
+                "type": "response", "command": "prompt", "success": true,
+                "data": {"disposition": disposition}
+            });
+            let result = session.handle_prompt_response(&record);
+            assert_eq!(result.is_ok(), matches!(disposition, "started" | "queued"));
+            assert_eq!(session.prompt_id.is_none(), result.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_steer_response_accepts_queued_and_handled_but_rejects_unknown_dispositions() {
+        for disposition in ["queued", "handled", "started", "unknown"] {
+            let mut session = Session::new(get_test_deadline());
+            let (request, response) = CommandRequest::new(get_test_deadline());
+            session.steer = Some(PendingSteer {
+                id: "steer".into(),
+                request,
+            });
+            let record = json!({
+                "type": "response", "command": "steer", "success": true,
+                "data": {"disposition": disposition}
+            });
+            let result = session.handle_steer_response(&record);
+            if matches!(disposition, "queued" | "handled") {
+                result.unwrap();
+                assert_eq!(response.await.unwrap(), Ok(()));
+                assert!(session.steer.is_none());
+            } else {
+                assert!(result.is_err());
+                assert!(session.steer.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn test_outcome_uses_final_assistant_reason_and_rejects_missing_or_unknown() {
         let mut session = Session {
             prompt_id: None,
-            prompt_deadline: deadline(),
+            prompt_deadline: get_test_deadline(),
             steer: None,
             stop: None,
             settled: true,
+            interrupted: false,
             latest_stop_reason: None,
         };
-        assert!(session.outcome().is_err());
+        assert!(session.determine_outcome().is_err());
         for (reason, expected) in [
             ("stop", RunOutcome::Completed),
             ("aborted", RunOutcome::Aborted),
@@ -682,9 +803,9 @@ mod tests {
             ("toolUse", RunOutcome::Failed(ExitCode::FAILURE)),
         ] {
             session.latest_stop_reason = Some(reason.into());
-            assert_eq!(session.outcome().unwrap(), expected);
+            assert_eq!(session.determine_outcome().unwrap(), expected);
         }
         session.latest_stop_reason = Some("future".into());
-        assert!(session.outcome().is_err());
+        assert!(session.determine_outcome().is_err());
     }
 }

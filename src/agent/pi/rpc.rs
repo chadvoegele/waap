@@ -91,7 +91,7 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> PiCl
             let newline = available.iter().position(|byte| *byte == b'\n');
             let count = newline.map_or(available.len(), |index| index + 1);
             if self.buffer.len() + count > MAX_RECORD_BYTES {
-                return Err(invalid_protocol(
+                return Err(build_protocol_error(
                     "Pi RPC record exceeds the 64 MiB native record limit",
                 ));
             }
@@ -102,18 +102,18 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> PiCl
             }
         }
         let record = serde_json::from_slice(&self.buffer)
-            .map_err(|error| invalid_protocol(format!("Pi RPC sent malformed JSON: {error}")));
+            .map_err(|error| build_protocol_error(format!("Pi RPC sent malformed JSON: {error}")));
         self.buffer.clear();
         let value: Value = record?;
         if !value.is_object() || value.get("type").and_then(Value::as_str).is_none() {
-            return Err(invalid_protocol(
+            return Err(build_protocol_error(
                 "Pi RPC record must be an object with a type",
             ));
         }
         Ok(Some(value))
     }
 
-    pub(super) async fn session_id(&mut self, deadline: Instant) -> io::Result<String> {
+    pub(super) async fn fetch_session_id(&mut self, deadline: Instant) -> io::Result<String> {
         tokio::time::timeout_at(deadline.into(), async {
             let id = self.send("get_state", json!({}), deadline).await?;
             loop {
@@ -125,7 +125,7 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> PiCl
                         .filter(|id| !id.trim().is_empty())
                         .map(str::to_owned)
                         .ok_or_else(|| {
-                            invalid_protocol("Pi get_state response is missing data.sessionId")
+                            build_protocol_error("Pi get_state response is missing data.sessionId")
                         });
                 }
                 self.handle_event(&record, deadline).await?;
@@ -150,7 +150,7 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> PiCl
             Some("message_update") if record["assistantMessageEvent"]["type"] == "text_delta" => {
                 let text = record["assistantMessageEvent"]["delta"]
                     .as_str()
-                    .ok_or_else(|| invalid_protocol("Pi text_delta event is missing delta"))?;
+                    .ok_or_else(|| build_protocol_error("Pi text_delta event is missing delta"))?;
                 self.output.write_all(text.as_bytes()).await?;
                 self.output.flush().await
             }
@@ -164,7 +164,7 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> PiCl
                 let id = record["id"]
                     .as_str()
                     .filter(|id| !id.is_empty())
-                    .ok_or_else(|| invalid_protocol("Pi extension dialog is missing id"))?;
+                    .ok_or_else(|| build_protocol_error("Pi extension dialog is missing id"))?;
                 self.write(
                     &json!({"type":"extension_ui_response", "id":id, "cancelled":true}),
                     deadline,
@@ -172,20 +172,20 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> PiCl
                 .await
             }
             Some("notify" | "setStatus" | "setWidget" | "setTitle" | "set_editor_text") => Ok(()),
-            method => Err(invalid_protocol(format!(
+            method => Err(build_protocol_error(format!(
                 "Pi extension UI request has unknown method {method:?}"
             ))),
         }
     }
 
-    pub(super) fn close(&mut self) {
+    pub(super) fn close_stdin(&mut self) {
         drop(self.writer.take());
     }
 }
 
 pub(super) fn validate_response(record: &Value, command: &str) -> io::Result<Result<(), String>> {
     if record["type"] != "response" || record["command"] != command {
-        return Err(invalid_protocol(format!(
+        return Err(build_protocol_error(format!(
             "Pi response command mismatch: expected {command}"
         )));
     }
@@ -195,13 +195,13 @@ pub(super) fn validate_response(record: &Value, command: &str) -> io::Result<Res
             .as_str()
             .unwrap_or("unspecified error")
             .into())),
-        None => Err(invalid_protocol(format!(
+        None => Err(build_protocol_error(format!(
             "Pi {command} response is missing success"
         ))),
     }
 }
 
-pub(super) fn invalid_protocol(message: impl Into<String>) -> io::Error {
+pub(super) fn build_protocol_error(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
@@ -212,7 +212,7 @@ mod tests {
     use tokio::io::{duplex, BufReader};
 
     #[tokio::test]
-    async fn framing_preserves_partial_reads_crlf_unicode_and_rejects_bad_records() {
+    async fn test_framing_preserves_partial_reads_crlf_unicode_and_rejects_bad_records() {
         let (input, mut peer) = duplex(1024);
         let mut client = PiClient::new(BufReader::new(input), Vec::new(), Vec::new());
         peer.write_all(b"{\"type\":").await.unwrap();
@@ -244,13 +244,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_validates_records_without_forwarding_text_or_replying_to_ui() {
+    async fn test_shutdown_validates_records_without_forwarding_text_or_replying_to_ui() {
         let input = concat!(
             "{\"type\":\"extension_ui_request\",\"method\":\"confirm\",\"id\":\"shutdown\"}\n",
             "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"delta\":\"shutdown text\"}}\n"
         );
         let mut client = PiClient::new(BufReader::new(input.as_bytes()), Vec::new(), Vec::new());
-        client.close();
+        client.close_stdin();
         client.drain_shutdown().await.unwrap();
         assert!(client.output.is_empty());
 
@@ -261,13 +261,13 @@ mod tests {
         ] {
             let mut client =
                 PiClient::new(BufReader::new(input.as_bytes()), Vec::new(), Vec::new());
-            client.close();
+            client.close_stdin();
             assert_eq!(client.drain_shutdown().await.unwrap_err().kind(), expected);
         }
     }
 
     #[tokio::test]
-    async fn dialogs_are_cancelled_notifications_ignored_and_only_text_is_forwarded() {
+    async fn test_dialogs_are_cancelled_notifications_ignored_and_only_text_is_forwarded() {
         let mut client = PiClient::new(BufReader::new(&b""[..]), Vec::new(), Vec::new());
         let deadline = Instant::now() + Duration::from_secs(1);
         for method in [
@@ -318,7 +318,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_snapshots_exceed_control_frame_size_but_parser_memory_is_bounded() {
+    async fn test_native_snapshots_exceed_control_frame_size_but_parser_memory_is_bounded() {
         let mut bytes =
             serde_json::to_vec(&json!({"type":"snapshot", "data":"x".repeat(70 * 1024)})).unwrap();
         bytes.push(b'\n');
@@ -345,7 +345,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_correlates_authentic_session_and_rejects_missing_session_rejection_eof_and_timeout(
+    async fn test_startup_correlates_authentic_session_and_rejects_missing_session_rejection_eof_and_timeout(
     ) {
         let deadline = Instant::now() + Duration::from_secs(1);
         let input = concat!(
@@ -353,7 +353,10 @@ mod tests {
             "{\"type\":\"response\",\"id\":\"waap-1\",\"command\":\"get_state\",\"success\":true,\"data\":{\"sessionId\":\"real-session\"}}\n"
         );
         let mut client = PiClient::new(BufReader::new(input.as_bytes()), Vec::new(), Vec::new());
-        assert_eq!(client.session_id(deadline).await.unwrap(), "real-session");
+        assert_eq!(
+            client.fetch_session_id(deadline).await.unwrap(),
+            "real-session"
+        );
         let command: Value = serde_json::from_slice(client.writer.as_ref().unwrap()).unwrap();
         assert_eq!(command["type"], "get_state");
         for record in [
@@ -364,18 +367,18 @@ mod tests {
             let bytes = format!("{record}\n");
             let mut client =
                 PiClient::new(BufReader::new(bytes.as_bytes()), Vec::new(), Vec::new());
-            assert!(client.session_id(deadline).await.is_err());
+            assert!(client.fetch_session_id(deadline).await.is_err());
         }
         let mut client = PiClient::new(BufReader::new(&b""[..]), Vec::new(), Vec::new());
         assert_eq!(
-            client.session_id(deadline).await.unwrap_err().kind(),
+            client.fetch_session_id(deadline).await.unwrap_err().kind(),
             io::ErrorKind::UnexpectedEof
         );
         let (input, _peer) = duplex(128);
         let mut client = PiClient::new(BufReader::new(input), Vec::new(), Vec::new());
         assert_eq!(
             client
-                .session_id(Instant::now() + Duration::from_millis(10))
+                .fetch_session_id(Instant::now() + Duration::from_millis(10))
                 .await
                 .unwrap_err()
                 .kind(),
@@ -384,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_distinguish_rejection_from_invalid_acknowledgement() {
+    fn test_responses_distinguish_rejection_from_invalid_acknowledgement() {
         assert!(validate_response(
             &json!({"type":"response","command":"steer","success":false,"error":"denied"}),
             "steer"

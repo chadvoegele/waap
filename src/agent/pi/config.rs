@@ -6,15 +6,7 @@ use std::io;
 use std::path::Path;
 use tokio::process::Command;
 
-const SCRUBBED_PI_ENV: [&str; 5] = [
-    "PI_SESSION_ID",
-    "PI_SESSION_FILE",
-    "PI_PROVIDER",
-    "PI_MODEL",
-    "PI_REASONING_LEVEL",
-];
-
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub(super) struct PiRunConfig {
     executable: OsString,
     model: Option<String>,
@@ -32,19 +24,19 @@ impl Default for PiRunConfig {
 }
 
 impl PiRunConfig {
-    pub(super) fn from_env(options: &AgentRunOptions) -> io::Result<Self> {
+    pub(super) fn load_from_env(options: &AgentRunOptions) -> io::Result<Self> {
         let executable = env::var_os("WAAP_PI_BIN").unwrap_or_else(|| OsString::from("pi"));
         if executable.is_empty() {
-            return Err(invalid_input("WAAP_PI_BIN must not be empty"));
+            return Err(build_invalid_input_error("WAAP_PI_BIN must not be empty"));
         }
 
         let model = match &options.model {
             Some(model) => Some(model.clone()),
-            None => optional_non_empty_env("WAAP_PI_MODEL")?,
+            None => read_optional_non_empty_env("WAAP_PI_MODEL")?,
         };
         let reasoning_effort = match options.reasoning_effort {
             Some(effort) => Some(validate_pi_effort(effort, "--reasoning-effort")?),
-            None => optional_pi_effort_env()?,
+            None => read_optional_pi_effort_env()?,
         };
 
         Ok(Self {
@@ -55,27 +47,27 @@ impl PiRunConfig {
     }
 }
 
-fn optional_non_empty_env(name: &str) -> io::Result<Option<String>> {
+fn read_optional_non_empty_env(name: &str) -> io::Result<Option<String>> {
     match env::var(name) {
-        Ok(value) if value.trim().is_empty() => {
-            Err(invalid_input(format!("{name} must not be empty")))
-        }
+        Ok(value) if value.trim().is_empty() => Err(build_invalid_input_error(format!(
+            "{name} must not be empty"
+        ))),
         Ok(value) => Ok(Some(value)),
         Err(env::VarError::NotPresent) => Ok(None),
-        Err(env::VarError::NotUnicode(_)) => {
-            Err(invalid_input(format!("{name} must be valid UTF-8")))
-        }
+        Err(env::VarError::NotUnicode(_)) => Err(build_invalid_input_error(format!(
+            "{name} must be valid UTF-8"
+        ))),
     }
 }
 
-fn optional_pi_effort_env() -> io::Result<Option<ReasoningEffort>> {
-    let Some(value) = optional_non_empty_env("WAAP_PI_REASONING_EFFORT")? else {
+fn read_optional_pi_effort_env() -> io::Result<Option<ReasoningEffort>> {
+    let Some(value) = read_optional_non_empty_env("WAAP_PI_REASONING_EFFORT")? else {
         return Ok(None);
     };
     let effort = ReasoningEffort::parse(&value).ok_or_else(|| {
-        invalid_input(format!(
+        build_invalid_input_error(format!(
             "invalid WAAP_PI_REASONING_EFFORT {value:?}; accepted values: {}",
-            pi_effort_labels().join(", ")
+            get_pi_effort_labels().join(", ")
         ))
     })?;
     validate_pi_effort(effort, "WAAP_PI_REASONING_EFFORT").map(Some)
@@ -83,16 +75,16 @@ fn optional_pi_effort_env() -> io::Result<Option<ReasoningEffort>> {
 
 fn validate_pi_effort(effort: ReasoningEffort, source: &str) -> io::Result<ReasoningEffort> {
     if matches!(effort, ReasoningEffort::None | ReasoningEffort::Ultra) {
-        return Err(invalid_input(format!(
+        return Err(build_invalid_input_error(format!(
             "{source} does not support {} for Pi; accepted values: {}",
             effort.as_str(),
-            pi_effort_labels().join(", ")
+            get_pi_effort_labels().join(", ")
         )));
     }
     Ok(effort)
 }
 
-fn pi_effort_labels() -> Vec<&'static str> {
+fn get_pi_effort_labels() -> Vec<&'static str> {
     ReasoningEffort::value_variants()
         .iter()
         .copied()
@@ -101,11 +93,15 @@ fn pi_effort_labels() -> Vec<&'static str> {
         .collect()
 }
 
-fn invalid_input(message: impl Into<String>) -> io::Error {
+fn build_invalid_input_error(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }
 
-pub(super) fn pi_command(config: &PiRunConfig, agent_id: &str, worktree_dir: &Path) -> Command {
+pub(super) fn build_pi_command(
+    config: &PiRunConfig,
+    agent_id: &str,
+    worktree_dir: &Path,
+) -> Command {
     let mut command = Command::new(&config.executable);
     command
         .arg("--mode")
@@ -120,7 +116,13 @@ pub(super) fn pi_command(config: &PiRunConfig, agent_id: &str, worktree_dir: &Pa
     if let Some(effort) = config.reasoning_effort {
         command.arg("--thinking").arg(effort.as_str());
     }
-    for name in SCRUBBED_PI_ENV {
+    for name in [
+        "PI_SESSION_ID",
+        "PI_SESSION_FILE",
+        "PI_PROVIDER",
+        "PI_MODEL",
+        "PI_REASONING_LEVEL",
+    ] {
         command.env_remove(name);
     }
     command
@@ -131,7 +133,7 @@ mod tests {
     use super::*;
     use crate::agent::PI_ENV_LOCK;
     #[test]
-    fn config_uses_cli_precedence_and_passes_native_efforts() {
+    fn test_config_uses_cli_precedence_and_passes_native_efforts() {
         let _lock = PI_ENV_LOCK.lock().unwrap();
         let previous = [
             env::var_os("WAAP_PI_BIN"),
@@ -142,8 +144,8 @@ mod tests {
         env::set_var("WAAP_PI_MODEL", "env-model");
         env::set_var("WAAP_PI_REASONING_EFFORT", "low");
 
-        let fallback = PiRunConfig::from_env(&AgentRunOptions::default()).unwrap();
-        let overridden = PiRunConfig::from_env(&AgentRunOptions {
+        let fallback = PiRunConfig::load_from_env(&AgentRunOptions::default()).unwrap();
+        let overridden = PiRunConfig::load_from_env(&AgentRunOptions {
             model: Some("cli-model".to_string()),
             reasoning_effort: Some(ReasoningEffort::Off),
         })
@@ -159,14 +161,14 @@ mod tests {
             .filter(|effort| !matches!(effort, ReasoningEffort::None | ReasoningEffort::Ultra))
         {
             env::set_var("WAAP_PI_REASONING_EFFORT", effort.as_str());
-            let config = PiRunConfig::from_env(&AgentRunOptions::default()).unwrap();
+            let config = PiRunConfig::load_from_env(&AgentRunOptions::default()).unwrap();
             assert_eq!(config.reasoning_effort, Some(effort));
-            let command = pi_command(&config, "aa-12345678", Path::new("/repo"));
+            let command = build_pi_command(&config, "aa-12345678", Path::new("/repo"));
             let args = command.as_std().get_args().collect::<Vec<_>>();
             assert_eq!(args[args.len() - 2], "--thinking");
             assert_eq!(args[args.len() - 1], effort.as_str());
         }
-        assert!(PiRunConfig::from_env(&AgentRunOptions {
+        assert!(PiRunConfig::load_from_env(&AgentRunOptions {
             model: None,
             reasoning_effort: Some(ReasoningEffort::Ultra),
         })
@@ -187,23 +189,23 @@ mod tests {
     }
 
     #[test]
-    fn config_rejects_invalid_environment_values_unless_cli_overrides_them() {
+    fn test_config_rejects_invalid_environment_values_unless_cli_overrides_them() {
         let _lock = PI_ENV_LOCK.lock().unwrap();
         let previous_model = env::var_os("WAAP_PI_MODEL");
         let previous_effort = env::var_os("WAAP_PI_REASONING_EFFORT");
         env::set_var("WAAP_PI_MODEL", "  ");
-        assert!(PiRunConfig::from_env(&AgentRunOptions::default()).is_err());
+        assert!(PiRunConfig::load_from_env(&AgentRunOptions::default()).is_err());
         env::set_var("WAAP_PI_MODEL", "valid");
         env::set_var("WAAP_PI_REASONING_EFFORT", "none");
-        assert!(PiRunConfig::from_env(&AgentRunOptions::default()).is_err());
-        assert!(PiRunConfig::from_env(&AgentRunOptions {
+        assert!(PiRunConfig::load_from_env(&AgentRunOptions::default()).is_err());
+        assert!(PiRunConfig::load_from_env(&AgentRunOptions {
             model: None,
             reasoning_effort: Some(ReasoningEffort::None),
         })
         .unwrap_err()
         .to_string()
         .contains("does not support none"));
-        assert!(PiRunConfig::from_env(&AgentRunOptions {
+        assert!(PiRunConfig::load_from_env(&AgentRunOptions {
             model: Some("cli".to_string()),
             reasoning_effort: Some(ReasoningEffort::High),
         })
@@ -219,14 +221,14 @@ mod tests {
     }
 
     #[test]
-    fn command_has_rpc_approval_session_name_options_cwd_and_scrubbed_metadata() {
+    fn test_command_has_rpc_approval_session_name_options_cwd_and_scrubbed_metadata() {
         let config = PiRunConfig {
             model: Some("openai/gpt".to_string()),
             reasoning_effort: Some(ReasoningEffort::Max),
             ..PiRunConfig::default()
         };
         let dir = Path::new("/repo/with space");
-        let command = pi_command(&config, "aa-12345678", dir);
+        let command = build_pi_command(&config, "aa-12345678", dir);
 
         assert_eq!(command.as_std().get_program(), "pi");
         assert_eq!(
@@ -249,7 +251,13 @@ mod tests {
             .get_envs()
             .filter_map(|(name, value)| value.is_none().then_some(name.to_string_lossy()))
             .collect::<Vec<_>>();
-        for name in SCRUBBED_PI_ENV {
+        for name in [
+            "PI_SESSION_ID",
+            "PI_SESSION_FILE",
+            "PI_PROVIDER",
+            "PI_MODEL",
+            "PI_REASONING_LEVEL",
+        ] {
             assert!(removed.iter().any(|removed| removed == name));
         }
     }
