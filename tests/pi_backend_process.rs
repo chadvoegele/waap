@@ -536,6 +536,46 @@ while IFS= read -r ignored; do :; done
 }
 
 #[test]
+fn test_unexpected_rpc_eof_reports_child_status_before_cleanup() {
+    for (action, diagnostic) in [
+        ("exit 7", "Pi process exited with exit status: 7"),
+        ("kill -TERM $$", "Pi process exited with signal: 15"),
+        ("exec 1>&-; exec sleep 30", "Pi process was still running"),
+    ] {
+        let project = Project::new();
+        let agent_id = project.create_agent("unexpected-eof");
+        let fake = project.root.join("early-exit-pi");
+        let pid = project.root.join("early-exit-pi.pid");
+        let script = r#"
+IFS= read -r state
+printf '%s\n' '{"type":"response","id":"waap-1","command":"get_state","success":true,"data":{"sessionId":"early-exit-session"}}'
+IFS= read -r prompt
+printf '%s\n' '{"type":"response","id":"waap-2","command":"prompt","success":true,"data":{"disposition":"started"}}'
+"#.to_owned() + action;
+        write_pi_script(&fake, &script);
+        let output = wait_output(
+            project
+                .build_command()
+                .args(["agent", "run", "--agent-id", &agent_id])
+                .env("WAAP_PI_BIN", get_fake_pi_runner_path())
+                .env("WAAP_FAKE_PI_SCRIPT", fake)
+                .env("WAAP_FAKE_PID", &pid)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("Pi RPC closed"), "{stderr}");
+        assert!(stderr.contains(diagnostic), "{stderr}");
+        assert_record(&project, &agent_id, "failed", "pi", "early-exit-session");
+        assert_reaped(&pid);
+        assert!(!project.get_worktree_path(&agent_id).exists());
+    }
+}
+
+#[test]
 fn test_post_eof_protocol_output_larger_than_pipe_capacity_preserves_owner_outcome() {
     for (reason, status) in [("stop", "completed"), ("error", "failed")] {
         let project = Project::new();
