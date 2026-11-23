@@ -214,6 +214,49 @@ fn validation_rejects_unknown_agents_nonrunning_statuses_and_blank_prompts_befor
 }
 
 #[test]
+fn run_logs_unhealthy_local_agent_exit_by_default() {
+    for (script, expected) in [
+        ("exit 7", "exit status: 7"),
+        ("kill -TERM $$", "signal: 15"),
+    ] {
+        let fixture = Fixture::new();
+        fixture.record("ready", None);
+        let bin = tempfile::tempdir().unwrap();
+        let claude = bin.path().join("claude");
+        fs::write(&claude, format!("#!/bin/sh\n{script}\n")).unwrap();
+        fs::set_permissions(&claude, fs::Permissions::from_mode(0o700)).unwrap();
+        let path = std::env::join_paths(
+            [bin.path().to_path_buf()]
+                .into_iter()
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        let output = fixture
+            .command()
+            .env("PATH", path)
+            .env_remove("WAAP_LOG_LEVEL")
+            .args([
+                "agent",
+                "run",
+                "--agent-id",
+                "aa-test",
+                "--system",
+                "claude",
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let line = stderr
+            .lines()
+            .find(|line| line.contains("agent process \"claude\""))
+            .unwrap_or_else(|| panic!("missing child exit log: {stderr}"));
+        assert!(line.contains(expected), "{line}");
+        assert!(!line.contains("cleanup"), "{line}");
+    }
+}
+
+#[test]
 fn run_preserves_status_validation_and_ready_failure_with_missing_runtime() {
     let fixture = Fixture::new();
     for (agent_id, message) in [

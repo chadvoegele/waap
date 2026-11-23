@@ -22,22 +22,6 @@ mod rpc;
 mod session;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
-const RPC_EOF_EXIT_GRACE: Duration = Duration::from_millis(100);
-
-async fn diagnose_rpc_error(process: &mut AgentProcess, error: io::Error) -> io::Error {
-    if error.kind() != io::ErrorKind::UnexpectedEof {
-        return error;
-    }
-
-    // EOF can arrive just before the OS reports the exit. Observe it before
-    // cleanup so a signal sent by WAAP is not mistaken for the original cause.
-    let detail = match tokio::time::timeout(RPC_EOF_EXIT_GRACE, process.wait()).await {
-        Ok(Ok(status)) => format!("Pi process exited with {status} before cleanup"),
-        Ok(Err(wait_error)) => format!("could not obtain Pi process status: {wait_error}"),
-        Err(_) => "Pi process was still running before cleanup".into(),
-    };
-    io::Error::new(error.kind(), format!("{error}; {detail}"))
-}
 
 #[derive(Default)]
 pub(super) struct PiBackend {
@@ -96,8 +80,7 @@ impl PiBackend {
         let (client, session_id) = match started {
             Ok(started) => started,
             Err(error) => {
-                let error = diagnose_rpc_error(&mut process, error).await;
-                return super::worktree::collapse_errors(Err(error), process.terminate().await);
+                return super::worktree::collapse_errors(Err(error), process.terminate().await)
             }
         };
         Ok(AgentSessionRun::new(
@@ -136,11 +119,7 @@ impl PiRunner {
                 },
                 COMMAND_TIMEOUT,
             )
-            .await;
-        let outcome = match outcome {
-            Ok(outcome) => outcome,
-            Err(error) => return Err(diagnose_rpc_error(&mut self.process, error).await),
-        };
+            .await?;
         self.client.close_stdin();
         let status = tokio::time::timeout(COMMAND_TIMEOUT, async {
             tokio::select! {

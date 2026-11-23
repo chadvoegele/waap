@@ -1,9 +1,13 @@
+use std::ffi::OsString;
 use std::io;
+use std::path::Path;
 use std::process::ExitStatus;
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 pub(super) struct AgentProcess {
     child: Child,
+    program: OsString,
+    pid: Option<u32>,
     reaped: bool,
 }
 
@@ -18,8 +22,11 @@ impl AgentProcess {
                 ),
             )
         })?;
+        let program = command.as_std().get_program();
         Ok(Self {
+            pid: child.id(),
             child,
+            program: Path::new(program).file_name().unwrap_or(program).into(),
             reaped: false,
         })
     }
@@ -37,17 +44,45 @@ impl AgentProcess {
     }
     pub(super) async fn wait(&mut self) -> io::Result<ExitStatus> {
         let status = self.child.wait().await?;
-        self.reaped = true;
+        self.record_exit(status, false);
         Ok(status)
     }
+
     pub(super) async fn terminate(&mut self) -> io::Result<()> {
         if self.reaped {
             return Ok(());
         }
-        if self.child.try_wait()?.is_none() {
+        if let Some(status) = self.child.try_wait()? {
+            self.record_exit(status, false);
+        } else {
             self.child.start_kill()?;
+            let status = self.child.wait().await?;
+            self.record_exit(status, true);
         }
-        self.wait().await.map(|_| ())
+        Ok(())
+    }
+
+    fn record_exit(&mut self, status: ExitStatus, cleanup_requested: bool) {
+        if self.reaped {
+            return;
+        }
+        self.reaped = true;
+        let level = if status.success() || cleanup_requested {
+            log::Level::Debug
+        } else {
+            log::Level::Error
+        };
+        let context = if cleanup_requested {
+            " (WAAP requested termination during cleanup)"
+        } else {
+            ""
+        };
+        log::log!(
+            level,
+            "agent process {:?} (pid {:?}) exited with {status}{context}",
+            self.program,
+            self.pid,
+        );
     }
 }
 
