@@ -1,5 +1,7 @@
 # Agent system backend
 
+This design describes the original backend refactor. The [shared state directory specification](waap-state-worktree.md) supersedes its state-commit and commit-report behavior.
+
 Design for consolidating Opencode, Claude, and Codex behavior behind one
 system abstraction while retaining the existing run and stop lifecycle.
 

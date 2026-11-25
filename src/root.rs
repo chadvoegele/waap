@@ -75,7 +75,7 @@ pub(crate) fn find_git_root(start: &Path) -> io::Result<PathBuf> {
     }
 }
 
-/// Find the dedicated waap state worktree for the repository containing `start`.
+/// Find the waap state directory for the repository containing `start`.
 pub(crate) fn find_waap_root(
     start: &Path,
     explicit_waap_root: Option<&Path>,

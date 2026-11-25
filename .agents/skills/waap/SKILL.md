@@ -7,16 +7,9 @@ description: waap is a structured agent automation platform for specifying workf
 
 ## Central State
 
-waap stores each repository's state in a dedicated `waap` branch worktree under `~/.local/state/waap/data/`. This directory is referred to below as `${waap_data}`. Use the `waap` CLI for state changes and run `waap check` to report and validate the resolved directory.
+From an application checkout, run `waap init` to create the state directory. By default it is under `~/.local/state/waap/data/`, keyed by the canonical primary checkout path. Use `--waap-root <path>` to select a different directory, including a user-managed Git checkout. This directory is referred to below as `${waap_data}`. Run `waap check` to report and validate it.
 
-If `origin/waap` may already exist, fetch it before initialization:
-
-```sh
-git fetch origin waap
-waap init
-```
-
-Use `scripts/migrate-legacy-waap.py` for repositories with legacy `.waap` state. After moving a repository, run `waap repair` to relocate its registered state worktree.
+If the application repository moves, stop agents and other waap commands before relocating the plain state directory. Run `waap check` from the new checkout to find the destination, create its parent directories, move the old state directory there, then recheck. Alternatively, keep the old path and pass it with `--waap-root`.
 
 ## Basic Workflow
 
@@ -50,13 +43,11 @@ waap agent stop
 
 ## State Model
 
-waap tracks `${waap_data}` on the dedicated `waap` branch.
-
-All state is stored as plain text, but should be validated with `waap check` to ensure `waap` commands will work.
+waap stores plain-text records and coordinates its commands with a lock in `.waap-runtime/`, which Git ignores. Use the waap CLI for state changes. If you choose to track state in Git, manage its index and history yourself; waap does not stage or commit changes.
 
 ### Running Outside the Sandbox
 
-WAAP commands that mutate state (`ticket new/update`, `agent new/run/update`) must run outside the agent sandbox. WAAP writes files before committing them, so a sandbox-blocked Git lock can leave untracked state behind. Disable the sandbox on the first attempt rather than letting the command fail and retrying.
+WAAP commands need write access to the state directory for the state lock. Mutation commands also need to write records. If the agent sandbox does not permit this, run the commands outside it.
 
 - **Codex:** set `sandbox_permissions: "require_escalated"` on the command call and provide a concise `justification`.
 - **Claude Code:** set `dangerouslyDisableSandbox: true` on the `Bash` tool call.

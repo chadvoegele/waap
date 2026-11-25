@@ -88,7 +88,7 @@
   <rect x="825" y="510" width="325" height="155" rx="8" class="state"/>
   <text x="840" y="540" class="label">Preserved behavior</text>
   <text x="840" y="568">Same session, turn, and worktree</text>
-  <text x="840" y="593">No metadata writes or state commits</text>
+  <text x="840" y="593">No metadata writes</text>
   <text x="840" y="618">Run output + stop + completion continue</text>
   <text x="840" y="643">Acceptance ≠ execution or completion</text>
 

@@ -4,7 +4,6 @@ use std::io::{self, Read};
 use std::path::Path;
 
 use crate::cli::OutputFormat;
-use crate::git::{commit_paths, Committed};
 use crate::record::WaapRecordKind;
 use crate::ticket::{
     available_ticket_id, is_ticket_id, load_tickets_metadata, print_ticket_report_human,
@@ -12,21 +11,10 @@ use crate::ticket::{
 };
 use crate::toml::current_toml_datetime;
 
-pub(crate) fn print_ticket_report(
-    output_format: &OutputFormat,
-    committed: &Committed<TicketReport>,
-) {
-    let report = &committed.value;
+pub(crate) fn print_ticket_report(output_format: &OutputFormat, report: &TicketReport) {
     match output_format {
-        OutputFormat::Json => {
-            let mut value = ticket_report_json(report);
-            value["commit"] = serde_json::json!(committed.commit);
-            println!("{value}");
-        }
-        OutputFormat::HumanReadable => {
-            print_ticket_report_human("Created ticket", report);
-            println!("Commit: {}", committed.commit);
-        }
+        OutputFormat::Json => println!("{}", ticket_report_json(report)),
+        OutputFormat::HumanReadable => print_ticket_report_human("Created ticket", report),
     }
 }
 
@@ -34,30 +22,14 @@ pub(crate) fn create_ticket(
     waap_root: &Path,
     name: Option<&str>,
     depends_on: &[String],
-) -> io::Result<Committed<TicketReport>> {
+) -> io::Result<TicketReport> {
     let mut markdown = String::new();
     io::stdin()
         .read_to_string(&mut markdown)
         .map_err(|error| io::Error::new(error.kind(), format!("failed to read stdin: {error}")))?;
 
     let _lock = crate::state::StateLock::acquire(waap_root)?;
-    let report = create_ticket_with_markdown(waap_root, name, depends_on, &markdown)?;
-    let commit = commit_paths(
-        waap_root,
-        &[report.path.as_path()],
-        &format!("waap ticket new {}", report.ticket_id),
-    )
-    .map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("failed to commit waap state change: {error}"),
-        )
-    })?;
-
-    Ok(Committed {
-        value: report,
-        commit,
-    })
+    create_ticket_with_markdown(waap_root, name, depends_on, &markdown)
 }
 
 fn create_ticket_with_markdown(

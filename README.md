@@ -10,7 +10,7 @@
 
 I found that an effective pattern for running autonomous agents was making a `TODO.md` and pointing the agent to it with a `/goal`. `waap` formalizes this approach, promoting tickets and agents to first class. It persists context into files to get you out of the "my chat history is my context" approach, parallelizes agent execution, and rapidly gets you to [level 8](https://www.augmentcode.com/guides/steve-yegge-8-levels-ai-assisted-development).
 
-For each repository, waap stores state in a dedicated `waap` branch worktree under `~/.local/state/waap/data/`. The resolved worktree is referred to below as `${waap_data}` and is reported by `waap check`.
+For each repository, waap stores state in a directory under `~/.local/state/waap/data/` followed by the absolute path of the primary checkout, without its leading slash. `waap check` reports the resolved directory, referred to below as `${waap_data}`. Use `--waap-root <path>` to select a different directory.
 
 ## Design
 
@@ -19,7 +19,7 @@ For each repository, waap stores state in a dedicated `waap` branch worktree und
 1. `waap` tickets describe implementation work and live at `${waap_data}/tickets/<ticket-id>/ticket.md`.
 2. `waap` agents contain agent instructions, e.g. `AGENTS.md`, and live at `${waap_data}/agents/<agent-id>/agent.md`.
 
-The records use TOML frontmatter for structured `waap` metadata and the markdown body for unstructured content. The schema is intentionally plain text for agent-friendliness, and can be validated anytime with `waap check` using the `waap` CLI. The records are persisted in `git` so that agents can refer to past context.
+The records use TOML frontmatter for structured metadata and a Markdown body for free-form content. Validate the records with `waap check`. You can leave state unversioned or manage its Git history yourself. waap never stages or commits state changes. The local `.waap-runtime/` directory holds the state lock and is ignored by Git.
 
 Frequently but not always, agents are assigned to work on tickets.
 
@@ -33,7 +33,9 @@ In a `git` repo, initialize a new `waap` project:
 waap init
 ```
 
-For a repository that still has `.waap`, run `scripts/migrate-legacy-waap.py` from its primary checkout instead. If the repository is moved later, run `waap repair` to relocate and repair its state worktree.
+`waap init` creates missing `agents/` and `tickets/` directories without changing existing records. It also accepts a Git checkout you manage as the state root.
+
+If you move the application repository and use the default state path, stop active agents and other waap commands first. Run `waap check` from the new checkout to find the new path, create its parent directories, then move the old plain state directory there. Verify the move with `waap check`. To keep using the old location instead, pass `--waap-root <old-state-directory>`.
 
 Then create a ticket that describes the work to be done:
 

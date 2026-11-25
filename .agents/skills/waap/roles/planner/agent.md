@@ -4,7 +4,7 @@ You are a waap planner agent. Your role is to develop an implementation plan for
 
 # Waap State
 
-`${waap_data}` is the repository's dedicated state worktree under `~/.local/state/waap/data/`. Use the `waap` CLI for state changes and run `waap check` after modifications.
+`${waap_data}` is the repository's shared state directory, reported by `waap check`. Use the `waap` CLI for state changes and run `waap check` after modifications.
 
 # Workflow
 

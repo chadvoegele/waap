@@ -4,27 +4,15 @@ use std::io;
 use std::path::Path;
 
 use crate::cli::OutputFormat;
-use crate::git::{commit_paths, Committed};
 use crate::ticket::{
     is_ticket_id, load_tickets_metadata, print_ticket_report_human, read_ticket_record,
     ticket_path, ticket_report_json, write_ticket_record, TicketReport, TicketStatus,
 };
 
-pub(crate) fn print_updated_ticket_report(
-    output_format: &OutputFormat,
-    committed: &Committed<TicketReport>,
-) {
-    let report = &committed.value;
+pub(crate) fn print_updated_ticket_report(output_format: &OutputFormat, report: &TicketReport) {
     match output_format {
-        OutputFormat::Json => {
-            let mut value = ticket_report_json(report);
-            value["commit"] = serde_json::json!(committed.commit);
-            println!("{value}");
-        }
-        OutputFormat::HumanReadable => {
-            print_ticket_report_human("Updated ticket", report);
-            println!("Commit: {}", committed.commit);
-        }
+        OutputFormat::Json => println!("{}", ticket_report_json(report)),
+        OutputFormat::HumanReadable => print_ticket_report_human("Updated ticket", report),
     }
 }
 
@@ -34,31 +22,15 @@ pub(crate) fn update_ticket(
     set_status: Option<&TicketStatus>,
     add_depends_on: &[String],
     remove_depends_on: &[String],
-) -> io::Result<Committed<TicketReport>> {
+) -> io::Result<TicketReport> {
     let _lock = crate::state::StateLock::acquire(waap_root)?;
-    let report = update_ticket_record(
+    update_ticket_record(
         waap_root,
         ticket_id,
         set_status,
         add_depends_on,
         remove_depends_on,
-    )?;
-    let commit = commit_paths(
-        waap_root,
-        &[report.path.as_path()],
-        &format!("waap ticket update {}", report.ticket_id),
     )
-    .map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("failed to commit waap state change: {error}"),
-        )
-    })?;
-
-    Ok(Committed {
-        value: report,
-        commit,
-    })
 }
 
 fn update_ticket_record(

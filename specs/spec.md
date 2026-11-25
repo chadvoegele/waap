@@ -22,17 +22,17 @@ For a software development project, consider
 
 ## Conventions
 
-All paths in the specification are relative to the application's repository root.
+Application paths are relative to the application's repository root. State paths are relative to `${waap_data}`.
 
 ## Datastore
 
-waap maintains its own datastore within the application's repository at `/.waap/`.
+`${waap_data}` is the [shared state directory](waap-state-worktree.md). It can be unversioned or tracked in a user-managed Git checkout.
 
 ## Agents
 
-Agents do the work in waap. Agents use the repository source code and specifications primarily as context, and use `.waap/` to track their own state and log partial progress.
+Agents do the work in waap. Agents use the repository source code and specifications primarily as context, and use `${waap_data}` to track their own state and log partial progress.
 
-Agent state is tracked in the `/.waap/agents/` directory. An agent can have an optional human-readable name. Its id is `aa-` plus the name slug, or an 8-character random hex value when unnamed.
+Agent state is tracked in the `${waap_data}/agents/` directory. An agent can have an optional human-readable name. Its id is `aa-` plus the name slug, or an 8-character random hex value when unnamed.
 
 Agent metadata is stored in TOML frontmatter.
 
@@ -51,18 +51,18 @@ Implement code for `tt-list-tickets`
 ```
 
 Example:
-`/.waap/agents/aa-list-tickets-developer/agent.md`
+`${waap_data}/agents/aa-list-tickets-developer/agent.md`
 
 Agents should also keep a work log, recording any work done. 
 
 Example:
-`/.waap/agents/aa-list-tickets-developer/work_log.md`
+`${waap_data}/agents/aa-list-tickets-developer/work_log.md`
 
 ## Tickets
 
 Tickets track agent work, capture partial progress, and anchor the developer lifecycle. They serve as a bridge between the specifications and the implementation, resolving ambiguity in the specifications while not fully code.
 
-Tickets are stored in the `/.waap/tickets/` directory, typically as Markdown files.
+Tickets are stored in the `${waap_data}/tickets/` directory, typically as Markdown files.
 
 Ticket metadata is stored in TOML frontmatter.
 
@@ -78,7 +78,7 @@ status = "pending"  # pending, in-progress, completed, abandoned
 Line 10-15 of /specs/spec.md
 
 # Description
-List tickets in `.waap/tickets/` directory. Return in JSON format.
+List tickets in `${waap_data}/tickets/`. Return in JSON format.
 Additionally allow a flag to filter by status.
 ```
 
@@ -98,7 +98,7 @@ Slug Requirements:
 If a named ticket or agent id conflicts, append a 4-character random hex suffix.
 
 Example:
-`/.waap/tickets/tt-list-tickets/ticket.md`
+`${waap_data}/tickets/tt-list-tickets/ticket.md`
 
 Agents should update the `ticket.md` file with any key decisions, important commands, code fragments so that another agent can resume the work if necessary.
 
@@ -108,29 +108,23 @@ The `waap` CLI is the primary interface for interacting with waap state, though 
 
 - Global Parameters
     - `--output-format`  # Choices: json, human-readable
-    - `--waap-root`  # Existing project directory inside a git repository
+    - `--waap-root`  # Override the resolved state directory
 
-The default format is human-readable.
+The default format is human-readable. Mutation commands write records atomically and do not report a Git commit hash. Use `waap check` to validate manual edits.
 
-Mutation commands must not leave `/.waap/` invalid when they return success. Manual edits can
-still invalidate state; `waap check` remains the validator for finding and repairing such changes.
-
-Without `--waap-root`, commands use the nearest ancestor containing `.waap/`, bounded by the
-current git root. If none exists, commands use the git root so `waap init` can initialize it and
-other commands can report missing state.
+### waap init
+Creates missing `agents/` and `tickets/` directories and reports the resolved state path.
 
 ### waap check
-Validates `/.waap` state.
+Validates `${waap_data}` and reports its path. For missing state, it tells the user to run `waap init`.
 
-Missing `/.waap` state is invalid and reports that `waap init` is required.
-
-1. `/.waap` has the correct directory structure.
-1. For `/.waap/agents/`,
+1. `${waap_data}` has the correct directory structure.
+1. For `${waap_data}/agents/`,
     1. Every sub directory is an agent id.
     1. Each agent directory has a `agent.md` file.
     1. If there is a work log, it is named `work_log.md`.
     1. Other files are allowed in the agent directory.
-1. For `/.waap/tickets/`,
+1. For `${waap_data}/tickets/`,
     1. Every sub directory is a ticket id.
     1. Each ticket directory has a `ticket.md` file.
 1. Agent frontmatter is valid.
@@ -143,7 +137,6 @@ Frontmatter is validated strictly: unknown fields outside the documented agent a
     - Creates a new ticket
     - Prepends TOML frontmatter in ticket.md
     - Appends ticket.md contents from stdin
-    - Commits the ticket.md to git
     - Parameters
         - Optional
             - `--name`
@@ -154,7 +147,6 @@ Frontmatter is validated strictly: unknown fields outside the documented agent a
 - update
     - Updates an existing ticket
     - The ticket name and id cannot be changed.
-    - Commits the ticket.md changes to git
     - Parameters
         - Required
             - `--ticket-id`
@@ -181,10 +173,9 @@ Frontmatter is validated strictly: unknown fields outside the documented agent a
 
 ### waap agent
 - new
-    - Creates a new agent entry in `/.waap/agents/`
+    - Creates a new agent entry in `${waap_data}/agents/`
     - Prepends TOML frontmatter in agent.md
     - Appends agent.md contents from stdin
-    - Commits the agent.md to git
     - Parameters
         - Optional
             - `--name`
@@ -192,9 +183,7 @@ Frontmatter is validated strictly: unknown fields outside the documented agent a
         - stdin: write to agent markdown
         - stdout: reports created agent path, metadata, and file size
 - run
-    - Starts the agent harness
-    - Updates agent entry to running
-    - Commits the agent.md changes to git
+    - Persists the agent's `running` status before starting the harness
     - Parameters
         - Required
             - `--agent-id`
@@ -205,14 +194,12 @@ Frontmatter is validated strictly: unknown fields outside the documented agent a
 - stop
     - Stops running agents
     - Marks their statuses as 'aborted'
-    - Commits the agent.md changes to git
     - Parameters
         - Optional
             - `--agent-id`  # if not provided, all agents are stopped
 - update
     - Updates an existing agent
     - The agent name and id cannot be changed.
-    - Commits the agent.md changes to git
     - Parameters
         - Required
             - `--agent-id`
@@ -243,7 +230,7 @@ Agents can be run with different agent systems, selected with `waap agent run --
 
 ### Worktree Lifecycle
 
-`waap agent run` owns the agent worktree lifecycle. It first commits the agent's `running` status and chosen system to `main`, then creates an isolated git worktree at `worktrees/$agent_id` (a fresh branch named after the agent). Worktree and integration policy belong to the editable detailed agent instructions. Finally, the worktree is removed.
+`waap agent run` owns the agent worktree lifecycle. It first persists the agent's `running` status and chosen system in shared state, then creates an isolated Git worktree at `worktrees/$agent_id` from the application checkout's HEAD, on a fresh branch named after the agent. Worktree and integration policy belong to the editable detailed agent instructions. Finally, the worktree is removed.
 
 ### opencode (default)
 
@@ -259,7 +246,7 @@ claude -p \
   --output-format json \
   --permission-mode bypassPermissions \
   --model "$CLAUDE_MODEL" \
-  "Complete when instructions in ${repository_root}/.waap/agents/${agent_id}/agent.md are satisfied"
+  "Complete when instructions in ${waap_data}/agents/${agent_id}/agent.md are satisfied"
 ```
 
 ### codex

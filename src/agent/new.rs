@@ -7,55 +7,24 @@ use crate::agent::{
     write_agent_record, AgentMetadata, AgentReport,
 };
 use crate::cli::OutputFormat;
-use crate::git::{commit_paths, Committed};
 use crate::record::WaapRecordKind;
 use crate::toml::current_toml_datetime;
 
-pub(crate) fn print_created_agent_report(
-    output_format: &OutputFormat,
-    committed: &Committed<AgentReport>,
-) {
-    let report = &committed.value;
+pub(crate) fn print_created_agent_report(output_format: &OutputFormat, report: &AgentReport) {
     match output_format {
-        OutputFormat::Json => {
-            let mut value = agent_report_json(report);
-            value["commit"] = serde_json::json!(committed.commit);
-            println!("{value}");
-        }
-        OutputFormat::HumanReadable => {
-            print_agent_report_human("Created agent", report);
-            println!("Commit: {}", committed.commit);
-        }
+        OutputFormat::Json => println!("{}", agent_report_json(report)),
+        OutputFormat::HumanReadable => print_agent_report_human("Created agent", report),
     }
 }
 
-pub(crate) fn create_agent(
-    waap_root: &Path,
-    name: Option<&str>,
-) -> io::Result<Committed<AgentReport>> {
+pub(crate) fn create_agent(waap_root: &Path, name: Option<&str>) -> io::Result<AgentReport> {
     let mut markdown = String::new();
     io::stdin()
         .read_to_string(&mut markdown)
         .map_err(|error| io::Error::new(error.kind(), format!("failed to read stdin: {error}")))?;
 
     let _lock = crate::state::StateLock::acquire(waap_root)?;
-    let report = create_agent_with_markdown(waap_root, name, &markdown)?;
-    let commit = commit_paths(
-        waap_root,
-        &[report.path.as_path()],
-        &format!("waap agent new {}", report.agent_id),
-    )
-    .map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("failed to commit waap state change: {error}"),
-        )
-    })?;
-
-    Ok(Committed {
-        value: report,
-        commit,
-    })
+    create_agent_with_markdown(waap_root, name, &markdown)
 }
 
 fn create_agent_with_markdown(
