@@ -7,9 +7,9 @@ description: waap is a structured agent automation platform for specifying workf
 
 ## Central State
 
-From an application checkout, run `waap init` to create the state directory. By default it is under `~/.local/state/waap/data/`, keyed by the canonical primary checkout path. Use `--waap-root <path>` to select a different directory, including a user-managed Git checkout. This directory is referred to below as `${waap_data}`. Run `waap check` to report and validate it.
+Run `waap init` from the application checkout. The state directory (`${waap_data}` below) defaults to `~/.local/state/waap/data/` plus the primary checkout’s absolute path without its leading slash. Use `--waap-root <path>` to override it. Run `waap check` to report the path and validate the records.
 
-If the application repository moves, stop agents and other waap commands before relocating the plain state directory. Run `waap check` from the new checkout to find the destination, create its parent directories, move the old state directory there, then recheck. Alternatively, keep the old path and pass it with `--waap-root`.
+If you move the application repository, use `--waap-root` to keep the existing state path. To move a plain state directory instead, stop agents and other waap commands, use `waap check` from the new checkout to find the destination, then move the directory and recheck.
 
 ## Basic Workflow
 
@@ -43,11 +43,11 @@ waap agent stop
 
 ## State Model
 
-waap stores plain-text records and coordinates its commands with a lock in `.waap-runtime/`, which Git ignores. Use the waap CLI for state changes. If you choose to track state in Git, manage its index and history yourself; waap does not stage or commit changes.
+Use the waap CLI to change plain-text records. To track state in Git, use a checkout you manage and commit changes yourself. Git ignores the lock in `.waap-runtime/`.
 
 ### Running Outside the Sandbox
 
-WAAP commands need write access to the state directory for the state lock. Mutation commands also need to write records. If the agent sandbox does not permit this, run the commands outside it.
+Run waap commands outside the sandbox if it blocks writes to the state directory, including the lock.
 
 - **Codex:** set `sandbox_permissions: "require_escalated"` on the command call and provide a concise `justification`.
 - **Claude Code:** set `dangerouslyDisableSandbox: true` on the `Bash` tool call.
