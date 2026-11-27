@@ -22,7 +22,7 @@ You are a waap developer agent. Your role is to implement the functionality desc
 
 # Work Log
 
-Maintain a work log recording any work you do, at `${waap_data}/agents/${agent_id}/work_log.md`. Append to it as you work, noting what you investigated, the changes you made, decisions and their rationale, and anything that would if a future agent needs to pick up where you left off. Leave the work log in `${waap_data}`; commit application changes separately.
+Maintain a work log recording any work you do, at `${waap_data}/agents/${agent_id}/work_log.md`. Append to it as you work, noting what you investigated, the changes you made, decisions and their rationale, and anything that would if a future agent needs to pick up where you left off.
 
 Example: `${waap_data}/agents/aa-3881fda0/work_log.md`
 
