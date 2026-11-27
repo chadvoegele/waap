@@ -1,10 +1,10 @@
 use std::fs;
-use std::io::{self, Read};
+use std::io;
 use std::path::Path;
 
 use crate::agent::{
     agent_path, agent_report_json, available_agent_id, print_agent_report_human,
-    write_agent_record, AgentMetadata, AgentReport,
+    write_agent_record, AgentMetadata, AgentReport, AgentSystem,
 };
 use crate::cli::OutputFormat;
 use crate::record::WaapRecordKind;
@@ -17,21 +17,12 @@ pub(crate) fn print_created_agent_report(output_format: &OutputFormat, report: &
     }
 }
 
-pub(crate) fn create_agent(waap_root: &Path, name: Option<&str>) -> io::Result<AgentReport> {
-    let mut markdown = String::new();
-    io::stdin()
-        .read_to_string(&mut markdown)
-        .map_err(|error| io::Error::new(error.kind(), format!("failed to read stdin: {error}")))?;
-
-    let _lock = crate::state::StateLock::acquire(waap_root)?;
-    create_agent_with_markdown(waap_root, name, &markdown)
-}
-
-fn create_agent_with_markdown(
+pub(crate) fn create_agent(
     waap_root: &Path,
     name: Option<&str>,
-    markdown: &str,
+    system: AgentSystem,
 ) -> io::Result<AgentReport> {
+    let _lock = crate::state::StateLock::acquire(waap_root)?;
     let agents_dir = WaapRecordKind::Agent.root_path(waap_root);
     let agent_id = available_agent_id(&agents_dir, name)?;
 
@@ -40,9 +31,9 @@ fn create_agent_with_markdown(
         creation_date: current_toml_datetime(),
         status: "ready".to_string(),
         session_id: None,
-        system: None,
+        system,
     };
-    write_agent_record(waap_root, &agent_id, &metadata, &format!("\n{markdown}"))?;
+    write_agent_record(waap_root, &agent_id, &metadata, "")?;
     let path = agent_path(waap_root, &agent_id);
     let file_size = fs::metadata(&path)?.len();
 
@@ -60,17 +51,16 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::create_agent_with_markdown;
-    use crate::agent::is_agent_id;
+    use super::create_agent;
+    use crate::agent::{is_agent_id, AgentSystem};
     use crate::check::check_waap;
 
     #[test]
-    fn create_agent_writes_frontmatter_and_stdin_content() {
+    fn create_agent_writes_only_registration_metadata() {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join(".waap")).unwrap();
 
-        let report =
-            create_agent_with_markdown(dir.path(), None, "# Purpose\nPlan things\n").unwrap();
+        let report = create_agent(dir.path(), None, AgentSystem::default()).unwrap();
         let contents = fs::read_to_string(&report.path).unwrap();
 
         assert!(is_agent_id(&report.agent_id));
@@ -78,8 +68,9 @@ mod tests {
         assert_eq!(report.metadata.session_id, None);
         assert_eq!(report.file_size, contents.len() as u64);
         assert!(contents.starts_with("+++\ncreation_date = "));
-        assert!(!contents.contains("role ="));
-        assert!(contents.contains("\nstatus = \"ready\"\n+++\n\n# Purpose\nPlan things\n"));
+        assert!(contents.ends_with("\nstatus = \"ready\"\nsystem = \"pi\"\n+++\n"));
+        assert!(!contents.contains("name ="));
+        assert!(!contents.contains("session_id ="));
         assert!(check_waap(dir.path()).is_empty());
     }
 
@@ -88,12 +79,9 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join(".waap")).unwrap();
 
-        let report = create_agent_with_markdown(
-            dir.path(),
-            Some("Custom Agent_123"),
-            "# Purpose\nPlan things\n",
-        )
-        .unwrap();
+        let report =
+            create_agent(dir.path(), Some("Custom Agent_123"), AgentSystem::Opencode).unwrap();
+        assert_eq!(report.metadata.system, AgentSystem::Opencode);
 
         assert_eq!(report.agent_id, "aa-custom-agent123");
         assert_eq!(report.metadata.name.as_deref(), Some("Custom Agent_123"));
@@ -106,8 +94,7 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join("agents/aa-custom-agent")).unwrap();
 
-        let report =
-            create_agent_with_markdown(dir.path(), Some("Custom Agent"), "# Purpose\n").unwrap();
+        let report = create_agent(dir.path(), Some("Custom Agent"), AgentSystem::Pi).unwrap();
 
         assert!(report.agent_id.starts_with("aa-custom-agent-"));
         assert_eq!(report.agent_id.len(), "aa-custom-agent-".len() + 4);
@@ -117,10 +104,9 @@ mod tests {
     fn create_agent_caps_new_ids_without_invalidating_historical_records() {
         let dir = tempdir().unwrap();
         let name = "a".repeat(crate::ids::MAX_SLUG_LEN);
-        let first = create_agent_with_markdown(dir.path(), Some(&name), "Instructions.").unwrap();
-        let second = create_agent_with_markdown(dir.path(), Some(&name), "Instructions.").unwrap();
-        let longer =
-            create_agent_with_markdown(dir.path(), Some(&"b".repeat(63)), "Instructions.").unwrap();
+        let first = create_agent(dir.path(), Some(&name), AgentSystem::Pi).unwrap();
+        let second = create_agent(dir.path(), Some(&name), AgentSystem::Pi).unwrap();
+        let longer = create_agent(dir.path(), Some(&"b".repeat(63)), AgentSystem::Pi).unwrap();
         assert_eq!(first.agent_id, format!("aa-{name}"));
         for report in [&first, &second, &longer] {
             assert_eq!(
@@ -141,7 +127,7 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join(".waap")).unwrap();
 
-        let report = create_agent_with_markdown(dir.path(), None, "# Purpose\n").unwrap();
+        let report = create_agent(dir.path(), None, AgentSystem::Pi).unwrap();
         let suffix = report.agent_id.strip_prefix("aa-").unwrap();
 
         assert_eq!(suffix.len(), 8);

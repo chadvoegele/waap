@@ -73,7 +73,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{agent_content_report_json, load_agent_content, load_agent_report};
-    use crate::agent::{AgentMetadata, AgentReport};
+    use crate::agent::{AgentMetadata, AgentReport, AgentSystem};
 
     #[test]
     fn missing_agent_is_reported() {
@@ -110,8 +110,9 @@ status = \"pending\"
         let contents = "+++
 creation_date = 2026-06-18T15:00:34Z
 role = \"developer\"
-status = \"ready\"
+status = \"running\"
 session_id = \"ses_123\"
+system = \"pi\"
 +++
 
 # Purpose
@@ -123,7 +124,8 @@ session_id = \"ses_123\"
         assert_eq!(report.agent_id, "aa-3881fda0");
         assert_eq!(report.path, dir.path().join("agents/aa-3881fda0/agent.md"));
         assert_eq!(report.metadata.creation_date, "2026-06-18T15:00:34Z");
-        assert_eq!(report.metadata.status, "ready");
+        assert_eq!(report.metadata.status, "running");
+        assert_eq!(report.metadata.system, AgentSystem::Pi);
         assert_eq!(report.metadata.session_id.as_deref(), Some("ses_123"));
         assert_eq!(report.file_size, contents.len() as u64);
     }
@@ -134,8 +136,9 @@ session_id = \"ses_123\"
         let contents = "+++
 creation_date = 2026-06-18T15:00:34Z
 role = \"developer\"
-status = \"ready\"
+status = \"running\"
 session_id = \"ses_123\"
+system = \"pi\"
 +++
 
 # Purpose
@@ -160,7 +163,7 @@ Do work
                 creation_date: "2026-06-18T15:00:34Z".to_string(),
                 status: "running".to_string(),
                 session_id: Some("ses_123".to_string()),
-                system: None,
+                system: AgentSystem::Pi,
             },
             file_size: 456,
         };
@@ -175,6 +178,7 @@ Do work
                     "creation_date": "2026-06-18T15:00:34Z",
                     "status": "running",
                     "session_id": "ses_123",
+                    "system": "pi",
                 },
                 "file_size": 456,
                 "content": "# Purpose\n",

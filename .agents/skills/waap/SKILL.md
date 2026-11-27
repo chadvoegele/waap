@@ -21,23 +21,21 @@ $ cat cool_feature.md | waap ticket new --name "Cool Feature"
 
 This creates a ticket at `${waap_data}/tickets/<ticket-id>/ticket.md`. Ticket IDs start with `tt-` and use lowercase filesystem-safe slugs, e.g. `tt-cool-feature`.
 
-Next, create a waap agent to complete the work in the ticket. The agent's instructions are also described in markdown format, e.g. `agents.md`, and should indicate to work on the ticket.
+Next, register an agent and send it instructions that refer to the ticket. Put those instructions in a separate Markdown file, for example `task.md`.
 
 ```sh
-$ cat agents.md | waap agent new
-Agent ID: aa-1234abcd
+agent_id=$(waap --output-format json agent new --system pi | jq -er '.agent_id')
+waap agent prompt --agent-id "$agent_id" --delivery=start < task.md
 ```
-This creates an agent at `${waap_data}/agents/<agent-id>/agent.md`. Agent IDs start with `aa-` followed by eight lowercase hex characters.
 
-Then run the agent with `waap agent run --agent-id aa-1234abcd`.
+Registration writes metadata at `${waap_data}/agents/<agent-id>/agent.md`, without reading stdin or opening a session. IDs start with `aa-` and use the `--name` slug if provided, or eight lowercase hex characters otherwise. Always use the returned ID.
 
-Steer a running agent with `waap agent steer --agent-id aa-1234abcd --prompt "Focus on keyboard navigation"`.
-Steering supports Pi and Codex; Claude and OpenCode return an unsupported-backend error.
+From another terminal, steer the active turn with `waap agent prompt --agent-id "$agent_id" --delivery=steer --text='Focus on keyboard navigation.'`. Steering supports Pi and Codex; Claude and OpenCode reject it. If the owner disappears or acceptance is unknown, inspect the agent before sending anything else; WAAP does not retry or reroute.
 
-Stop one agent, or omit `--agent-id` to stop all running agents in this repository:
+Stop the agent from another terminal, or omit `--agent-id` to stop all running agents in this repository:
 
 ```sh
-waap agent stop --agent-id aa-1234abcd
+waap agent stop --agent-id "$agent_id"
 waap agent stop
 ```
 
@@ -105,7 +103,7 @@ It is helpful to ensure continuity across agents, to also instruct the agent to 
 
 ## Agent Parallelization
 
-`waap agent run` starts the agent at the root of the launch checkout. The [Developer role](./roles/developer/agent.md) creates and removes its own worktree.
+`waap agent prompt --delivery=start` starts a turn at the root of the launch checkout, even from a subdirectory of a linked worktree. The [Developer role](./roles/developer/agent.md) creates and removes its own worktree.
 
 ## Agent Frontmatter
 
@@ -115,12 +113,11 @@ Agent metadata is stored as TOML frontmatter at the top of the agent markdown fi
 +++
 creation_date = 2026-06-18T15:00:34Z
 status = "ready"
-session_id = "ses_9032dd..."
 system = "pi"
 +++
 ```
 
-The `system` property identifies which system was used to run the agent, and the `session_id` is the system's unique identifier for the agent run.
+`system` is the backend selected at registration. WAAP adds `session_id` when it opens the backend session and keeps that ID across resumed turns. Prompts and backend turn IDs are not written to the record.
 
 ## CLI Reference
 
@@ -149,34 +146,20 @@ waap ticket update --ticket-id tt-example-feature --set-status in-progress
 waap ticket update --ticket-id tt-example-feature --set-status completed
 ```
 
-Create an agent from an instruction prompt on stdin:
+Register an agent, then send a role prompt. Choose `pi` (the default), `codex`, `claude`, or `opencode` at registration; the backend cannot be changed later.
 
 ```sh
-waap agent new < .agents/skills/waap/roles/planner/agent.md
-waap agent new < resolved-developer-agent.md
+planner_id=$(waap --output-format json agent new --name Planner | jq -er '.agent_id')
+waap agent prompt --agent-id "$planner_id" --delivery=start < .agents/skills/waap/roles/planner/agent.md
+
+developer_id=$(waap --output-format json agent new --system codex | jq -er '.agent_id')
+waap agent prompt --agent-id "$developer_id" --delivery=start \
+  --model gpt-5.4 --reasoning-effort high < resolved-developer-agent.md
 ```
 
-Run an agent:
+`--model` and `--reasoning-effort` apply to starts only. If omitted, `--delivery` defaults to `asap`: start if possible, steer if `running`. Use explicit `start` or `steer` to avoid the other action. Use `--text` or redirected stdin; interactive and blank input are rejected. Queue and image input are not supported.
 
-```sh
-waap agent run --agent-id aa-1234abcd
-```
-
-Run an agent with a different system:
-
-```sh
-waap agent run --agent-id aa-1234abcd --system claude
-waap agent run --agent-id aa-1234abcd --system codex
-waap agent run --agent-id aa-1234abcd --system opencode
-waap agent run --agent-id aa-1234abcd --system pi
-```
-
-Set a model and reasoning effort for one run:
-
-```sh
-waap agent run --agent-id aa-1234abcd --system codex \
-  --model gpt-5.4 --reasoning-effort high
-```
+A later start on a `completed` or `aborted` agent requires a saved session. Exact resume is supported by Pi 1.5.2 from the original launch checkout with the same session store. WAAP will not fork the session or replace missing history. A ready agent stopped before its first turn has no session; register another agent for a fresh start.
 
 - Codex:
   - `CODEX_MODEL`: overridden by `--model`.
@@ -191,11 +174,13 @@ Codex also accepts `none` and `ultra`; Pi also accepts `off`.
 
 For OpenCode, set `OPENCODE_SERVER_URL`, `OPENCODE_SERVER_USERNAME`, `OPENCODE_SERVER_PASSWORD`, and `OPENCODE_SERVER_MODEL`. The model accepts `provider/model` or `provider/model/variant`; recognized variants are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 
-Update agent status:
+Rename an agent without changing its ID or status:
 
 ```sh
-waap agent update --agent-id aa-1234abcd --set-status completed
+waap agent update --agent-id aa-1234abcd --set-name 'New display name'
 ```
+
+WAAP records the turn's outcome automatically; do not update agent lifecycle status yourself.
 
 Prefer `--output-format json` when scripting and parse the `agent_id` or `ticket_id` fields from command output.
 
@@ -205,8 +190,8 @@ To effectively use waap, follow this loop:
 
 1. Create tickets for work to be done. (`cat ticket.md | waap ticket new ...`)
 1. While there are unblocked tickets, (`waap ticket list --status pending --unblocked`)
-    1. Create agents to complete the work. (`cat agent.md | waap agent new ...`)
-    2. Run the agents. (`waap agent run ...`)
+    1. Register agents to complete the work. (`waap agent new ...`)
+    2. Send each agent its task. (`waap agent prompt --agent-id ... --delivery=start < task.md`)
     3. Add new tickets as needed. (`cat new_ticket.md | waap ticket new ...`)
 
 ### Software Factory Loop
@@ -215,10 +200,10 @@ To build a software factory, follow this loop:
 
 1. Draft a `spec.md` including any diagrams, or associated files describing the program.
 1. Create a planner ticket to create tickets for implementing the program. (`cat ticket.md | waap ticket new ...`)
-1. Run the planner agent. (`waap agent run ...`)
+1. Register a planner and send it the planning instructions with `waap agent prompt --delivery=start`.
 1. While there are unblocked tickets, (`waap ticket list --status pending --unblocked`)
-    1. Create agents to complete the work. (`cat agent.md | waap agent new ...`)
-    1. Run the agents. (`waap agent run ...`)
+    1. Register developers. (`waap agent new ...`)
+    1. Send each developer its instructions. (`waap agent prompt --agent-id ... --delivery=start < task.md`)
     1. Run end-to-end tests.
     1. Verify all aspects of the spec have been implemented.
     1. Add new tickets as needed to address spec drift, testing, or refactoring. (`cat new_ticket.md | waap ticket new ...`)

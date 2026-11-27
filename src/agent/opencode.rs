@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc::Receiver;
 
-use reqwest::{Client, Response};
+use reqwest::{Client, Request, Response};
 use serde_json::{json, Value as JsonValue};
 
 use super::backend::{
@@ -40,24 +40,30 @@ impl OpencodeBackend {
     ) -> io::Result<AgentSessionRun> {
         let config = self.config()?;
         let repository_root = opencode_repository_root(context.repository_root)?;
-        let client = opencode_client()?;
+        let client = Client::builder()
+            .retry(reqwest::retry::never())
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(opencode_http_error)?;
         let session_id = create_opencode_session(&client, config, &repository_root).await?;
         // Subscribe first so a fast agent cannot finish before monitoring begins.
         let events = subscribe_opencode_events(&client, config, &repository_root).await?;
-        submit_opencode_prompt(
+        let submission = opencode_prompt_request(
             &client,
             config,
             &session_id,
             &repository_root,
             context.prompt,
         )
-        .await?;
+        .build()
+        .map_err(opencode_http_error)?;
         Ok(AgentSessionRun::new(
             session_id.clone(),
-            Runner::Opencode(OpencodeRunner {
+            Runner::Opencode(Box::new(OpencodeRunner {
                 events: Some(events),
+                submission: Some((client, submission)),
                 session_id,
-            }),
+            })),
             receiver,
         ))
     }
@@ -72,11 +78,13 @@ impl OpencodeBackend {
 }
 
 pub(super) struct OpencodeRunner {
+    submission: Option<(Client, Request)>,
     events: Option<Response>,
     session_id: String,
 }
 impl OpencodeRunner {
     pub(super) async fn run(&mut self, receiver: Receiver<Command>) -> io::Result<RunOutcome> {
+        let submission = self.submission.take();
         let events = self
             .events
             .take()
@@ -84,11 +92,38 @@ impl OpencodeRunner {
         let stream = events.bytes_stream().map_err(io::Error::other);
         let reader = tokio::io::BufReader::new(tokio_util::io::StreamReader::new(stream));
         super::unsupported_commands::await_with_unsupported_commands(
-            monitor_opencode_events(reader, &self.session_id, &mut tokio::io::stdout()),
+            async {
+                if let Some((client, request)) = submission {
+                    submit_opencode_prompt(client, request).await?;
+                }
+                monitor_opencode_events(reader, &self.session_id, &mut tokio::io::stdout()).await
+            },
             receiver,
             "opencode",
         )
         .await
+    }
+}
+
+async fn submit_opencode_prompt(client: Client, request: Request) -> io::Result<()> {
+    let unknown = |detail: &dyn std::fmt::Display| {
+        io::Error::other(format!(
+            "OpenCode prompt acceptance is unknown: {detail}; no automatic retry was attempted"
+        ))
+    };
+    let response = client
+        .execute(request)
+        .await
+        .map_err(|error| unknown(&error))?;
+    let status = response.status();
+    if status.is_success() {
+        Ok(())
+    } else if status.is_server_error() {
+        Err(unknown(&status))
+    } else {
+        Err(io::Error::other(format!(
+            "OpenCode rejected prompt: {status}"
+        )))
     }
 }
 
@@ -227,13 +262,13 @@ async fn subscribe_opencode_events(
         .map_err(opencode_http_error)
 }
 
-async fn submit_opencode_prompt(
+fn opencode_prompt_request(
     client: &Client,
     config: &OpencodeRunConfig,
     session_id: &str,
     repository_root: &Path,
     prompt: &str,
-) -> io::Result<()> {
+) -> reqwest::RequestBuilder {
     client
         .post(opencode_url(
             config,
@@ -242,11 +277,6 @@ async fn submit_opencode_prompt(
         .basic_auth(&config.username, Some(&config.password))
         .query(&opencode_directory_query(repository_root))
         .json(&prompt_payload(config, prompt))
-        .send()
-        .await
-        .and_then(Response::error_for_status)
-        .map_err(opencode_http_error)?;
-    Ok(())
 }
 
 async fn abort_opencode_session(
@@ -540,6 +570,7 @@ mod tests {
         (
             super::OpencodeRunner {
                 events: Some(response.unwrap()),
+                submission: None,
                 session_id: "ses_test".into(),
             },
             socket,
@@ -775,6 +806,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn async_runner_subscribes_before_prompt_and_scopes_every_request() {
+        const PROMPT: &str = "  # Work 雪\n\n'$HOME'\n";
         let root = tempdir().unwrap();
         let repository_root = root.path().canonicalize().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -812,7 +844,7 @@ mod tests {
                 json!({
                     "model": { "providerID": "openai", "modelID": "gpt-5.5" },
                     "agent": "build",
-                    "parts": [{ "type": "text", "text": "complete the work" }],
+                    "parts": [{ "type": "text", "text": PROMPT }],
                 })
             );
             write_response(&mut prompt, "HTTP/1.1 204 No Content", None);
@@ -838,7 +870,7 @@ mod tests {
             .start(
                 StartContext {
                     agent_id: "aa-00000001",
-                    prompt: "complete the work",
+                    prompt: PROMPT,
                     repository_root: &repository_root,
                 },
                 super::super::commands::CommandDispatcher::create_channel().1,

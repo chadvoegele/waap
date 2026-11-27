@@ -13,6 +13,8 @@ use serde_json::{json, Value};
 
 use common::{git, init_repo, isolate_git_config};
 
+const TASK: &str = "  # Test 雪\n\n'quoted' `$HOME`\n";
+
 fn waap(root: &Path, args: &[&str], mode: &str) -> Output {
     let runtime = tempfile::tempdir().unwrap();
     fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -57,6 +59,8 @@ with open(os.environ['WAAP_TEST_PID_FILE'], 'w') as file:
     file.write(str(os.getpid()))
 mode = os.environ['WAAP_TEST_MODE']
 if mode == 'startup-held':
+    with open(os.environ['WAAP_TEST_PID_FILE'] + '.launches', 'a') as file:
+        file.write(f'{os.getpid()}\n')
     time.sleep(60)
 root = os.path.dirname(os.environ['WAAP_TEST_PID_FILE'])
 if mode == 'check-lifecycle':
@@ -82,12 +86,18 @@ for line in sys.stdin:
         time.sleep(60)
     result = {}
     if method == 'thread/start':
+        if mode == 'publication-failed':
+            record_path = Path(root) / '.state/agents/aa-test/agent.md'
+            record_path.write_text(record_path.read_text().replace(
+                'status = "running"', 'status = "running"\nsession_id = "existing"'))
         if mode == 'check-lifecycle':
             assert request['params']['cwd'] == root
         result = {'thread': {'id': 'th_test'}}
     if method == 'turn/start':
         if mode == 'check-lifecycle':
+            assert request['params']['input'][0]['text'] == "  # Test 雪\n\n'quoted' `$HOME`\n"
             record = record_path.read_text()
+            assert '# Test' not in record and 'tu_test' not in record
             assert 'status = "running"' in record
             assert 'session_id = "th_test"' in record
         if mode == 'steering-startup':
@@ -197,15 +207,39 @@ fn agent_run_uses_application_checkout_and_leaves_git_untouched() {
     let index = fs::read(state.join(".git/index")).unwrap();
     fs::File::create(state.join(".git/index.lock")).unwrap();
     assert!(waap(root, &["init"], "completed").status.success());
-    assert!(waap(root, &["agent", "new", "--name", "Test"], "completed")
-        .status
-        .success());
-    let args = ["agent", "run", "--agent-id", "aa-test", "--system", "codex"];
+    assert!(waap(
+        root,
+        &["agent", "new", "--system=codex", "--name", "Test"],
+        "completed"
+    )
+    .status
+    .success());
+    let args = [
+        "agent",
+        "prompt",
+        "--delivery=start",
+        "--agent-id",
+        "aa-test",
+        "--text",
+        TASK,
+    ];
     let output = waap(root, &args, "check-lifecycle");
     assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Completed agent aa-test"));
+    assert!(!stdout.contains("asap") && !stdout.contains("Delivery:"));
     let record = fs::read_to_string(state.join("agents/aa-test/agent.md")).unwrap();
     assert!(record.contains("status = \"completed\""));
     assert!(record.contains("session_id = \"th_test\""));
+    fs::remove_file(root.join("backend.pid")).unwrap();
+    let followup = waap(root, &args, "check-lifecycle");
+    assert!(!followup.status.success(), "{followup:?}");
+    assert!(String::from_utf8_lossy(&followup.stderr).contains("does not support exact resume"));
+    assert!(!root.join("backend.pid").exists());
+    assert_eq!(
+        fs::read_to_string(state.join("agents/aa-test/agent.md")).unwrap(),
+        record
+    );
     assert_eq!(git(&state, &["rev-parse", "HEAD"]), head);
     assert_eq!(fs::read(state.join(".git/index")).unwrap(), index);
     assert!(state.join(".git/index.lock").is_file());
@@ -231,20 +265,24 @@ fn codex_success_failure_and_malformed_startup_reap_process() {
         init_repo(root);
         seed_backend(root);
         assert!(waap(root, &["init"], mode).status.success());
-        assert!(waap(root, &["agent", "new", "--name", "Test"], mode)
-            .status
-            .success());
-        if mode == "publication-failed" {
-            let path = root.join(".state/agents/aa-test/agent.md");
-            let contents = fs::read_to_string(&path).unwrap().replace(
-                "status = \"ready\"",
-                "status = \"ready\"\nsession_id = \"existing\"",
-            );
-            fs::write(&path, contents).unwrap();
-        }
+        assert!(waap(
+            root,
+            &["agent", "new", "--system=codex", "--name", "Test"],
+            mode
+        )
+        .status
+        .success());
         let output = waap(
             root,
-            &["agent", "run", "--agent-id", "aa-test", "--system", "codex"],
+            &[
+                "agent",
+                "prompt",
+                "--delivery=start",
+                "--agent-id",
+                "aa-test",
+                "--text",
+                TASK,
+            ],
             mode,
         );
         assert_eq!(
@@ -273,7 +311,7 @@ fn codex_success_failure_and_malformed_startup_reap_process() {
 }
 
 #[test]
-fn sigterm_during_async_startup_reaps_child() {
+fn concurrent_starts_claim_once_and_sigterm_during_startup_reaps_the_child() {
     let repo = tempfile::tempdir().unwrap();
     let runtime = tempfile::tempdir().unwrap();
     let root = repo.path();
@@ -281,26 +319,55 @@ fn sigterm_during_async_startup_reaps_child() {
     seed_backend(root);
     fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
     assert!(waap(root, &["init"], "startup-held").status.success());
-    assert!(
-        waap(root, &["agent", "new", "--name", "Test"], "startup-held")
-            .status
-            .success()
-    );
-    let mut child = RunningChild(Some(
-        waap_command(root, "startup-held", runtime.path())
-            .args(["agent", "run", "--agent-id", "aa-test", "--system", "codex"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
-    ));
+    assert!(waap(
+        root,
+        &["agent", "new", "--system=codex", "--name", "Test"],
+        "startup-held"
+    )
+    .status
+    .success());
+    let lock = fs::OpenOptions::new()
+        .write(true)
+        .open(root.join(".state/.waap-runtime/state.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let spawn = || {
+        RunningChild(Some(
+            waap_command(root, "startup-held", runtime.path())
+                .args([
+                    "agent",
+                    "prompt",
+                    "--delivery=start",
+                    "--agent-id",
+                    "aa-test",
+                    "--text",
+                    TASK,
+                ])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        ))
+    };
+    let (mut a, mut b) = (spawn(), spawn());
+    drop(lock);
+
+    let mut a_rejected = false;
     wait_until(|| {
-        fs::read_to_string(root.join("backend.pid"))
-            .ok()
-            .and_then(|pid| pid.parse::<u32>().ok())
-            .is_some()
+        a_rejected = a.0.as_mut().unwrap().try_wait().unwrap().is_some();
+        a_rejected || b.0.as_mut().unwrap().try_wait().unwrap().is_some()
     });
+    let (mut rejected, mut child) = if a_rejected { (a, b) } else { (b, a) };
+    let output = rejected.0.take().unwrap().wait_with_output().unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("running -> running"));
+
+    let launches = root.join("backend.pid.launches");
+    wait_until(|| fs::read_to_string(&launches).is_ok_and(|text| text.ends_with('\n')));
     let pid = fs::read_to_string(root.join("backend.pid")).unwrap();
+    assert_eq!(fs::read_to_string(&launches).unwrap(), format!("{pid}\n"));
+    assert!(child.0.as_mut().unwrap().try_wait().unwrap().is_none());
     assert!(Command::new("kill")
         .args(["-TERM", &child.0.as_ref().unwrap().id().to_string()])
         .status()
@@ -311,6 +378,7 @@ fn sigterm_during_async_startup_reaps_child() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("startup interrupted"));
     assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    assert_eq!(fs::read_to_string(launches).unwrap(), format!("{pid}\n"));
     assert!(
         fs::read_to_string(root.join(".state/agents/aa-test/agent.md"))
             .unwrap()
@@ -423,13 +491,25 @@ impl SteeringRun {
         seed_backend(root);
         fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
         assert!(waap(root, &["init"], mode).status.success());
-        assert!(waap(root, &["agent", "new", "--name", mode], mode)
-            .status
-            .success());
+        assert!(waap(
+            root,
+            &["agent", "new", "--system=codex", "--name", mode],
+            mode
+        )
+        .status
+        .success());
         let agent_id = format!("aa-{mode}");
         let child = RunningChild(Some(
             waap_command(root, mode, runtime.path())
-                .args(["agent", "run", "--agent-id", &agent_id, "--system", "codex"])
+                .args([
+                    "agent",
+                    "prompt",
+                    "--delivery=start",
+                    "--agent-id",
+                    &agent_id,
+                    "--text",
+                    TASK,
+                ])
                 .stdout(fs::File::create(root.join("run.stdout")).unwrap())
                 .stderr(Stdio::piped())
                 .spawn()
@@ -477,10 +557,11 @@ impl SteeringRun {
             "--output-format",
             "json",
             "agent",
-            "steer",
+            "prompt",
+            "--delivery=steer",
             "--agent-id",
             &self.agent_id,
-            "--prompt",
+            "--text",
             prompt,
         ]);
         command

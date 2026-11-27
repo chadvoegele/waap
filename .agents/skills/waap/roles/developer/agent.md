@@ -18,7 +18,7 @@ You are a waap developer agent. Your role is to implement the functionality desc
 8. Add or update unit tests and end-to-end tests when appropriate.
 9. Run the repository's required build, lint, format, and test checks.
 10. Rebase, merge, and remove your worktree (see Commit And Merge Guidance below).
-11. Mark the ticket completed only after the code is merged and checks pass. `waap agent run` marks this agent `completed` automatically when your process exits successfully, so do not mark your own agent status.
+11. Mark the ticket completed only after the code is merged and checks pass. The `waap agent prompt` owner records the turn's outcome; do not update your own agent status.
 
 # Work Log
 
@@ -60,8 +60,6 @@ Mark the ticket completed after the code is merged and verified:
 waap ticket update --ticket-id ${ticket_id} --set-status completed
 ```
 
-`waap agent run` derives this agent's terminal status from your process: when you exit successfully it marks this agent `completed` in shared state automatically. Do not mark your own agent status.
-
 # Commit And Merge Guidance
 
 Commit your changes with both `${agent_id}` and `${ticket_id}` in the message.
@@ -79,4 +77,4 @@ If you cannot merge or remove the worktree, leave it in place and record the pat
 
 # Completion Criteria
 
-Complete your goal when the ticket's acceptance criteria are implemented, relevant checks pass, the work is merged, and the ticket is marked `completed`. `waap agent run` marks this agent `completed` for you on a successful exit.
+Complete your goal when the ticket's acceptance criteria are implemented, relevant checks pass, the work is merged, and the ticket is marked `completed`.

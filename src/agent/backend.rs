@@ -26,6 +26,11 @@ impl RunOutcome {
     }
 }
 
+pub(super) enum SessionOpen {
+    Fresh,
+    ResumeExact(String),
+}
+
 pub(super) struct StartContext<'a> {
     pub(super) agent_id: &'a str,
     pub(super) prompt: &'a str,
@@ -59,7 +64,7 @@ impl AgentSessionRun {
 pub(super) enum Runner {
     Claude(super::claude::ClaudeRunner),
     Codex(Box<super::codex::CodexRunner>),
-    Opencode(super::opencode::OpencodeRunner),
+    Opencode(Box<super::opencode::OpencodeRunner>),
     Pi(Box<super::pi::PiRunner>),
     #[cfg(test)]
     Fake(fake::FakeRunner),
@@ -84,7 +89,7 @@ impl Runner {
             Self::Opencode(_) => Ok(()),
             Self::Pi(runner) => runner.cleanup().await,
             #[cfg(test)]
-            Self::Fake(_) => Ok(()),
+            Self::Fake(runner) => runner.cleanup(),
         }
     }
 }
@@ -112,18 +117,29 @@ pub(super) enum Backend {
     Fake(fake::FakeBackend),
 }
 impl Backend {
-    pub(super) async fn start(
+    /// Prepare identity and resources only. The runner submits after identity is durable.
+    pub(super) async fn open(
         &mut self,
+        intent: &SessionOpen,
         context: StartContext<'_>,
         receiver: Receiver<Command>,
     ) -> io::Result<AgentSessionRun> {
-        match self {
-            Self::Claude(b) => b.start(context, receiver).await,
-            Self::Codex(b) => b.start(context, receiver).await,
-            Self::Opencode(b) => b.start(context, receiver).await,
-            Self::Pi(b) => b.start(context, receiver).await,
+        match (self, intent) {
+            (Self::Pi(b), _) => b.open(intent, context, receiver).await,
+            (Self::Claude(b), SessionOpen::Fresh) => b.start(context, receiver).await,
+            (Self::Codex(b), SessionOpen::Fresh) => b.start(context, receiver).await,
+            (Self::Opencode(b), SessionOpen::Fresh) => b.start(context, receiver).await,
             #[cfg(test)]
-            Self::Fake(b) => b.start(context, receiver).await,
+            (Self::Fake(b), SessionOpen::Fresh) => b.start(context, receiver).await,
+            #[cfg(test)]
+            (Self::Fake(b), SessionOpen::ResumeExact(id)) if b.supports_resume => {
+                b.resume_calls.push(id.clone());
+                b.prepare(receiver)
+            }
+            (_, SessionOpen::ResumeExact(id)) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("backend does not support exact resume of session {id}"),
+            )),
         }
     }
     pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<AbortOutcome> {
@@ -184,6 +200,11 @@ pub(super) mod fake {
         pub(crate) session_id: String,
         pub(crate) outcome: Option<RunOutcome>,
         pub(crate) start_error: Option<String>,
+        pub(crate) open_action: Option<Box<dyn FnOnce() -> io::Result<()> + Send>>,
+        pub(crate) supports_resume: bool,
+        pub(crate) resume_calls: Vec<String>,
+        pub(crate) cleanup_error: Option<String>,
+        pub(crate) cleanup_calls: Arc<AtomicUsize>,
         pub(crate) wait_error: Option<String>,
         pub(crate) wait_action: Option<Box<dyn FnOnce() -> io::Result<()> + Send>>,
         pub(crate) abort_error: Option<String>,
@@ -200,6 +221,11 @@ pub(super) mod fake {
                 session_id: "ses_fake".into(),
                 outcome: Some(RunOutcome::Completed),
                 start_error: None,
+                open_action: None,
+                supports_resume: false,
+                resume_calls: Vec::new(),
+                cleanup_error: None,
+                cleanup_calls: Arc::new(AtomicUsize::new(0)),
                 wait_error: None,
                 wait_action: None,
                 abort_error: None,
@@ -216,11 +242,20 @@ pub(super) mod fake {
         pub(in crate::agent) outcome: Option<RunOutcome>,
         pub(in crate::agent) error: Option<String>,
         pub(in crate::agent) action: Option<Box<dyn FnOnce() -> io::Result<()> + Send>>,
+        pub(in crate::agent) cleanup_error: Option<String>,
+        pub(in crate::agent) cleanup_calls: Arc<AtomicUsize>,
         pub(in crate::agent) wait_calls: Arc<AtomicUsize>,
         pub(in crate::agent) steer_calls: Arc<Mutex<Vec<(String, Instant, std::thread::ThreadId)>>>,
         pub(in crate::agent) steer_error: Option<CommandError>,
     }
     impl FakeRunner {
+        pub(super) fn cleanup(&self) -> io::Result<()> {
+            self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
+            self.cleanup_error
+                .as_ref()
+                .map_or(Ok(()), |error| Err(io::Error::other(error.clone())))
+        }
+
         pub(super) async fn run(
             &mut self,
             mut commands: mpsc::Receiver<Command>,
@@ -267,6 +302,16 @@ pub(super) mod fake {
                 prompt: context.prompt.into(),
                 repository_root: context.repository_root.into(),
             });
+            self.prepare(receiver)
+        }
+
+        pub(super) fn prepare(
+            &mut self,
+            receiver: Receiver<Command>,
+        ) -> io::Result<AgentSessionRun> {
+            if let Some(action) = self.open_action.take() {
+                action()?;
+            }
             if let Some(error) = self.start_error.take() {
                 return Err(io::Error::other(error));
             }
@@ -276,6 +321,8 @@ pub(super) mod fake {
                     outcome: self.outcome.take(),
                     error: self.wait_error.take(),
                     action: self.wait_action.take(),
+                    cleanup_error: self.cleanup_error.take(),
+                    cleanup_calls: Arc::clone(&self.cleanup_calls),
                     wait_calls: Arc::clone(&self.wait_calls),
                     steer_calls: Arc::clone(&self.steer_calls),
                     steer_error: self.steer_error.clone(),
@@ -315,6 +362,8 @@ mod execution_tests {
                 outcome: Some(RunOutcome::Completed),
                 error: None,
                 action: None,
+                cleanup_error: None,
+                cleanup_calls: Default::default(),
                 wait_calls: Default::default(),
                 steer_calls: Default::default(),
                 steer_error: None,

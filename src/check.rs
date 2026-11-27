@@ -211,7 +211,7 @@ mod tests {
         let dir = tempdir().unwrap();
         write_file(
             &dir.path().join("agents/aa-3881fda0/agent.md"),
-            "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"ready\"\n+++\n\n# Purpose\n",
+            "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"ready\"\nsystem = \"pi\"\n+++\n\n# Purpose\n",
         );
         write_file(
             &dir.path().join("agents/aa-3881fda0/work_log.md"),
@@ -248,7 +248,7 @@ mod tests {
         let dir = tempdir().unwrap();
         write_file(
             &dir.path().join("agents/aa-3881fda0/agent.md"),
-            "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"ready\"\n+++\n",
+            "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"developer\"\nstatus = \"ready\"\nsystem = \"pi\"\n+++\n",
         );
         write_file(&dir.path().join("agents/aa-3881fda0/notes.md"), "# Notes\n");
 
@@ -289,7 +289,7 @@ mod tests {
         fs::create_dir_all(dir.path().join("tickets")).unwrap();
         write_file(
             &dir.path().join("agents/aa-3881fda0/agent.md"),
-            "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"designer\"\nstatus = \"ready\"\n+++\n\n# Purpose\n",
+            "+++\ncreation_date = 2026-06-18T15:00:34Z\nrole = \"designer\"\nstatus = \"ready\"\nsystem = \"pi\"\n+++\n\n# Purpose\n",
         );
 
         assert!(check_waap(dir.path()).is_empty());

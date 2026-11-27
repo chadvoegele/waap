@@ -12,7 +12,7 @@ The [execution directory specification](spec.md#execution-directory) supersedes 
 
 Run Pi Coding Agent directly from WAAP, with durable session tracking and native
 steering and stop through the shared control server. Pi is the default for
-`agent run`; explicit `opencode`, `claude`, and `codex` remain available.
+`agent new`; explicit `opencode`, `claude`, and `codex` remain available.
 
 ## Context
 
@@ -25,6 +25,7 @@ authoritative. Pi adds a backend and driver to those components.
 ## Goals
 
 - Obtain and persist an authentic Pi session ID before submitting task work.
+- Reopen that exact Pi session for later turns in the same checkout.
 - Preserve Pi model, reasoning, auth, resource discovery, and session behavior.
 - Forward assistant text and wait for session-level settlement.
 - Steer and stop live Pi through correlated native acknowledgements.
@@ -33,7 +34,7 @@ authoritative. Pi adds a backend and driver to those components.
 ## Non-goals
 
 - Exposing every Pi RPC command or adding a second control server.
-- Attaching to, resuming, or steering a completed WAAP run.
+- Attaching to or steering a turn that has already settled.
 - Changing Codex, Claude, or OpenCode native protocols.
 - Defining a new sandbox, remote Pi service, or model-provider client.
 - Supervising arbitrary processes detached by third-party Pi extensions.
@@ -44,22 +45,22 @@ authoritative. Pi adds a backend and driver to those components.
 
 ```mermaid
 flowchart LR
-  CLI[steer / stop CLI] --> Control[Shared control server]
+  CLI[Prompt / stop CLI] --> Control[Shared control server]
+  CLI --> Open[Fresh / exact session open]
+  Open --> Driver[Pi owner driver]
   Control --> Dispatch[Bounded command dispatcher]
-  Dispatch --> Driver[Pi owner driver]
+  Dispatch --> Driver
   Driver --> RPC[Pi native RPC process]
   RPC --> Driver
   Driver --> Control
-  Driver --> Cleanup[Socket, pipe, child and worktree cleanup]
+  Driver --> Cleanup[Socket, pipe and child cleanup]
   Cleanup --> Lifecycle[Outcome and terminal persistence]
 ```
 
-The seven components have the same handoffs as the other shared backends.
 `pi.rs` owns startup and the Pi child, `pi/config.rs` handles invocation,
-`pi/rpc.rs` handles JSONL and UI/text events, and `pi/session.rs` owns native
-command correlation and run state. These components run on the existing
-current-thread Tokio runtime. No blocking reader thread, polling loop, signal
-matcher, replacement runner trait, or separate control endpoint is required.
+`pi/resume.rs` verifies existing history, `pi/rpc.rs` handles JSONL and UI/text
+events, and `pi/session.rs` owns native command correlation and run state. These
+components run on the existing current-thread Tokio runtime.
 
 ### Configuration and invocation
 
@@ -84,7 +85,8 @@ Invalid or empty run configuration must fail before entering `running`. Stop
 constructs a configuration-free backend, so invalid run environment cannot
 prevent stopping an existing Pi run.
 
-Spawn one child in the agent worktree:
+Start Pi at the root of the launch checkout (including linked worktrees).
+For a fresh session, start it without a session selector:
 
 ```text
 pi --mode rpc --approve --name "waap <agent-id>" \
@@ -103,17 +105,18 @@ records, or protocol diagnostics.
 
 ### Startup and task outcome
 
-The shared owner must validate readiness/configuration, persist `running` with
-the selected system, create the isolated worktree, and start Pi. Startup sends
-`get_state` with a unique string ID and requires a matching successful response
-with nonempty `data.sessionId`. The owner persists that ID and binds the shared
-control socket before submitting the existing common WAAP task prompt.
+[Agent turns](agent-turns.md) defines the CLI and ownership contract. Once the
+shared owner claims `running`, Pi startup sends `get_state` with a unique
+string ID and requires a matching successful response with nonempty
+`data.sessionId`. The owner persists the ID on a fresh turn, or verifies the
+saved ID on a resumed turn. It binds the shared control socket before submitting
+the prompt text.
 
 The driver checks already queued stop intent and ready SIGINT/SIGTERM before
 the first prompt write. Such cancellation suppresses task submission and uses
 the same native clear/abort path as a live stop. Startup failure, session
-persistence failure, or endpoint binding failure must clean the owned child and
-worktree without sending a task prompt.
+persistence failure, or endpoint binding failure must clean up the owned child
+without sending a prompt.
 
 Prompt responses must have a known disposition. `started` or `queued` means
 accepted and requires subsequent settlement. `handled` means an extension
@@ -139,11 +142,35 @@ exit zero, and errors/failed runs to nonzero. The owner performs cleanup before
 persisting the terminal status. The stop CLI never writes terminal state for a
 live Pi run.
 
+### Exact session resumption
+
+Pi Coding Agent **1.5.2** is verified for exact resume. From the original
+checkout (or any subdirectory of it), use the same Pi session store:
+
+```sh
+waap agent prompt --agent-id <id> --delivery=start --text 'Continue the review.'
+```
+
+WAAP must locate a unique existing Pi session file with the saved full UUID
+and a header whose cwd resolves to the launch checkout. It looks in Pi's
+configured session directory (`PI_CODING_AGENT_SESSION_DIR`, project/global
+`sessionDir`, or the default checkout-specific directory). Pi 1.5.2 opens that
+history with `--session <full UUID>` scoped to the preflighted store, and uses
+the session header's cwd for runtime tools. WAAP must verify the correlated
+RPC state reports the saved ID, the same existing file and loaded conversation
+history before publishing control or sending a prompt.
+
+A missing session, different checkout, unverified Pi version, or identity
+mismatch must fail before submission and restore the prior `completed` or
+`aborted` status without changing the saved ID. Shared WAAP state does not let
+Pi resume in a different checkout. Do not select a prefix, create a session,
+fork history, or replay it to work around an unavailable session.
+
 ### Steering
 
-`agent steer --agent-id <id> --prompt <text>` uses the existing version-1 control
-socket and bounded dispatcher. The driver sends exactly one native
-`{id,type:"steer",message:<text>}` command. Submitted text must survive JSON
+`agent prompt --agent-id <id> --delivery=steer --text <text>` uses the existing
+version-1 control socket and bounded dispatcher. The driver sends exactly one
+native `{id,type:"steer",message:<text>}` command. Submitted text must survive JSON
 transport unchanged. Pi may expand templates/skills or transform/consume input
 through extensions; WAAP does not emulate steering with another prompt/session.
 
@@ -175,7 +202,7 @@ stopping, and completes this bounded sequence:
 3. Send `abort` and await its correlated successful acknowledgement. Pi's abort
    waits for idle; `agent_settled` may precede this response.
 4. Acknowledge the control request, close Pi stdin, wait for child exit, and
-   finish shared socket/worktree cleanup and terminal persistence.
+   finish shared socket cleanup and terminal persistence.
 
 SIGINT/SIGTERM use that same sequence. Native rejection must not be labeled a
 successful abort. Settlement or EOF after local stop intent is insufficient
@@ -252,12 +279,15 @@ Process integration must verify default Pi selection, session persistence before
 prompt, text forwarding, native steering/clear/abort through the shared socket,
 reordered CLI arguments, ready cancellation, terminal persistence by the owner,
 stop failure/uncertainty, child reaping, descendant-held stdout, handled input,
-and socket/worktree cleanup. Existing Codex, Claude, and OpenCode tests must pass.
+and socket cleanup. Existing Codex, Claude, and OpenCode tests must pass.
 
 The opt-in `tests/pi_real_smoke.py` runs the real installed Pi against a local
 SSE provider fixture, executes a tool that writes and commits a file, verifies
-steering reaches a later provider request, and stops a streaming run. It uses
-an isolated Pi directory and no external credentials. Pass
+steering reaches a later provider request, and stops a streaming run. After
+both completion and stop, it verifies exact recall and effective tool cwd in
+a new process launched from a linked checkout's subdirectory, rejection from
+another checkout, and failure when history is absent. It uses an isolated Pi
+directory and no external credentials. Pass
 `--shutdown-notification` to exercise completion and stop with a real extension
 emitting a shutdown notification larger than pipe capacity. An authenticated
 external provider smoke remains a separate deployment check.

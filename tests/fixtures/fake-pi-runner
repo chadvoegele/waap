@@ -1,5 +1,54 @@
 #!/bin/sh
 set -eu
 
-script=${WAAP_FAKE_PI_SCRIPT:-"$PWD/fake-pi"}
-exec /bin/sh "$script" "$@"
+if [ -z "${WAAP_FAKE_RESUME_MODE:-}" ]; then
+    script=${WAAP_FAKE_PI_SCRIPT:-"$PWD/fake-pi"}
+    exec /bin/sh "$script" "$@"
+fi
+
+if [ "$#" -eq 1 ] && [ "$1" = --version ]; then
+    touch "$WAAP_FAKE_VERSION"
+    if [ "$WAAP_FAKE_RESUME_MODE" = unsupported ]; then
+        printf '1.5.3\n'
+    else
+        printf '1.5.2\n'
+    fi
+    exit 0
+fi
+
+printf '%s\n' "$$" > "$WAAP_FAKE_PID"
+printf '%s\n' "$@" >> "$WAAP_FAKE_ARGV"
+printf '%s\n' "$PWD" > "$WAAP_FAKE_CWD"
+case "$WAAP_FAKE_RESUME_MODE" in
+    deleted)
+        rm "$WAAP_FAKE_SESSION_FILE"
+        exit 1 ;;
+    changed-checkout)
+        cp "$WAAP_FAKE_OTHER_FILE" "$WAAP_FAKE_SESSION_FILE"
+        reported_id=$WAAP_FAKE_RESUME_ID ;;
+    wrong-id) reported_id=another-session ;;
+    *) reported_id=$WAAP_FAKE_RESUME_ID ;;
+esac
+reported_file=$WAAP_FAKE_SESSION_FILE
+if [ "$WAAP_FAKE_RESUME_MODE" = wrong-file ]; then
+    reported_file=$WAAP_FAKE_OTHER_FILE
+fi
+count=2
+if [ "$WAAP_FAKE_RESUME_MODE" = empty-history ]; then
+    count=0
+fi
+
+while IFS= read -r line; do
+    printf '%s\n' "$line" >> "$WAAP_FAKE_LOG"
+    case "$line" in
+        *'"type":"get_state"'*)
+            printf '%s\n' '{"type":"response","id":"not-correlated","command":"get_state","success":true,"data":{"sessionId":"ignore"}}'
+            printf '{"type":"response","id":"waap-1","command":"get_state","success":true,"data":{"sessionId":"%s","sessionFile":"%s","messageCount":%s}}\n' \
+                "$reported_id" "$reported_file" "$count" ;;
+        *'"type":"prompt"'*)
+            printf '%s\n' '{"type":"response","id":"waap-2","command":"prompt","success":true,"data":{"disposition":"started"}}'
+            printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop"}}'
+            printf '%s\n' '{"type":"agent_settled"}' ;;
+        *) exit 1 ;;
+    esac
+done

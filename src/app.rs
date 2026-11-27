@@ -1,5 +1,5 @@
 use std::env;
-use std::io;
+use std::io::{self, IsTerminal};
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -8,9 +8,8 @@ use log::LevelFilter;
 
 use crate::agent::{
     create_agent, list_agents, load_agent_content, print_agent_content_report, print_agent_list,
-    print_agent_stop_report, print_created_agent_report, print_steering_report,
-    print_updated_agent_report, run_agent, steer_agent, stop_agents_with_systems, update_agent,
-    AgentRunOptions,
+    print_agent_stop_report, print_created_agent_report, print_updated_agent_report, prompt_agent,
+    read_prompt, stop_agents_with_systems, update_agent, AgentRunOptions, PromptRequest,
 };
 use crate::check::{check_waap, print_check_result};
 use crate::cli::{AgentCommand, Cli, Command, TicketCommand};
@@ -92,16 +91,19 @@ pub(crate) fn run() -> ExitCode {
             }
         }
         Command::Agent { command } => match command {
-            AgentCommand::New { name } => match create_agent(waap_root, name.as_deref()) {
-                Ok(report) => {
-                    print_created_agent_report(&cli.output_format, &report);
-                    ExitCode::SUCCESS
+            AgentCommand::New { name, system } => {
+                match create_agent(waap_root, name.as_deref(), system) {
+                    Ok(report) => {
+                        print_created_agent_report(&cli.output_format, &report);
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => command_error("failed to create agent", error),
                 }
-                Err(error) => command_error("failed to create agent", error),
-            },
-            AgentCommand::Run {
+            }
+            AgentCommand::Prompt {
                 agent_id,
-                system,
+                delivery,
+                text,
                 model,
                 reasoning_effort,
             } => {
@@ -109,20 +111,25 @@ pub(crate) fn run() -> ExitCode {
                     model,
                     reasoning_effort,
                 };
-                match run_agent(
+                let stdin = io::stdin();
+                let text = match read_prompt(text, stdin.is_terminal(), stdin.lock()) {
+                    Ok(text) => text,
+                    Err(error) => return command_error("invalid prompt", error),
+                };
+                match prompt_agent(
                     repository_root,
                     waap_root,
-                    find_control_root(repository_root),
+                    || find_control_root(repository_root),
                     &cli.output_format,
-                    &agent_id,
-                    &system,
-                    &options,
+                    PromptRequest {
+                        agent_id,
+                        delivery,
+                        text,
+                        options,
+                    },
                 ) {
                     Ok(status) => status,
-                    Err(error) => {
-                        eprintln!("failed to run agent: {error}");
-                        ExitCode::from(1)
-                    }
+                    Err(error) => command_error("failed to prompt agent", error),
                 }
             }
             AgentCommand::Get { agent_id } => match load_agent_content(waap_root, &agent_id) {
@@ -135,20 +142,6 @@ pub(crate) fn run() -> ExitCode {
                     ExitCode::from(1)
                 }
             },
-            AgentCommand::Steer { agent_id, prompt } => {
-                match steer_agent(
-                    waap_root,
-                    find_control_root(repository_root),
-                    &agent_id,
-                    &prompt,
-                ) {
-                    Ok(()) => {
-                        print_steering_report(&cli.output_format, &agent_id);
-                        ExitCode::SUCCESS
-                    }
-                    Err(error) => command_error("failed to steer agent", error),
-                }
-            }
             AgentCommand::Stop { agent_id } => {
                 match stop_agents_with_systems(
                     waap_root,
@@ -162,22 +155,15 @@ pub(crate) fn run() -> ExitCode {
                     Err(error) => command_error("failed to stop agent", error),
                 }
             }
-            AgentCommand::Update {
-                agent_id,
-                set_status,
-                set_session_id,
-            } => match update_agent(
-                waap_root,
-                &agent_id,
-                set_status.as_ref(),
-                set_session_id.as_deref(),
-            ) {
-                Ok(report) => {
-                    print_updated_agent_report(&cli.output_format, &report);
-                    ExitCode::SUCCESS
+            AgentCommand::Update { agent_id, set_name } => {
+                match update_agent(waap_root, &agent_id, &set_name) {
+                    Ok(report) => {
+                        print_updated_agent_report(&cli.output_format, &report);
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => command_error("failed to update agent", error),
                 }
-                Err(error) => command_error("failed to update agent", error),
-            },
+            }
             AgentCommand::List { status } => match list_agents(waap_root, status.as_ref()) {
                 Ok(reports) => {
                     print_agent_list(&cli.output_format, &reports);

@@ -16,7 +16,7 @@ You are a waap planner agent. Your role is to develop an implementation plan for
 6. Split work into tickets that a developer agent can finish within one context window and merge without excessive conflicts.
 7. Add `depends_on` relationships when one ticket must be completed before another can be safely started.
 8. Run `waap check` after creating or updating tickets.
-9. When planning is complete, mark this agent completed.
+9. End the turn after planning. The `waap agent prompt` owner records the outcome; do not update your own agent status.
 
 # Ticket Requirements
 
@@ -61,12 +61,6 @@ Validate waap state:
 
 ```sh
 waap check
-```
-
-Mark this planner agent completed after the plan is complete:
-
-```sh
-waap agent update --agent-id ${agent_id} --set-status completed
 ```
 
 # Completion Criteria

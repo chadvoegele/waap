@@ -21,6 +21,7 @@ enum StopPhase {
     Waiting,
     Clearing(String),
     Aborting(String),
+    Accepted,
 }
 
 struct PendingStop {
@@ -66,6 +67,13 @@ impl Session {
         match self.latest_stop_reason.as_deref() {
             Some("stop") => Ok(RunOutcome::Completed),
             Some("aborted") => Ok(RunOutcome::Aborted),
+            None if self
+                .stop
+                .as_ref()
+                .is_some_and(|stop| matches!(stop.phase, StopPhase::Accepted)) =>
+            {
+                Ok(RunOutcome::Aborted)
+            }
             Some("error" | "length" | "toolUse") => Ok(RunOutcome::Failed(ExitCode::FAILURE)),
             reason => Err(build_protocol_error(format!(
                 "Pi settled with missing or unknown assistant stopReason: {reason:?}"
@@ -93,7 +101,13 @@ impl Session {
     }
 
     fn is_ready_to_finish(&self) -> bool {
-        self.settled && self.prompt_id.is_none() && self.steer.is_none() && self.stop.is_none()
+        self.settled
+            && self.prompt_id.is_none()
+            && self.steer.is_none()
+            && self
+                .stop
+                .as_ref()
+                .is_none_or(|stop| matches!(stop.phase, StopPhase::Accepted))
     }
 
     fn reject_expired_stop(&mut self) -> io::Result<bool> {
@@ -122,6 +136,13 @@ impl Session {
     fn handle_deadline(&mut self) -> io::Result<()> {
         if self.reject_expired_stop()? {
             return Ok(());
+        }
+        if self
+            .stop
+            .as_ref()
+            .is_some_and(|stop| matches!(stop.phase, StopPhase::Accepted))
+        {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "Pi accepted stop but the turn did not settle; inspect waap agent get before retrying"));
         }
         Err(io::Error::new(
             io::ErrorKind::TimedOut,
@@ -207,7 +228,7 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> PiCl
                 }
                 record = self.receive() => {
                     let record = record?;
-                    if self.handle_response(&record, &mut session).await? {
+                    if self.handle_response(&record, &mut session).await? && cancelled_before_prompt {
                         return Ok(RunOutcome::Aborted);
                     }
                     session.observe(&record)?;
@@ -366,7 +387,11 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> PiCl
             if !accepted && (session.interrupted || stop.request.is_none()) {
                 return Err(io::Error::other("Pi rejected owner interruption"));
             }
-            session.stop = None;
+            if accepted {
+                stop.phase = StopPhase::Accepted;
+            } else {
+                session.stop = None;
+            }
             return Ok(accepted);
         }
         let id = self.send("abort", json!({}), stop.deadline).await?;
@@ -521,6 +546,40 @@ mod tests {
             }
         );
         assert_eq!(outcome.unwrap(), RunOutcome::Aborted);
+    }
+
+    #[tokio::test]
+    async fn test_accepted_abort_does_not_override_natural_settlement() {
+        for settle_first in [true, false] {
+            let (mut client, mut peer) = create_client_pair();
+            let (dispatcher, mut receiver) = CommandDispatcher::create_channel();
+            let (outcome, ()) = tokio::join!(
+                client.run_session(
+                    "task",
+                    &mut receiver,
+                    std::future::pending(),
+                    Duration::from_secs(2)
+                ),
+                async {
+                    accept_prompt(&mut peer).await;
+                    let (accepted, ()) =
+                        tokio::join!(dispatcher.stop(get_test_deadline()), async {
+                            let clear = read(&mut peer, "clear_queue").await;
+                            reply(&mut peer, &clear, true).await;
+                            let abort = read(&mut peer, "abort").await;
+                            if settle_first {
+                                settle(&mut peer, "stop").await;
+                            }
+                            reply(&mut peer, &abort, true).await;
+                        });
+                    assert_eq!(accepted, Ok(()));
+                    if !settle_first {
+                        settle(&mut peer, "stop").await;
+                    }
+                }
+            );
+            assert_eq!(outcome.unwrap(), RunOutcome::Completed);
+        }
     }
 
     #[tokio::test]

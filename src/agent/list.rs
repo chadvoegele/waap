@@ -202,7 +202,7 @@ status = \"pending\"
                     creation_date: "2026-06-18T15:00:34Z".to_string(),
                     status: "ready".to_string(),
                     session_id: None,
-                    system: None,
+                    system: crate::agent::AgentSystem::Pi,
                 },
                 file_size: 123,
             },
@@ -214,7 +214,7 @@ status = \"pending\"
                     creation_date: "2026-06-18T15:00:34Z".to_string(),
                     status: "completed".to_string(),
                     session_id: Some("ses_123".to_string()),
-                    system: None,
+                    system: crate::agent::AgentSystem::Pi,
                 },
                 file_size: 456,
             },
@@ -281,7 +281,7 @@ status = \"pending\"
                 creation_date: "2026-06-18T15:00:34Z".to_string(),
                 status: status.to_string(),
                 session_id: None,
-                system: None,
+                system: crate::agent::AgentSystem::Pi,
             },
             file_size: 0,
         }
@@ -307,7 +307,7 @@ status = \"pending\"
         write_file(
             &waap_root.join(format!("agents/{agent_id}/agent.md")),
             &format!(
-                "+++\ncreation_date = {creation_date}\nrole = \"developer\"\nstatus = \"{status}\"\n+++\n\n# Purpose\n"
+                "+++\ncreation_date = {creation_date}\nrole = \"developer\"\nstatus = \"{status}\"\nsystem = \"pi\"\n+++\n\n# Purpose\n"
             ),
         );
     }

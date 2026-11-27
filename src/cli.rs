@@ -48,21 +48,30 @@ pub(crate) enum Command {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum Delivery {
+    Start,
+    Steer,
+    Asap,
+}
+
 #[derive(Debug, Subcommand)]
 pub(crate) enum AgentCommand {
-    /// Create a new agent from stdin.
+    /// Register an agent without starting a backend session.
     New {
         #[arg(long)]
         name: Option<String>,
-    },
-    /// Run an existing agent with the selected agent system.
-    Run {
-        #[arg(long)]
-        agent_id: String,
-
-        /// Agent system used to run the agent.
         #[arg(long, value_enum, default_value = "pi")]
         system: AgentSystem,
+    },
+    /// Start a turn or steer an active turn. Reads redirected stdin unless --text is supplied.
+    Prompt {
+        #[arg(long)]
+        agent_id: String,
+        #[arg(long, value_enum, default_value = "asap")]
+        delivery: Delivery,
+        #[arg(long)]
+        text: Option<String>,
 
         #[arg(long, value_parser = parse_non_empty_model)]
         model: Option<String>,
@@ -70,18 +79,10 @@ pub(crate) enum AgentCommand {
         #[arg(long, value_enum)]
         reasoning_effort: Option<ReasoningEffort>,
     },
-    /// Get an existing agent's metadata and markdown content.
+    /// Get an existing agent's record.
     Get {
         #[arg(long)]
         agent_id: String,
-    },
-    /// Submit a prompt to a running agent's current turn.
-    Steer {
-        #[arg(long)]
-        agent_id: String,
-
-        #[arg(long)]
-        prompt: String,
     },
     Stop {
         #[arg(long)]
@@ -92,11 +93,9 @@ pub(crate) enum AgentCommand {
         #[arg(long)]
         agent_id: String,
 
-        #[arg(long, value_enum)]
-        set_status: Option<AgentStatus>,
-
+        /// Change the display name without changing the agent ID or lifecycle.
         #[arg(long)]
-        set_session_id: Option<String>,
+        set_name: String,
     },
     /// List existing agent ids.
     List {
@@ -156,7 +155,7 @@ mod tests {
 
     use clap::{Parser, ValueEnum};
 
-    use super::{AgentCommand, Cli, Command, TicketCommand};
+    use super::{AgentCommand, Cli, Command, Delivery, TicketCommand};
     use crate::agent::{AgentStatus, AgentSystem, ReasoningEffort};
     use crate::cli::OutputFormat;
     use crate::ticket::TicketStatus;
@@ -438,19 +437,8 @@ mod tests {
     }
 
     #[test]
-    fn parses_failed_agent_status_for_list_and_update() {
+    fn parses_failed_agent_status_for_list() {
         let list = Cli::try_parse_from(["waap", "agent", "list", "--status", "failed"]).unwrap();
-        let update = Cli::try_parse_from([
-            "waap",
-            "agent",
-            "update",
-            "--agent-id",
-            "aa-3881fda0",
-            "--set-status",
-            "failed",
-        ])
-        .unwrap();
-
         assert!(matches!(
             list.command,
             Command::Agent {
@@ -459,103 +447,54 @@ mod tests {
                 }
             }
         ));
-        assert!(matches!(
-            update.command,
-            Command::Agent {
-                command: AgentCommand::Update {
-                    set_status: Some(AgentStatus::Failed),
-                    ..
-                }
-            }
-        ));
     }
 
     #[test]
-    fn parses_agent_run_arguments() {
-        let cli = Cli::try_parse_from([
-            "waap",
-            "--output-format",
-            "json",
-            "agent",
-            "run",
-            "--agent-id",
-            "aa-3881fda0",
-        ])
-        .unwrap();
-
-        assert!(matches!(cli.output_format, OutputFormat::Json));
-        assert!(matches!(
-            cli.command,
-            Command::Agent {
-                command: AgentCommand::Run {
-                    agent_id,
-                    system: AgentSystem::Pi,
-                    ..
-                }
-            } if agent_id == "aa-3881fda0"
-        ));
+    fn omitted_and_explicit_asap_parse_identically() {
+        for extra in [None, Some("--delivery=asap")] {
+            let args = [
+                "waap",
+                "--output-format",
+                "json",
+                "agent",
+                "prompt",
+                "--agent-id",
+                "aa-test",
+            ]
+            .into_iter()
+            .chain(extra);
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(cli.output_format, OutputFormat::Json));
+            assert!(
+                matches!(cli.command, Command::Agent { command: AgentCommand::Prompt { agent_id, delivery: Delivery::Asap, text: None, .. } } if agent_id == "aa-test")
+            );
+        }
     }
 
     #[test]
-    fn parses_agent_run_system_argument() {
-        let cli = Cli::try_parse_from([
-            "waap",
-            "agent",
-            "run",
-            "--agent-id",
-            "aa-3881fda0",
-            "--system",
-            "claude",
-        ])
-        .unwrap();
-
-        assert!(matches!(
-            cli.command,
-            Command::Agent {
-                command: AgentCommand::Run {
-                    agent_id,
-                    system: AgentSystem::Claude,
-                    ..
-                }
-            } if agent_id == "aa-3881fda0"
-        ));
+    fn parses_explicit_new_system() {
+        for (name, expected) in [
+            ("claude", AgentSystem::Claude),
+            ("codex", AgentSystem::Codex),
+            ("opencode", AgentSystem::Opencode),
+            ("pi", AgentSystem::Pi),
+        ] {
+            let cli = Cli::try_parse_from(["waap", "agent", "new", "--system", name]).unwrap();
+            assert!(
+                matches!(cli.command, Command::Agent { command: AgentCommand::New { name: None, system } } if system == expected)
+            );
+        }
     }
 
     #[test]
-    fn parses_agent_run_with_codex_system() {
+    fn parses_agent_prompt_with_codex_model_and_reasoning_effort() {
         let cli = Cli::try_parse_from([
             "waap",
             "agent",
-            "run",
+            "prompt",
             "--agent-id",
             "aa-3881fda0",
-            "--system",
-            "codex",
-        ])
-        .unwrap();
-
-        assert!(matches!(
-            cli.command,
-            Command::Agent {
-                command: AgentCommand::Run {
-                    agent_id,
-                    system: AgentSystem::Codex,
-                    ..
-                }
-            } if agent_id == "aa-3881fda0"
-        ));
-    }
-
-    #[test]
-    fn parses_agent_run_with_codex_model_and_reasoning_effort() {
-        let cli = Cli::try_parse_from([
-            "waap",
-            "agent",
-            "run",
-            "--agent-id",
-            "aa-3881fda0",
-            "--system",
-            "codex",
+            "--delivery=start",
             "--model",
             "gpt-5.4",
             "--reasoning-effort",
@@ -566,7 +505,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Agent {
-                command: AgentCommand::Run {
+                command: AgentCommand::Prompt {
                     model: Some(model),
                     reasoning_effort: Some(ReasoningEffort::High),
                     ..
@@ -576,11 +515,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_codex_run_options_independently() {
+    fn parses_codex_start_options_independently() {
         let model = Cli::try_parse_from([
             "waap",
             "agent",
-            "run",
+            "prompt",
             "--agent-id",
             "aa-3881fda0",
             "--model",
@@ -590,7 +529,7 @@ mod tests {
         let effort = Cli::try_parse_from([
             "waap",
             "agent",
-            "run",
+            "prompt",
             "--agent-id",
             "aa-3881fda0",
             "--reasoning-effort",
@@ -601,7 +540,7 @@ mod tests {
         assert!(matches!(
             model.command,
             Command::Agent {
-                command: AgentCommand::Run {
+                command: AgentCommand::Prompt {
                     model: Some(model),
                     reasoning_effort: None,
                     ..
@@ -611,7 +550,7 @@ mod tests {
         assert!(matches!(
             effort.command,
             Command::Agent {
-                command: AgentCommand::Run {
+                command: AgentCommand::Prompt {
                     model: None,
                     reasoning_effort: Some(ReasoningEffort::Ultra),
                     ..
@@ -626,7 +565,7 @@ mod tests {
             let cli = Cli::try_parse_from([
                 "waap",
                 "agent",
-                "run",
+                "prompt",
                 "--agent-id",
                 "aa-3881fda0",
                 "--reasoning-effort",
@@ -636,7 +575,7 @@ mod tests {
             assert!(matches!(
                 cli.command,
                 Command::Agent {
-                    command: AgentCommand::Run {
+                    command: AgentCommand::Prompt {
                         reasoning_effort: Some(parsed),
                         ..
                     }
@@ -646,11 +585,11 @@ mod tests {
     }
 
     #[test]
-    fn agent_run_rejects_invalid_effort_and_empty_model() {
+    fn agent_prompt_rejects_invalid_effort_and_empty_model() {
         let invalid_effort = Cli::try_parse_from([
             "waap",
             "agent",
-            "run",
+            "prompt",
             "--agent-id",
             "aa-3881fda0",
             "--reasoning-effort",
@@ -660,7 +599,7 @@ mod tests {
         let empty_model = Cli::try_parse_from([
             "waap",
             "agent",
-            "run",
+            "prompt",
             "--agent-id",
             "aa-3881fda0",
             "--model",
@@ -674,18 +613,9 @@ mod tests {
     }
 
     #[test]
-    fn agent_run_rejects_invalid_system_argument() {
-        let error = Cli::try_parse_from([
-            "waap",
-            "agent",
-            "run",
-            "--agent-id",
-            "aa-3881fda0",
-            "--system",
-            "cursor",
-        ])
-        .unwrap_err();
-
+    fn new_rejects_invalid_system_argument() {
+        let error =
+            Cli::try_parse_from(["waap", "agent", "new", "--system", "cursor"]).unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
     }
 
@@ -722,31 +652,60 @@ mod tests {
     }
 
     #[test]
-    fn agent_steer_requires_both_flags_and_preserves_prompt() {
-        for arguments in [
-            vec!["waap", "agent", "steer"],
-            vec!["waap", "agent", "steer", "--agent-id", "aa-test"],
-            vec!["waap", "agent", "steer", "--prompt", "text"],
-        ] {
-            assert_eq!(
-                Cli::try_parse_from(arguments).unwrap_err().kind(),
-                clap::error::ErrorKind::MissingRequiredArgument
-            );
-        }
+    fn prompt_requires_id_and_preserves_explicit_text() {
+        let error = Cli::try_parse_from([
+            "waap",
+            "agent",
+            "prompt",
+            "--delivery=steer",
+            "--text",
+            "text",
+        ])
+        .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
         let prompt = "  雪\n\"quoted\" '$HOME' `echo data`  ";
         let cli = Cli::try_parse_from([
             "waap",
             "agent",
-            "steer",
+            "prompt",
+            "--delivery=steer",
             "--agent-id",
             "aa-test",
-            "--prompt",
+            "--text",
             prompt,
         ])
         .unwrap();
-        assert!(matches!(cli.command, Command::Agent {
-            command: AgentCommand::Steer { agent_id, prompt: parsed }
-        } if agent_id == "aa-test" && parsed == prompt));
+        assert!(
+            matches!(cli.command, Command::Agent { command: AgentCommand::Prompt { agent_id, delivery: Delivery::Steer, text: Some(parsed), .. } } if agent_id == "aa-test" && parsed == prompt)
+        );
+    }
+
+    #[test]
+    fn prompt_rejects_future_options_and_backend_override() {
+        use clap::error::ErrorKind;
+        for (option, error) in [
+            ("--delivery=queue", ErrorKind::InvalidValue),
+            ("--image=img.png", ErrorKind::UnknownArgument),
+            ("--system=codex", ErrorKind::UnknownArgument),
+        ] {
+            assert_eq!(
+                Cli::try_parse_from(["waap", "agent", "prompt", "--agent-id", "aa-test", option])
+                    .unwrap_err()
+                    .kind(),
+                error
+            );
+        }
+        for retired in ["run", "steer"] {
+            assert_eq!(
+                Cli::try_parse_from(["waap", "agent", retired])
+                    .unwrap_err()
+                    .kind(),
+                ErrorKind::InvalidSubcommand
+            );
+        }
     }
 
     #[test]
@@ -756,7 +715,10 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Agent {
-                command: AgentCommand::New { name: None }
+                command: AgentCommand::New {
+                    name: None,
+                    system: AgentSystem::Pi
+                }
             }
         ));
     }
@@ -768,7 +730,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Agent {
-                command: AgentCommand::New { name: Some(name) }
+                command: AgentCommand::New { name: Some(name), system: AgentSystem::Pi }
             } if name == "Custom Agent"
         ));
     }
@@ -807,8 +769,8 @@ mod tests {
     }
 
     #[test]
-    fn agent_run_requires_agent_id_argument() {
-        let error = Cli::try_parse_from(["waap", "agent", "run"]).unwrap_err();
+    fn agent_prompt_requires_agent_id_argument() {
+        let error = Cli::try_parse_from(["waap", "agent", "prompt"]).unwrap_err();
 
         assert_eq!(
             error.kind(),
@@ -853,7 +815,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_agent_update_arguments() {
+    fn parses_metadata_only_update() {
         let cli = Cli::try_parse_from([
             "waap",
             "--output-format",
@@ -861,25 +823,15 @@ mod tests {
             "agent",
             "update",
             "--agent-id",
-            "aa-3881fda0",
-            "--set-status",
-            "running",
-            "--set-session-id",
-            "ses_123",
+            "aa-test",
+            "--set-name",
+            "Renamed",
         ])
         .unwrap();
-
         assert!(matches!(cli.output_format, OutputFormat::Json));
-        assert!(matches!(
-            cli.command,
-            Command::Agent {
-                command: AgentCommand::Update {
-                    agent_id,
-                    set_status: Some(AgentStatus::Running),
-                    set_session_id: Some(session_id),
-                }
-            } if agent_id == "aa-3881fda0" && session_id == "ses_123"
-        ));
+        assert!(
+            matches!(cli.command, Command::Agent { command: AgentCommand::Update { agent_id, set_name } } if agent_id == "aa-test" && set_name == "Renamed")
+        );
     }
 
     #[test]
@@ -982,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_update_rejects_invalid_status_arguments() {
+    fn agent_update_rejects_lifecycle_arguments() {
         let error = Cli::try_parse_from([
             "waap",
             "agent",
@@ -994,6 +946,6 @@ mod tests {
         ])
         .unwrap_err();
 
-        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 }

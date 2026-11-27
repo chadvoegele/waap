@@ -4,6 +4,7 @@ mod common;
 
 use std::fs;
 use std::io::{ErrorKind, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::Barrier;
@@ -39,7 +40,10 @@ impl Project {
     }
 
     fn run(&self, input: &str, args: &[&str]) -> Output {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_waap"));
+        self.run_with(Command::new(env!("CARGO_BIN_EXE_waap")), input, args)
+    }
+
+    fn run_with(&self, mut command: Command, input: &str, args: &[&str]) -> Output {
         isolate_git_config(&mut command);
         let mut child = command
             .current_dir(&self.repo)
@@ -64,6 +68,63 @@ impl Project {
         let value: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert!(value.get("commit").is_none(), "{value}");
         value
+    }
+
+    fn complete_turn(&self, forbidden_hashes: &[&str]) {
+        let runtime = tempdir().unwrap();
+        fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let backend = self._temp.path().join("claude");
+        fs::write(&backend, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(backend, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths(
+            [self._temp.path().to_owned()]
+                .into_iter()
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        let registered = self.json("", &["agent", "new", "--name", "Turn", "--system=claude"]);
+        assert_eq!(registered["metadata"]["status"], "ready");
+        assert!(registered["metadata"]["session_id"].is_null());
+        let mut command = Command::new(env!("CARGO_BIN_EXE_waap"));
+        command
+            .env("PATH", path)
+            .env("XDG_RUNTIME_DIR", runtime.path());
+        let output = self.run_with(
+            command,
+            "# Turn prompt\n",
+            &[
+                "--output-format=json",
+                "agent",
+                "prompt",
+                "--delivery=asap",
+                "--agent-id",
+                "aa-turn",
+            ],
+        );
+        assert!(output.status.success(), "{output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        for hash in forbidden_hashes {
+            assert!(!stdout.contains(hash), "{stdout}");
+            assert!(!registered.to_string().contains(hash), "{registered}");
+        }
+        let reports: Vec<Value> = stdout
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(reports.len(), 3, "{stdout}");
+        for (report, status) in reports.iter().zip(["running", "running", "completed"]) {
+            assert_eq!(report["metadata"]["status"], status);
+            for field in ["delivery", "commit", "commit_hash"] {
+                assert!(report.get(field).is_none(), "{report}");
+            }
+        }
+        let saved_id = reports[1]["metadata"]["session_id"].as_str().unwrap();
+        uuid::Uuid::parse_str(saved_id).unwrap();
+        assert_eq!(reports[2]["metadata"]["session_id"], saved_id);
+        let record = fs::read_to_string(self.state.join("agents/aa-turn/agent.md")).unwrap();
+        assert!(record.ends_with("system = \"claude\"\n+++\n"), "{record}");
+        assert!(record.contains("status = \"completed\""));
+        assert!(!record.contains("Turn prompt"));
     }
 
     fn check(&self) {
@@ -92,17 +153,46 @@ fn init_and_mutations_work_outside_any_state_checkout() {
     project.check();
 
     let name = "a\n+++\nb";
-    for (kind, id_option, id, status) in [
-        ("ticket", "--ticket-id", "tt-a-b", "completed"),
-        ("agent", "--agent-id", "aa-a-b", "aborted"),
-    ] {
-        project.json("# Body\n", &[kind, "new", "--name", name]);
-        project.json("", &[kind, "update", id_option, id, "--set-status", status]);
-        let report = project.json("", &[kind, "get", id_option, id]);
-        assert_eq!(report["metadata"]["name"], name);
-        assert_eq!(report["metadata"]["status"], status);
-        assert!(report["content"].as_str().unwrap().ends_with("# Body\n"));
-    }
+    project.json("# Body\n", &["ticket", "new", "--name", name]);
+    project.json(
+        "",
+        &[
+            "ticket",
+            "update",
+            "--ticket-id",
+            "tt-a-b",
+            "--set-status",
+            "completed",
+        ],
+    );
+    let ticket = project.json("", &["ticket", "get", "--ticket-id", "tt-a-b"]);
+    assert_eq!(ticket["metadata"]["name"], name);
+    assert_eq!(ticket["metadata"]["status"], "completed");
+    assert!(ticket["content"].as_str().unwrap().ends_with("# Body\n"));
+
+    project.json("", &["agent", "new", "--name", name]);
+    project.json("", &["agent", "stop", "--agent-id", "aa-a-b"]);
+    let agent = project.json("", &["agent", "get", "--agent-id", "aa-a-b"]);
+    assert_eq!(agent["metadata"]["name"], name);
+    assert_eq!(agent["metadata"]["status"], "aborted");
+    assert_eq!(agent["metadata"]["system"], "pi");
+    assert_eq!(agent["content"], "");
+    assert!(agent["metadata"]["session_id"].is_null());
+    let record = state.join("agents/aa-a-b/agent.md");
+    let stopped = fs::read(&record).unwrap();
+    let resume = project.run("Follow-up", &["agent", "prompt", "--agent-id", "aa-a-b"]);
+    assert!(!resume.status.success(), "{resume:?}");
+    assert!(String::from_utf8_lossy(&resume.stderr).contains("no saved session to resume"));
+    assert_eq!(fs::read(record).unwrap(), stopped);
+
+    let head = git(&project.repo, &["rev-parse", "HEAD"]);
+    project.complete_turn(&[&head]);
+    assert!(!state.join(".git").exists());
+    assert_eq!(git(&project.repo, &["show-ref"]), refs_before);
+    assert_eq!(
+        git(&project.repo, &["worktree", "list", "--porcelain"]),
+        worktrees_before
+    );
     project.json("", &["init"]);
     assert!(state.join("tickets/tt-a-b/ticket.md").exists());
     assert!(state.join("agents/aa-a-b/agent.md").exists());
@@ -126,6 +216,10 @@ fn user_checkout_preserves_index_refs_and_git_config_while_index_is_locked() {
     let config = fs::read(git_dir.join("config")).unwrap();
     let refs = git(state, &["show-ref"]);
     let head = fs::read(git_dir.join("HEAD")).unwrap();
+    let state_commit = git(state, &["rev-parse", "HEAD"]);
+    let app_commit = git(&project.repo, &["rev-parse", "HEAD"]);
+    let app_refs = git(&project.repo, &["show-ref"]);
+    let worktrees = git(&project.repo, &["worktree", "list", "--porcelain"]);
 
     project.json("", &["init"]);
     project.json("# Body\n", &["ticket", "new", "--name", "My Task"]);
@@ -140,18 +234,21 @@ fn user_checkout_preserves_index_refs_and_git_config_while_index_is_locked() {
             "in-progress",
         ],
     );
-    project.json(
-        "# Purpose\n",
-        &["agent", "new", "--name", "Custom Agent_123"],
-    );
+    project.json("", &["agent", "new", "--name", "Custom Agent_123"]);
     let report = project.json("", &["agent", "stop", "--agent-id", "aa-custom-agent123"]);
     assert_eq!(report["stopped_agents"][0]["metadata"]["status"], "aborted");
     assert_eq!(
         project.json("", &["agent", "stop"])["stopped_agents"],
         serde_json::json!([])
     );
+    project.complete_turn(&[&state_commit, &app_commit]);
     project.check();
 
+    assert_eq!(git(&project.repo, &["show-ref"]), app_refs);
+    assert_eq!(
+        git(&project.repo, &["worktree", "list", "--porcelain"]),
+        worktrees
+    );
     assert!(state.join("tickets/tt-my-task/ticket.md").is_file());
     assert_eq!(fs::read(&lock).unwrap(), b"user lock");
     assert_eq!(fs::read(git_dir.join("index")).unwrap(), index);
@@ -166,30 +263,58 @@ fn user_checkout_preserves_index_refs_and_git_config_while_index_is_locked() {
 }
 
 #[test]
-fn agent_update_rejects_invalid_transitions_without_changing_record() {
+fn invalid_prompt_input_and_options_leave_the_ready_record_unchanged() {
     let project = Project::initialized();
-    let report = project.json("# Purpose\n", &["agent", "new"]);
+    project.json("", &["agent", "new", "--name", "No prompt"]);
+    let record = project.state.join("agents/aa-no-prompt/agent.md");
+    let before = fs::read(&record).unwrap();
+    for (input, extra, diagnostic) in [
+        ("", None, "non-whitespace"),
+        (" \t\r\n", None, "non-whitespace"),
+        ("valid stdin", Some("--text="), "non-whitespace"),
+        ("valid stdin", Some("--image=image.png"), "--image"),
+        ("valid stdin", Some("--delivery=queue"), "queue"),
+    ] {
+        let mut args = vec!["agent", "prompt", "--agent-id", "aa-no-prompt"];
+        args.extend(extra);
+        let output = project.run(input, &args);
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(diagnostic),
+            "{output:?}"
+        );
+        assert!(output.stdout.is_empty(), "{output:?}");
+        assert_eq!(fs::read(&record).unwrap(), before);
+    }
+}
+
+#[test]
+fn agent_update_cannot_override_status_session_or_backend() {
+    let project = Project::initialized();
+    let report = project.json("", &["agent", "new"]);
     let id = report["agent_id"].as_str().unwrap();
     let path = project.state.join("agents").join(id).join("agent.md");
-    let update = |status| {
-        project.run(
-            "",
-            &["agent", "update", "--agent-id", id, "--set-status", status],
-        )
-    };
     let ready = fs::read(&path).unwrap();
-    let rejected = update("completed");
-    assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr)
-        .contains("invalid agent status transition: ready -> completed"));
-    assert_eq!(fs::read(&path).unwrap(), ready);
-    assert!(update("running").status.success());
-    let running = fs::read(&path).unwrap();
-    let rejected = update("aborted");
-    assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr)
-        .contains(&format!("waap agent stop --agent-id {id}")));
-    assert_eq!(fs::read(&path).unwrap(), running);
+    for (flag, value) in [
+        ("--set-status", "completed"),
+        ("--set-status", "running"),
+        ("--set-session-id", "session"),
+        ("--set-system", "codex"),
+    ] {
+        let rejected = project.run("", &["agent", "update", "--agent-id", id, flag, value]);
+        assert!(!rejected.status.success());
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains(flag));
+        assert_eq!(fs::read(&path).unwrap(), ready);
+    }
+    let renamed = project.json(
+        "",
+        &["agent", "update", "--agent-id", id, "--set-name", "Renamed"],
+    );
+    assert_eq!(renamed["agent_id"], id);
+    assert_eq!(renamed["metadata"]["name"], "Renamed");
+    assert_eq!(renamed["metadata"]["status"], "ready");
+    assert_eq!(renamed["metadata"]["system"], "pi");
+    assert!(renamed["metadata"]["session_id"].is_null());
 }
 
 #[test]
