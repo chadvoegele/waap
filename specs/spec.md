@@ -228,9 +228,9 @@ Frontmatter is validated strictly: unknown fields outside the documented agent a
 
 Agents can be run with different agent systems, selected with `waap agent run --system`. The chosen system and the resulting session id are recorded in the agent metadata.
 
-### Worktree Lifecycle
+### Execution Directory
 
-`waap agent run` owns the agent worktree lifecycle. It first persists the agent's `running` status and chosen system in shared state, then creates an isolated Git worktree at `worktrees/$agent_id` from the application checkout's HEAD, on a fresh branch named after the agent. Worktree and integration policy belong to the editable detailed agent instructions. Finally, the worktree is removed.
+`waap agent run` persists the agent's `running` status and chosen system in shared state before starting the backend. The backend starts at the root of the application checkout containing the invocation directory. The launcher does not create or remove Git worktrees; the [developer role instructions](../.agents/skills/waap/roles/developer/agent.md) manage isolation and integration.
 
 ### opencode (default)
 

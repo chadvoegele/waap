@@ -1,5 +1,7 @@
 # Add `codex` as an agent-run system
 
+The [execution directory specification](spec.md#execution-directory) supersedes any launcher-managed worktree behavior described here.
+
 This plan describes the original Codex integration. The [shared state directory specification](waap-state-worktree.md) supersedes its state-commit behavior.
 
 Implementation plan for adding `codex` as a third value of `waap agent run

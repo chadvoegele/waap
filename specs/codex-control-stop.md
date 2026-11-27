@@ -1,10 +1,12 @@
 +++
 status = "final"
 created = 2026-11-01
-last_update = 2026-11-25
+last_update = 2026-11-27
 +++
 
 # Codex stop through run control
+
+The [execution directory specification](spec.md#execution-directory) supersedes any launcher-managed worktree behavior described here.
 
 ## Purpose
 

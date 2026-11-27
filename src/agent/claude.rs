@@ -34,7 +34,7 @@ impl ClaudeBackend {
             &self.config,
             context.agent_id,
             &session_id,
-            context.worktree_dir,
+            context.repository_root,
             context.prompt,
         );
         Ok(AgentSessionRun::new(
@@ -125,7 +125,7 @@ fn build_claude_run_command(
     config: &ClaudeRunConfig,
     _agent_id: &str,
     session_id: &str,
-    worktree_dir: &Path,
+    repository_root: &Path,
     prompt: &str,
 ) -> ClaudeRunCommand {
     let mut args = vec![
@@ -150,7 +150,7 @@ fn build_claude_run_command(
     ClaudeRunCommand {
         program: "claude".to_string(),
         args,
-        working_dir: worktree_dir.to_path_buf(),
+        working_dir: repository_root.to_path_buf(),
     }
 }
 

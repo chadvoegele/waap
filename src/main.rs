@@ -3,7 +3,6 @@ mod app;
 mod check;
 mod cli;
 mod frontmatter;
-mod git;
 mod ids;
 mod init;
 mod record;

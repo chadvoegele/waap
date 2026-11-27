@@ -30,7 +30,6 @@ pub(super) struct StartContext<'a> {
     pub(super) agent_id: &'a str,
     pub(super) prompt: &'a str,
     pub(super) repository_root: &'a Path,
-    pub(super) worktree_dir: &'a Path,
 }
 
 pub(super) struct AgentSessionRun {
@@ -173,8 +172,6 @@ pub(super) mod fake {
         pub(crate) agent_id: String,
         pub(crate) prompt: String,
         pub(crate) repository_root: PathBuf,
-        pub(crate) worktree_dir: PathBuf,
-        pub(crate) worktree_existed: bool,
     }
     #[derive(Debug, PartialEq, Eq)]
     pub(crate) struct AbortCall {
@@ -269,8 +266,6 @@ pub(super) mod fake {
                 agent_id: context.agent_id.into(),
                 prompt: context.prompt.into(),
                 repository_root: context.repository_root.into(),
-                worktree_dir: context.worktree_dir.into(),
-                worktree_existed: context.worktree_dir.is_dir(),
             });
             if let Some(error) = self.start_error.take() {
                 return Err(io::Error::other(error));

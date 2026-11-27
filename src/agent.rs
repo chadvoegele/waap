@@ -34,7 +34,6 @@ mod steer;
 mod stop;
 mod unsupported_commands;
 mod update;
-mod worktree;
 
 #[cfg(test)]
 static OPENCODE_ENV_LOCK: Mutex<()> = Mutex::new(());
