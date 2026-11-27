@@ -1,7 +1,7 @@
 +++
 status = "draft"
 created = 2026-11-26
-last_update = 2026-11-26
+last_update = 2026-11-27
 +++
 
 # Agent prompt delivery
@@ -29,13 +29,13 @@ Today, `agent new` stores a prompt in `agent.md`. `agent run` sends a reference 
 ## Specification
 
 ```sh
-waap agent new --system pi
-# Agent ID: aa-1234abcd
-waap agent prompt --agent-id aa-1234abcd --delivery=start < task.md
+waap agent new --system pi --name 'Keyboard navigation'
+# Agent ID: aa-keyboard-navigation
+waap agent prompt --agent-id aa-keyboard-navigation --delivery=start < task.md
 # From another terminal, while a turn is active:
-waap agent prompt --agent-id aa-1234abcd --delivery=steer --text='Focus on keyboard navigation.'
+waap agent prompt --agent-id aa-keyboard-navigation --delivery=steer --text='Focus on keyboard navigation.'
 # Omit --delivery to start or steer based on whether a turn is active:
-waap agent prompt --agent-id aa-1234abcd --text='Check the accessibility notes.'
+waap agent prompt --agent-id aa-keyboard-navigation --text='Check the accessibility notes.'
 ```
 
 ```text
@@ -47,7 +47,9 @@ Prompt input ───→ Delivery routing ───→ Turn owner ───→ 
 
 ### Registration and input
 
-`agent new [--system <backend>]` must generate and return a WAAP agent ID and write a metadata-only `agent.md` with `creation_date`, `status = "ready"`, and `system`. The default is Pi. Registration must not read stdin, start a backend, or assign a backend `session_id`. The new interface omits `--name`; the generated agent ID is the handle for later commands.
+`agent new [--system <backend>] [--name <name>]` must generate and return a WAAP agent ID and write a metadata-only `agent.md` with `creation_date`, `status = "ready"`, and `system`. The default is Pi. Registration must not read stdin, start a backend, or assign a backend `session_id`.
+
+Naming is unchanged. With `--name`, WAAP stores the supplied name in `name` and generates an `aa-` ID from its slug using the existing length and collision rules. Without `--name`, WAAP generates an `aa-` ID with eight random hexadecimal characters and omits `name`. Later commands address the agent by ID.
 
 `agent prompt --agent-id <id> [--delivery=<mode>] [--text=<text>]` must use `--text` if supplied, otherwise read redirected stdin to EOF. It must reject missing or whitespace-only input without changing state or contacting the backend, and must not wait for interactive input. It must preserve the text and send it as prompt content, without writing it to `agent.md` or constructing a file-reference prompt.
 
@@ -67,7 +69,25 @@ Route each request once. If the chosen turn ends before live delivery, the live 
 
 For a `ready` agent, `start` must create a session on the registered backend, persist the adapter's session ID, and send the first prompt. For a `completed` or `aborted` agent, `start` must reopen the session identified by the stored `system` and `session_id` and send the prompt as a new turn. Missing metadata, a missing session, or an unsupported resume operation must result in an error, not a replacement session. WAAP must not require a backend to accept the WAAP agent ID as its session ID.
 
-Only one owner may start turns for an agent at a time. WAAP must claim `running` atomically before starting backend work. The owner remains attached and records the final outcome as `completed`, `aborted`, or `failed`. If reopening fails before submission, restore the prior status and keep the session identity. `agent update` must not be able to claim a turn.
+### Agent lifecycle
+
+`running` means an invocation owns the turn, including startup and settlement. It does not guarantee that the backend is ready to accept steering. `completed`, `aborted`, and `failed` record the latest outcome, not whether the backend session still exists.
+
+| From | Action or event | To |
+| --- | --- | --- |
+| No record | `agent new` registers the agent. | `ready` |
+| `ready` | `prompt` takes the `start` path and claims the first turn. | `running` |
+| `completed` or `aborted` | `prompt` takes the `start` path and claims a follow-up with a saved session ID. | `running` |
+| `ready` | `agent stop --agent-id <id>` cancels the agent before its first turn. | `aborted` |
+| `running` | `prompt` takes the `steer` path and delivers to the active turn. | `running` (unchanged) |
+| `running` | The turn finishes successfully. | `completed` |
+| `running` | The owner confirms the turn was stopped after `agent stop` or an interrupt. | `aborted` |
+| `running` | First-session startup or turn execution fails. | `failed` |
+| `running` | A follow-up fails to reopen its saved session before submission. | Prior `completed` or `aborted` status |
+
+WAAP must claim `running` atomically before starting backend work. Only one invocation may own a turn. Its owner stays attached until settlement and persists the actual outcome. Accepting a stop request alone does not end the turn; if natural completion wins the race, record `completed`. Stopping a `ready` agent leaves no session to resume. `agent stop` without an ID targets only `running` agents.
+
+This table lists all lifecycle transitions. Rejected commands and metadata updates do not change status; `failed` has no outgoing transition in this release.
 
 ### Execution directory
 
@@ -75,7 +95,7 @@ Use the resolved repository root as the backend's working directory. WAAP must n
 
 ## Compatibility
 
-`agent prompt` replaces `agent run` and `agent steer`; steering callers must select `--delivery=steer`. Scripts must move prompt redirection from `new` to `prompt` and backend selection to `new`. Existing records stay readable: retain legacy `name` and Markdown bodies, but never use them as prompt input. A legacy `ready` record without a backend or session ID uses the default backend on first start. Leave historical execution worktrees and branches untouched.
+Backward compatibility with the previous agent record format and CLI structure is not required. No state migration, legacy record reader, or command aliases are required. `agent prompt` replaces `agent run` and `agent steer`; callers that require steering only must use `--delivery=steer`. Scripts must move prompt redirection from `new` to `prompt` and select the backend at `new`. Leave historical execution worktrees and branches untouched.
 
 Backend resume may ship incrementally. Pi is the proposed first backend; each backend must demonstrate exact-session resume before advertising support. Existing per-turn model and reasoning options should remain available when starting turns without changing the registered backend.
 
@@ -85,7 +105,8 @@ Backend resume may ship incrementally. Pi is the proposed first backend; each ba
 
 ## Verification
 
-- Verify that `new` records the explicit or default backend without reading stdin or opening a session.
+- Verify registration with and without `--name`, including stored names, slug collisions, and generated IDs. Verify that `new` records the explicit or default backend without reading stdin or opening a session.
+- Exercise every lifecycle transition, including stop before first start, natural completion racing a stop, and rollback after a failed reopen. Verify that steering, rejected commands, and metadata updates leave status unchanged.
 - Verify exact text delivery from `--text` and redirected Markdown. Reject missing or blank input and `--image` without changing state. Verify no prompt content is written to `agent.md`.
 - Start a first turn, complete it, and start a follow-up. Verify that it recalls information from the first turn and preserves the session ID. Repeat after an explicit stop with a saved session ID.
 - Verify all three delivery modes against active and idle agents, including that omitting `--delivery` behaves like explicit `asap` in both cases. Verify that `asap` does not fall back after failed steering and that a turn finishing during live delivery cannot silently trigger a new turn. Verify that `--delivery=queue` is rejected without changing state.
