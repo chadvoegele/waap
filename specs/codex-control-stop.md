@@ -1,10 +1,12 @@
 +++
 status = "final"
 created = 2026-11-01
-last_update = 2026-11-02
+last_update = 2026-11-27
 +++
 
 # Codex stop through run control
+
+The [execution directory specification](spec.md#execution-directory) supersedes any launcher-managed worktree behavior described here.
 
 ## Purpose
 
@@ -78,9 +80,8 @@ flowchart LR
 ```
 
 For Codex, successful CLI output confirms native acceptance; cleanup and terminal
-persistence may still be in progress. JSON retains `stopped_agents` and `commit`:
-a reported agent may still be `running`, and a Codex-only stop has `commit: null`
-because the owner commits its final status. Human output says `Stop accepted for
+persistence may still be in progress. JSON reports `stopped_agents`; an agent may
+still be `running` while its owner persists the final status. Human output says `Stop accepted for
 agent` whenever the explicit outcome is acceptance, even if a reload already sees
 a terminal status; `waap agent get` reports the final state.
 

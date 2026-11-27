@@ -146,14 +146,13 @@ def verify_run(repo, env, agent, provider):
     record = (repo / ".state/agents" / agent / "agent.md").read_text()
     assert f'status = "{status}"' in record, record
     assert 'system = "pi"' in record and "session_id =" in record
-    assert not (repo / "worktrees" / agent).exists()
     assert not list(Path(env["XDG_RUNTIME_DIR"]).rglob("*.sock"))
     assert list((config / "sessions").rglob("*.jsonl")), "Pi did not persist the real session"
     if provider.mode == "complete":
         assert "real Pi tool execution" in run(["git", "show", f"{agent}:smoke.txt"], cwd=repo, env=env)
         assert any("Include snow 雪 in your review" in json.dumps(request, ensure_ascii=False)
                    for request in provider.requests[1:]), provider.requests
-    logging.info("real Pi %s: %s, session persisted, socket/worktree cleaned", provider.mode, status)
+    logging.info("real Pi %s: %s, session persisted, socket cleaned", provider.mode, status)
 
 
 def run_smoke_case(base, repo, env, provider):

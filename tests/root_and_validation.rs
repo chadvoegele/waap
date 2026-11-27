@@ -233,12 +233,12 @@ fn agent_and_ticket_commands_do_not_operate_on_invalid_state() {
         std::fs::read_dir(state_root(dir.path()).join("agents"))
             .unwrap()
             .count(),
-        2
+        1
     );
     assert_eq!(
         std::fs::read_dir(state_root(dir.path()).join("tickets"))
             .unwrap()
             .count(),
-        1
+        0
     );
 }

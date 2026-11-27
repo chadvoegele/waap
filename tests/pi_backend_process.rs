@@ -97,10 +97,6 @@ impl Project {
             .join(hash)
             .join(format!("{agent_id}.sock"))
     }
-
-    fn get_worktree_path(&self, agent_id: &str) -> PathBuf {
-        self.root.join("worktrees").join(agent_id)
-    }
 }
 
 fn assert_success(output: &Output) {
@@ -226,16 +222,11 @@ while IFS= read -r ignored; do :; done
     assert!(prompt_state.contains("system = \"pi\""));
     assert!(prompt_state.contains("session_id = \"pi-process-session\""));
     assert!(prompt_state.contains("Complete when instructions in"));
-    assert!(!project.get_worktree_path(&agent_id).exists());
-    let subjects = git(&project.state, &["log", "--pretty=%s"]);
-    assert!(subjects.contains(&format!("waap agent run {agent_id}")));
-    assert!(subjects.contains(&format!("waap agent pi session {agent_id}")));
-    assert!(subjects.contains(&format!("waap agent completed {agent_id}")));
     assert_reaped(&pid);
 }
 
 #[test]
-fn test_fake_pi_failure_exits_nonzero_persists_failed_and_cleans_worktree() {
+fn test_fake_pi_failure_exits_nonzero_persists_failed() {
     let project = Project::new();
     let agent_id = project.create_agent("pi-process-failure");
     let fake = project.root.join("fake-pi-failure");
@@ -263,7 +254,6 @@ while IFS= read -r ignored; do :; done
 
     assert!(!output.status.success());
     assert_record(&project, &agent_id, "failed", "pi", "pi-failed-session");
-    assert!(!project.get_worktree_path(&agent_id).exists());
     assert_reaped(&pid);
 }
 
@@ -377,7 +367,6 @@ done
                 .unwrap()
     );
     assert!(!project.root.join("injected").exists());
-    assert!(!project.get_worktree_path(&agent_id).exists());
     assert!(!project.get_socket_path(&agent_id).exists());
     assert_reaped(&pid);
 }
@@ -396,11 +385,6 @@ fn test_stop_rejects_running_record_without_system_without_mutation() {
         ),
     )
     .unwrap();
-    git(&project.state, &["add", "agents"]);
-    git(
-        &project.state,
-        &["commit", "-q", "-m", "seed legacy running record"],
-    );
     let before_record = fs::read(&record_path).unwrap();
     let before_head = git(&project.state, &["rev-parse", "HEAD"]);
 
@@ -487,7 +471,6 @@ done
             .count(),
         1
     );
-    assert!(!project.get_worktree_path(&agent_id).exists());
 }
 
 #[test]
@@ -530,7 +513,6 @@ while IFS= read -r ignored; do :; done
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("handled"));
         assert_record(&project, &agent_id, "failed", "pi", "handled-session");
-        assert!(!project.get_worktree_path(&agent_id).exists());
         assert_reaped(&pid);
     }
 }
@@ -569,7 +551,6 @@ while IFS= read -r ignored; do :; done
         assert!(!String::from_utf8_lossy(&output.stderr).contains("Pi RPC did not exit"));
         assert_record(&project, &agent_id, status, "pi", "shutdown-session");
         assert_reaped(&pid);
-        assert!(!project.get_worktree_path(&agent_id).exists());
         assert!(!project.get_socket_path(&agent_id).exists());
     }
 }
@@ -623,7 +604,6 @@ while IFS= read -r ignored; do :; done
             "shutdown-error-session",
         );
         assert_reaped(&pid);
-        assert!(!project.get_worktree_path(&agent_id).exists());
         assert!(!project.get_socket_path(&agent_id).exists());
     }
 }
@@ -673,7 +653,6 @@ while IFS= read -r ignored; do :; done
     assert_success(&output);
     assert_record(&project, &agent_id, "completed", "pi", "descendant-session");
     assert_reaped(&pid);
-    assert!(!project.get_worktree_path(&agent_id).exists());
 }
 
 #[test]
@@ -695,7 +674,6 @@ fn test_startup_protocol_failures_reap_child_without_submitting_task_work() {
         let record = fs::read_to_string(project.get_agent_record_path(&agent_id)).unwrap();
         assert!(record.contains("status = \"failed\""));
         assert!(!record.contains("session_id"));
-        assert!(!project.get_worktree_path(&agent_id).exists());
         assert!(!project.get_socket_path(&agent_id).exists());
         assert_reaped(&pid);
     }
@@ -757,7 +735,6 @@ done
         1
     );
     assert!(!project.get_socket_path(&agent_id).exists());
-    assert!(!project.get_worktree_path(&agent_id).exists());
     assert_reaped(&pid);
 }
 
@@ -823,7 +800,6 @@ done
         assert_eq!(commands.matches("\"type\":\"clear_queue\"").count(), 1);
         assert_eq!(commands.matches("\"type\":\"abort\"").count(), 1);
         assert!(!project.get_socket_path(&agent_id).exists());
-        assert!(!project.get_worktree_path(&agent_id).exists());
         assert_reaped(&pid);
     }
 }

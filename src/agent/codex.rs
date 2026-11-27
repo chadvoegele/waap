@@ -66,11 +66,11 @@ impl CodexBackend {
         let mut sigterm =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-        let mut server = spawn_codex_app_server(&self.config, context.worktree_dir)?;
+        let mut server = spawn_codex_app_server(&self.config, context.repository_root)?;
         let startup = tokio::select! {
             result = async {
                 server.client.initialize().await?;
-                server.client.thread_start(context.worktree_dir).await
+                server.client.thread_start(context.repository_root).await
             } => result,
             _ = sigint.recv() => Err(io::Error::new(io::ErrorKind::Interrupted, "Codex startup interrupted")),
             _ = sigterm.recv() => Err(io::Error::new(io::ErrorKind::Interrupted, "Codex startup interrupted")),
@@ -78,10 +78,7 @@ impl CodexBackend {
         let thread_id = match startup {
             Ok(thread_id) => thread_id,
             Err(error) => {
-                return super::worktree::collapse_errors(
-                    Err(error),
-                    server.process.terminate().await,
-                )
+                return super::run::collapse_errors(Err(error), server.process.terminate().await)
             }
         };
         Ok(AgentSessionRun::new(
@@ -350,9 +347,9 @@ struct CodexClient<R, W, O> {
 
 fn spawn_codex_app_server(
     config: &CodexRunConfig,
-    worktree_dir: &Path,
+    repository_root: &Path,
 ) -> io::Result<CodexAppServer> {
-    let mut command = codex_app_server_command(worktree_dir);
+    let mut command = codex_app_server_command(repository_root);
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -373,12 +370,12 @@ fn spawn_codex_app_server(
     })
 }
 
-fn codex_app_server_command(worktree_dir: &Path) -> ProcessCommand {
+fn codex_app_server_command(repository_root: &Path) -> ProcessCommand {
     let mut command = ProcessCommand::new("codex");
     command
         .arg("app-server")
         .arg("--stdio")
-        .current_dir(worktree_dir);
+        .current_dir(repository_root);
     command
 }
 
@@ -2278,9 +2275,9 @@ mod tests {
 
     #[test]
     fn thread_start_params_encode_never_approvals_and_full_access() {
-        let worktree_dir = PathBuf::from("/repo/with space");
-        let params = thread_start_params(&worktree_dir, Some("o3"));
-        let command = codex_app_server_command(&worktree_dir);
+        let repository_root = PathBuf::from("/repo/with space");
+        let params = thread_start_params(&repository_root, Some("o3"));
+        let command = codex_app_server_command(&repository_root);
 
         assert_eq!(params["approvalPolicy"], json!("never"));
         assert_eq!(params["sandbox"], json!("danger-full-access"));
@@ -2295,7 +2292,7 @@ mod tests {
         );
         assert_eq!(
             command.as_std().get_current_dir(),
-            Some(worktree_dir.as_path())
+            Some(repository_root.as_path())
         );
     }
 

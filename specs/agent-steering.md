@@ -1,10 +1,12 @@
 +++
 status = "draft"
 created = 2026-10-20
-last_update = 2026-10-29
+last_update = 2026-11-27
 +++
 
 # Agent steering
+
+The [execution directory specification](spec.md#execution-directory) supersedes any launcher-managed worktree behavior described here.
 
 ## Purpose
 
@@ -136,7 +138,7 @@ Existing agent IDs remain readable under the existing validation rules; socket
 availability depends on the full path length, not the generation limit.
 
 `XDG_RUNTIME_DIR` is a runtime directory, typically `/run/user/$UID`, not
-`~/.local/state`. The socket must not be placed in the waap state worktree or
+`~/.local/state`. The socket must not be placed in the waap state directory or
 tracked by Git.
 
 Runtime directories must be private to the current OS user, and socket access
@@ -244,7 +246,7 @@ The following are logical interface contracts, not mandated Rust type names:
 
 Existing persistent agent metadata remains unchanged: `status`, `system`, and
 `session_id` retain their meanings; Codex `session_id` is its thread ID. Steering
-must not rewrite these fields, modify `agent.md`, or create a waap state commit.
+must not rewrite these fields or modify `agent.md`.
 
 Transient shared state consists of the listener, one active connection, and its
 request correlation. The Codex backend alone owns its thread ID, active turn
@@ -276,7 +278,7 @@ prompt-free stop operation and waits for clear-queue/abort acknowledgement.
   nonempty text, and human/JSON success output.
 - Orchestration tests: unknown agent, every non-running status, active backend
   dispatch, Claude/OpenCode not-implemented responses originating in their backend
-  implementations, and no state changes or commits.
+  implementations, and no state changes.
 - Protocol tests: correct `turn/steer` payload, expected active turn ID, Codex
   acceptance/rejection, and response correlation amid unrelated notifications.
 - Local-control integration tests: deliver to an already-running fake Codex

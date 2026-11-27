@@ -100,7 +100,7 @@ fn build_invalid_input_error(message: impl Into<String>) -> io::Error {
 pub(super) fn build_pi_command(
     config: &PiRunConfig,
     agent_id: &str,
-    worktree_dir: &Path,
+    repository_root: &Path,
 ) -> Command {
     let mut command = Command::new(&config.executable);
     command
@@ -109,7 +109,7 @@ pub(super) fn build_pi_command(
         .arg("--approve")
         .arg("--name")
         .arg(format!("waap {agent_id}"))
-        .current_dir(worktree_dir);
+        .current_dir(repository_root);
     if let Some(model) = &config.model {
         command.arg("--model").arg(model);
     }

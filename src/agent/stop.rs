@@ -10,14 +10,12 @@ use crate::agent::{
     write_agent_record, AgentReport, AgentStatus,
 };
 use crate::cli::OutputFormat;
-use crate::git::commit_paths;
 use crate::record::{list_record_ids, WaapRecordKind};
 use crate::root::ControlRoot;
 
 #[derive(Debug)]
 pub(crate) struct AgentStopReport {
     agent_stops: Vec<AgentStop>,
-    pub(crate) commit: Option<String>,
 }
 
 #[derive(Debug)]
@@ -42,9 +40,6 @@ pub(crate) fn print_agent_stop_report(output_format: &OutputFormat, report: &Age
             for agent in &report.agent_stops {
                 print_agent_report_human(agent.describe_outcome(), &agent.report);
             }
-            if let Some(commit) = &report.commit {
-                println!("Commit: {commit}");
-            }
         }
     }
 }
@@ -52,7 +47,6 @@ pub(crate) fn print_agent_stop_report(output_format: &OutputFormat, report: &Age
 fn agent_stop_json(report: &AgentStopReport) -> serde_json::Value {
     json!({
         "stopped_agents": report.agent_stops.iter().map(|agent| agent_report_json(&agent.report)).collect::<Vec<_>>(),
-        "commit": report.commit,
     })
 }
 
@@ -66,20 +60,18 @@ pub(crate) fn stop_agents_with_systems(
         let selected = select_agents_to_stop(waap_root, agent_id, &lock)?;
         if let [report] = selected.as_slice() {
             if report.metadata.status == AgentStatus::Ready.as_str() {
-                let (report, commit) = persist_stopped_agent_locked(waap_root, report, &lock)?;
+                let report = persist_stopped_agent_locked(waap_root, report, &lock)?;
                 return Ok(AgentStopReport {
                     agent_stops: vec![AgentStop {
                         report,
                         outcome: AbortOutcome::Stopped,
                     }],
-                    commit,
                 });
             }
         }
         selected
     };
     let mut agent_stops = Vec::new();
-    let mut commit = None;
     for report in selected {
         let mut backend = report
             .metadata
@@ -95,15 +87,14 @@ pub(crate) fn stop_agents_with_systems(
                 )
             })?
             .backend(None)?;
-        let (stopped, state_commit) =
-            stop_agent_session(waap_root, &control_root, &report, &mut backend)?;
-        commit = state_commit.or(commit);
-        agent_stops.push(stopped);
+        agent_stops.push(stop_agent_session(
+            waap_root,
+            &control_root,
+            &report,
+            &mut backend,
+        )?);
     }
-    Ok(AgentStopReport {
-        agent_stops,
-        commit,
-    })
+    Ok(AgentStopReport { agent_stops })
 }
 
 fn select_agents_to_stop(
@@ -134,13 +125,13 @@ fn stop_agent_session(
     control_root: &io::Result<ControlRoot>,
     report: &AgentReport,
     backend: &mut Backend,
-) -> io::Result<(AgentStop, Option<String>)> {
+) -> io::Result<AgentStop> {
     let outcome = abort_agent_session(waap_root, control_root, report, backend)?;
-    let (report, commit) = match outcome {
-        AbortOutcome::StopAccepted => (load_agent_report(waap_root, &report.agent_id)?, None),
+    let report = match outcome {
+        AbortOutcome::StopAccepted => load_agent_report(waap_root, &report.agent_id)?,
         AbortOutcome::Stopped => persist_stopped_agent(waap_root, report)?,
     };
-    Ok((AgentStop { report, outcome }, commit))
+    Ok(AgentStop { report, outcome })
 }
 
 fn abort_agent_session(
@@ -157,10 +148,7 @@ fn abort_agent_session(
     }))
 }
 
-fn persist_stopped_agent(
-    waap_root: &Path,
-    expected: &AgentReport,
-) -> io::Result<(AgentReport, Option<String>)> {
+fn persist_stopped_agent(waap_root: &Path, expected: &AgentReport) -> io::Result<AgentReport> {
     let lock = crate::state::StateLock::acquire(waap_root)?;
     persist_stopped_agent_locked(waap_root, expected, &lock)
 }
@@ -169,25 +157,13 @@ fn persist_stopped_agent_locked(
     waap_root: &Path,
     expected: &AgentReport,
     _lock: &crate::state::StateLock,
-) -> io::Result<(AgentReport, Option<String>)> {
+) -> io::Result<AgentReport> {
     let id = &expected.agent_id;
     let current = load_agent_report(waap_root, id)?;
     if current.metadata != expected.metadata {
-        return Ok((current, None));
+        return Ok(current);
     }
-    let stopped = mark_agent_aborted(waap_root, id)?;
-    let commit = commit_paths(
-        waap_root,
-        &[stopped.path.as_path()],
-        &format!("waap agent stop {id}"),
-    )
-    .map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("failed to commit waap state change: {error}"),
-        )
-    })?;
-    Ok((stopped, Some(commit)))
+    mark_agent_aborted(waap_root, id)
 }
 
 #[cfg(test)]
@@ -223,7 +199,7 @@ fn stop_agent_with_backend(
         &report,
         backend,
     )
-    .map(|(agent, _)| Some(agent.report))
+    .map(|agent| Some(agent.report))
 }
 
 fn mark_agent_aborted(waap_root: &Path, agent_id: &str) -> io::Result<AgentReport> {
@@ -277,13 +253,11 @@ mod tests {
                     assert_eq!(stopped.describe_outcome(), header);
                     let json = agent_stop_json(&AgentStopReport {
                         agent_stops: vec![stopped],
-                        commit: None,
                     });
                     assert_eq!(
                         json,
                         json!({
                             "stopped_agents": [crate::agent::agent_report_json(&report)],
-                            "commit": null,
                         })
                     );
                 }
@@ -325,7 +299,6 @@ mod tests {
                 crate::agent::backend::AbortOutcome::Stopped
             );
             assert_eq!(result.agent_stops[0].report.metadata.status, "aborted");
-            assert!(result.commit.is_some());
         }
         for (name, value) in names.into_iter().zip(previous) {
             if let Some(value) = value {
@@ -347,7 +320,7 @@ mod tests {
                 abort_outcome: outcome,
                 ..FakeBackend::default()
             });
-            let (report, commit) = super::stop_agent_session(
+            let report = super::stop_agent_session(
                 dir.path(),
                 &Err(io::Error::other("invalid control root")),
                 &expected,
@@ -358,12 +331,10 @@ mod tests {
             match outcome {
                 AbortOutcome::StopAccepted => {
                     assert_eq!(report.report, expected);
-                    assert!(commit.is_none());
                     assert_eq!(fs::read(&expected.path).unwrap(), before);
                 }
                 AbortOutcome::Stopped => {
                     assert_eq!(report.report.metadata.status, "aborted");
-                    assert!(commit.is_some());
                 }
             }
         }
@@ -437,7 +408,6 @@ mod tests {
                         report.agent_stops[0].outcome,
                         crate::agent::backend::AbortOutcome::StopAccepted
                     );
-                    assert!(report.commit.is_none());
                 } else {
                     let error = result.unwrap_err().to_string();
                     assert!(error.contains("agent aa-test"), "{error}");
@@ -599,24 +569,22 @@ mod tests {
     }
 
     #[test]
-    fn ready_cancellation_persists_and_commits_under_selection_lock() {
+    fn ready_cancellation_persists_under_selection_lock() {
         let dir = tempdir().unwrap();
-        crate::test_git::init_repo_with_commit(dir.path());
         write_agent(dir.path(), "aa-test", "ready");
         let lock = crate::state::StateLock::acquire(dir.path()).unwrap();
         let selected = super::select_agents_to_stop(dir.path(), Some("aa-test"), &lock).unwrap();
         assert_eq!(selected[0].metadata.status, "ready");
         let contender = fs::OpenOptions::new()
             .write(true)
-            .open(dir.path().join(".git/waap-state.lock"))
+            .open(dir.path().join(".waap-runtime/state.lock"))
             .unwrap();
         assert!(matches!(
             contender.try_lock(),
             Err(fs::TryLockError::WouldBlock)
         ));
 
-        let (stopped, commit) =
-            super::persist_stopped_agent_locked(dir.path(), &selected[0], &lock).unwrap();
+        let stopped = super::persist_stopped_agent_locked(dir.path(), &selected[0], &lock).unwrap();
 
         assert_eq!(stopped.metadata.status, "aborted");
         assert_eq!(
@@ -626,12 +594,6 @@ mod tests {
                 .status,
             "aborted"
         );
-        assert_eq!(
-            commit.unwrap(),
-            crate::test_git::run(dir.path(), &["rev-parse", "HEAD"])
-        );
-        let committed = crate::test_git::run(dir.path(), &["show", "HEAD:agents/aa-test/agent.md"]);
-        assert!(committed.contains("status = \"aborted\""));
         assert!(matches!(
             contender.try_lock(),
             Err(fs::TryLockError::WouldBlock)
@@ -818,7 +780,6 @@ mod tests {
                         outcome: crate::agent::backend::AbortOutcome::Stopped
                     })
                     .collect(),
-                commit: Some("abc123".to_string()),
             }),
             json!({
                 "stopped_agents": [
@@ -834,7 +795,6 @@ mod tests {
                         "file_size": 456,
                     }
                 ],
-                "commit": "abc123",
             })
         );
     }

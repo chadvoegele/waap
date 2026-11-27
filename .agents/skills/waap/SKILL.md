@@ -7,16 +7,9 @@ description: waap is a structured agent automation platform for specifying workf
 
 ## Central State
 
-waap stores each repository's state in a dedicated `waap` branch worktree under `~/.local/state/waap/data/`. This directory is referred to below as `${waap_data}`. Use the `waap` CLI for state changes and run `waap check` to report and validate the resolved directory.
+Run `waap init` from the application checkout. The state directory (`${waap_data}` below) defaults to `~/.local/state/waap/data/` plus the primary checkout’s absolute path without its leading slash. Use `--waap-root <path>` to override it. Run `waap check` to report the path and validate the records.
 
-If `origin/waap` may already exist, fetch it before initialization:
-
-```sh
-git fetch origin waap
-waap init
-```
-
-Use `scripts/migrate-legacy-waap.py` for repositories with legacy `.waap` state. After moving a repository, run `waap repair` to relocate its registered state worktree.
+If you move the application repository, use `--waap-root` to keep the existing state path. To move a plain state directory instead, stop agents and other waap commands, use `waap check` from the new checkout to find the destination, then move the directory and recheck.
 
 ## Basic Workflow
 
@@ -50,13 +43,11 @@ waap agent stop
 
 ## State Model
 
-waap tracks `${waap_data}` on the dedicated `waap` branch.
-
-All state is stored as plain text, but should be validated with `waap check` to ensure `waap` commands will work.
+Use the waap CLI to change plain-text records. To track state in Git, use a checkout you manage and commit changes yourself.
 
 ### Running Outside the Sandbox
 
-WAAP commands that mutate state (`ticket new/update`, `agent new/run/update`) must run outside the agent sandbox. WAAP writes files before committing them, so a sandbox-blocked Git lock can leave untracked state behind. Disable the sandbox on the first attempt rather than letting the command fail and retrying.
+Run waap commands outside the sandbox if it blocks writes to the state directory, including the lock.
 
 - **Codex:** set `sandbox_permissions: "require_escalated"` on the command call and provide a concise `justification`.
 - **Claude Code:** set `dangerouslyDisableSandbox: true` on the `Bash` tool call.
@@ -114,7 +105,7 @@ It is helpful to ensure continuity across agents, to also instruct the agent to 
 
 ## Agent Parallelization
 
-`waap agent run` owns the agent worktree lifecycle. Before launching the selected system, it creates an isolated git worktree (`worktrees/<agent-id>`); after the system process exits it removes that worktree. Detailed agent instructions specify where the agent works and how it integrates changes, allowing merge, push, or pull-request workflows without changing the launcher.
+`waap agent run` starts the agent at the root of the launch checkout. The [Developer role](./roles/developer/agent.md) creates and removes its own worktree.
 
 ## Agent Frontmatter
 

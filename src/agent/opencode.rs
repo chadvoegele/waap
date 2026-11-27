@@ -840,7 +840,6 @@ mod tests {
                     agent_id: "aa-00000001",
                     prompt: "complete the work",
                     repository_root: &repository_root,
-                    worktree_dir: root.path(),
                 },
                 super::super::commands::CommandDispatcher::create_channel().1,
             )
@@ -1004,7 +1003,6 @@ mod tests {
                     agent_id: "aa-00000001",
                     prompt: "complete the work",
                     repository_root: &repository_root,
-                    worktree_dir: root.path(),
                 },
                 super::super::commands::CommandDispatcher::create_channel().1,
             )

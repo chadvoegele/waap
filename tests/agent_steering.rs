@@ -48,12 +48,14 @@ impl Fixture {
     }
 
     fn record(&self, status: &str, system: Option<&str>) {
+        let session = if status == "ready" {
+            ""
+        } else {
+            "session_id = \"original-session\"\n"
+        };
         fs::write(self.record_path(), format!(
-            "+++\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"{status}\"\nsession_id = \"original-session\"\n{}+++\n\nOriginal instructions.\n",
+            "+++\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"{status}\"\n{session}{}+++\n\nOriginal instructions.\n",
             system.map(|s| format!("system = \"{s}\"\n")).unwrap_or_default())).unwrap();
-        let state = self.repo.path().join(".state");
-        git(&state, &["add", "agents"]);
-        git(&state, &["commit", "--allow-empty", "-qm", "seed status"]);
     }
 
     fn record_path(&self) -> PathBuf {
@@ -99,7 +101,7 @@ impl Fixture {
         (
             fs::read(self.record_path()).unwrap(),
             git(&state, &["rev-parse", "HEAD"]),
-            git(&state, &["status", "--porcelain"]),
+            git(&state, &["status", "--porcelain", "--", "."]),
             git(self.repo.path(), &["worktree", "list", "--porcelain"]),
         )
     }
@@ -302,10 +304,7 @@ fn run_preserves_status_validation_and_ready_failure_with_missing_runtime() {
     assert!(fs::read_to_string(fixture.record_path())
         .unwrap()
         .contains("status = \"failed\""));
-    assert_eq!(
-        git(&state, &["rev-list", "--count", &format!("{before}..HEAD")]),
-        "2"
-    );
+    assert_eq!(git(&state, &["rev-parse", "HEAD"]), before);
     assert_eq!(worktree_paths(), worktrees);
     assert!(!fixture.runtime.path().join("waap").exists());
 }
@@ -451,10 +450,9 @@ fn stop_acknowledges_without_state_mutation_or_lock_during_remote_wait() {
                 assert_eq!(request["method"], "stop");
                 assert!(request.get("prompt").is_none());
                 let state = fixture.repo.path().join(".state");
-                let git_dir = git(&state, &["rev-parse", "--absolute-git-dir"]);
                 let lock = fs::OpenOptions::new()
                     .write(true)
-                    .open(Path::new(git_dir.trim()).join("waap-state.lock"))
+                    .open(state.join(".waap-runtime/state.lock"))
                     .unwrap();
                 lock.try_lock()
                     .expect("stop CLI must release the state lock before waiting");
@@ -476,7 +474,7 @@ fn stop_acknowledges_without_state_mutation_or_lock_during_remote_wait() {
         assert!(output.status.success(), "{output:?}");
         let report: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(report["stopped_agents"][0]["metadata"]["status"], "running");
-        assert!(report["commit"].is_null());
+        assert!(report.get("commit").is_none());
         server.join().unwrap();
     });
     assert_eq!(fixture.snapshot(), before);

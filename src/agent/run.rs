@@ -5,32 +5,18 @@ use std::process::ExitCode;
 use super::backend::{AgentSessionRun, Backend, RunOutcome, StartContext};
 use super::commands::CommandDispatcher;
 use super::control::{ControlServer, SocketListener, SocketPath};
-use super::worktree::{collapse_errors, AgentWorktree};
 use crate::agent::{
     agent_report_json, load_agent_report, print_agent_report_human, read_agent_record,
     transition_agent_status, write_agent_record, AgentMetadata, AgentReport, AgentRunOptions,
     AgentStatus, AgentSystem,
 };
 use crate::cli::OutputFormat;
-use crate::git::commit_paths;
 use crate::root::ControlRoot;
 
-fn print_run_agent_report(
-    output_format: &OutputFormat,
-    header: &str,
-    report: &AgentReport,
-    commit: &str,
-) {
+fn print_run_agent_report(output_format: &OutputFormat, header: &str, report: &AgentReport) {
     match output_format {
-        OutputFormat::Json => {
-            let mut value = agent_report_json(report);
-            value["commit"] = serde_json::json!(commit);
-            println!("{value}");
-        }
-        OutputFormat::HumanReadable => {
-            print_agent_report_human(header, report);
-            println!("Commit: {commit}");
-        }
+        OutputFormat::Json => println!("{}", agent_report_json(report)),
+        OutputFormat::HumanReadable => print_agent_report_human(header, report),
     }
 }
 
@@ -70,18 +56,8 @@ fn run_agent_with_backend(
         let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
         let current = AgentStatus::parse(&metadata.status).expect("validated agent status");
         current.validate_transition(AgentStatus::Running)?;
-        let previous_metadata = metadata.clone();
         metadata.system = Some(system.clone());
-        if let Err(primary) = mark_running(waap_root, output_format, agent_id, &mut metadata, &body)
-        {
-            return match write_agent_record(waap_root, agent_id, &previous_metadata, &body) {
-                Ok(()) => Err(primary),
-                Err(rollback_error) => Err(io::Error::new(
-                    primary.kind(),
-                    format!("{primary}; failed to restore ready agent record: {rollback_error}"),
-                )),
-            };
-        }
+        mark_running(waap_root, output_format, agent_id, &mut metadata, &body)?;
     }
     let result = run_agent_app(
         repository_root,
@@ -106,13 +82,12 @@ fn run_agent_with_backend(
             Ok(ExitCode::SUCCESS)
         }
         Ok(RunOutcome::Aborted) => {
-            transition_and_commit_status(
+            persist_agent_status(
                 waap_root,
                 output_format,
                 agent_id,
                 AgentStatus::Aborted,
                 "Aborted agent",
-                &format!("waap agent aborted {agent_id}"),
             )?;
             Ok(ExitCode::SUCCESS)
         }
@@ -142,9 +117,8 @@ fn run_agent_app(
     let control_root = control_root?;
     let socket_path = SocketPath::for_agent(&control_root, agent_id)?;
     let runtime = super::runtime::new()?;
-    let mut worktree = AgentWorktree::create(&repository_root, agent_id)?;
     let prompt = build_agent_goal(waap_root, agent_id);
-    let run_result = runtime.block_on(async {
+    runtime.block_on(async {
         let (dispatcher, receiver) = CommandDispatcher::create_channel();
         let mut session_run = backend
             .start(
@@ -152,7 +126,6 @@ fn run_agent_app(
                     agent_id,
                     prompt: &prompt,
                     repository_root: &repository_root,
-                    worktree_dir: worktree.dir(),
                 },
                 receiver,
             )
@@ -175,9 +148,22 @@ fn run_agent_app(
             }
             Err(error) => collapse_errors(Err(error), session_run.runner.cleanup().await),
         }
-    });
-    let cleanup_result = worktree.cleanup();
-    collapse_errors(run_result, cleanup_result)
+    })
+}
+
+pub(super) fn collapse_errors<T>(
+    run_result: io::Result<T>,
+    cleanup_result: io::Result<()>,
+) -> io::Result<T> {
+    match (run_result, cleanup_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
+        (Err(run_error), Ok(())) => Err(run_error),
+        (Err(run_error), Err(cleanup_error)) => Err(io::Error::new(
+            run_error.kind(),
+            format!("{run_error}; cleanup also failed: {cleanup_error}"),
+        )),
+    }
 }
 
 pub(super) struct AgentApp {
@@ -242,12 +228,7 @@ fn mark_running(
     write_agent_record(waap_root, agent_id, metadata, body)?;
 
     let report = load_agent_report(waap_root, agent_id)?;
-    let commit = commit_paths(
-        waap_root,
-        &[report.path.as_path()],
-        &format!("waap agent run {agent_id}"),
-    )?;
-    print_run_agent_report(output_format, "Running agent", &report, &commit);
+    print_run_agent_report(output_format, "Running agent", &report);
     Ok(())
 }
 
@@ -287,16 +268,11 @@ fn update_agent_session(
 
     let header = format!("{} session", system.as_str());
     metadata.session_id = Some(session_id.to_string());
-    metadata.system = Some(system.clone());
+    metadata.system = Some(system);
     write_agent_record(waap_root, agent_id, &metadata, &body)?;
 
     let report = load_agent_report(waap_root, agent_id)?;
-    let commit = commit_paths(
-        waap_root,
-        &[report.path.as_path()],
-        &format!("waap agent {} session {agent_id}", system.as_str()),
-    )?;
-    print_run_agent_report(output_format, &header, &report, &commit);
+    print_run_agent_report(output_format, &header, &report);
     Ok(())
 }
 
@@ -305,61 +281,41 @@ fn mark_completed(
     output_format: &OutputFormat,
     agent_id: &str,
 ) -> io::Result<()> {
-    transition_and_commit_status(
+    persist_agent_status(
         waap_root,
         output_format,
         agent_id,
         AgentStatus::Completed,
         "Completed agent",
-        &format!("waap agent completed {agent_id}"),
     )
 }
 
 fn mark_failed(waap_root: &Path, output_format: &OutputFormat, agent_id: &str) -> io::Result<()> {
-    transition_and_commit_status(
+    persist_agent_status(
         waap_root,
         output_format,
         agent_id,
         AgentStatus::Failed,
         "Failed agent",
-        &format!("waap agent failed {agent_id}"),
     )
 }
 
-fn transition_and_commit_status(
+fn persist_agent_status(
     waap_root: &Path,
     output_format: &OutputFormat,
     agent_id: &str,
     status: AgentStatus,
     header: &str,
-    commit_message: &str,
 ) -> io::Result<()> {
     let _lock = crate::state::StateLock::acquire(waap_root)?;
     let (mut metadata, body) = read_agent_record(waap_root, agent_id)?;
     if metadata.status == status.as_str() {
         return Ok(());
     }
-    let previous_metadata = metadata.clone();
     transition_agent_status(&mut metadata, status)?;
-    let persistence_result = (|| {
-        write_agent_record(waap_root, agent_id, &metadata, &body)?;
-        let report = load_agent_report(waap_root, agent_id)?;
-        let commit = commit_paths(waap_root, &[report.path.as_path()], commit_message)?;
-        Ok((report, commit))
-    })();
-    let (report, commit) = match persistence_result {
-        Ok(persisted) => persisted,
-        Err(primary) => {
-            return match write_agent_record(waap_root, agent_id, &previous_metadata, &body) {
-                Ok(()) => Err(primary),
-                Err(rollback_error) => Err(io::Error::new(
-                    primary.kind(),
-                    format!("{primary}; failed to restore previous agent status: {rollback_error}"),
-                )),
-            };
-        }
-    };
-    print_run_agent_report(output_format, header, &report, &commit);
+    write_agent_record(waap_root, agent_id, &metadata, &body)?;
+    let report = load_agent_report(waap_root, agent_id)?;
+    print_run_agent_report(output_format, header, &report);
     Ok(())
 }
 
@@ -390,18 +346,15 @@ mod tests {
 
     use super::{
         build_agent_goal, collapse_errors, mark_completed, mark_failed, mark_running,
-        persist_failed_after_error, require_ready_agent, run_agent, transition_and_commit_status,
-        update_agent_session, AgentWorktree,
+        require_ready_agent, run_agent, update_agent_session,
     };
     use crate::agent::backend::{fake::FakeBackend, Backend, RunOutcome};
-    use crate::agent::worktree::agent_worktree_dir;
     use crate::agent::{
         agent_report_json, read_agent_record, transition_agent_status, write_agent_record,
         AgentMetadata, AgentReport, AgentRunOptions, AgentStatus, AgentSystem, ReasoningEffort,
         CODEX_ENV_LOCK, PI_ENV_LOCK,
     };
     use crate::cli::OutputFormat;
-    use crate::git::{create_worktree, remove_worktree};
     use crate::test_git::{init_repo_with_commit, run as git};
 
     fn run_agent_with_backend(
@@ -491,14 +444,10 @@ mod tests {
             .unwrap()
             .contains("status = \"completed\""));
         assert!(!endpoint.exists());
-        assert!(!repository
-            .path()
-            .join(agent_worktree_dir(agent_id))
-            .exists());
     }
 
     #[test]
-    fn wait_panic_persists_failure_and_cleans_worktree() {
+    fn wait_panic_persists_failure() {
         let mut backend = Backend::Fake(FakeBackend {
             wait_action: Some(Box::new(|| panic!("wait failed"))),
             ..FakeBackend::default()
@@ -523,36 +472,6 @@ mod tests {
             read_agent_record(dir.path(), agent_id).unwrap().0.status,
             "failed"
         );
-        assert!(!dir.path().join(agent_worktree_dir(agent_id)).exists());
-    }
-
-    #[test]
-    fn agent_worktree_creates_and_explicitly_removes_agent_directory() {
-        let dir = tempdir().unwrap();
-        init_repo_with_commit(dir.path());
-
-        let mut worktree = AgentWorktree::create(dir.path(), "aa-00000001").unwrap();
-        assert!(worktree.dir().is_dir());
-        assert!(worktree.dir().ends_with("worktrees/aa-00000001"));
-
-        worktree.cleanup().unwrap();
-        assert!(!dir.path().join("worktrees/aa-00000001").exists());
-    }
-
-    #[test]
-    fn agent_worktree_drop_cleans_up_after_early_error() {
-        let dir = tempdir().unwrap();
-        init_repo_with_commit(dir.path());
-
-        fn fail_after_create(waap_root: &Path) -> std::io::Result<()> {
-            let worktree = AgentWorktree::create(waap_root, "aa-00000001")?;
-            assert!(worktree.dir().is_dir());
-            Err(std::io::Error::other("launch failed"))
-        }
-
-        let error = fail_after_create(dir.path()).unwrap_err();
-        assert_eq!(error.to_string(), "launch failed");
-        assert!(!dir.path().join("worktrees/aa-00000001").exists());
     }
 
     #[test]
@@ -598,64 +517,7 @@ mod tests {
         assert!(error.to_string().starts_with("run failed;"));
         assert!(error
             .to_string()
-            .contains("worktree cleanup also failed: cleanup failed"));
-    }
-
-    #[test]
-    fn agent_worktree_cuts_branch_from_running_commit() {
-        let dir = tempdir().unwrap();
-        init_repo_with_commit(dir.path());
-        let seed = git(dir.path(), &["rev-parse", "HEAD"]);
-
-        fs::write(dir.path().join("running.txt"), "running\n").unwrap();
-        git(dir.path(), &["add", "running.txt"]);
-        git(
-            dir.path(),
-            &["commit", "-q", "-m", "waap agent run aa-00000001"],
-        );
-        let mut worktree = AgentWorktree::create(dir.path(), "aa-00000001").unwrap();
-        assert!(worktree.dir().join("running.txt").exists());
-        let head_at_run = git(worktree.dir(), &["rev-parse", "HEAD"]);
-
-        let run_commit = git(dir.path(), &["rev-parse", "HEAD"]);
-        assert_ne!(run_commit, seed);
-        assert_eq!(head_at_run, run_commit);
-        let parents = git(dir.path(), &["rev-list", "--merges", "HEAD"]);
-        assert!(parents.is_empty(), "unexpected merge commits: {parents}");
-        worktree.cleanup().unwrap();
-    }
-
-    #[test]
-    fn agent_branch_rebase_and_ff_merge_keeps_main_linear() {
-        let dir = tempdir().unwrap();
-        init_repo_with_commit(dir.path());
-
-        fs::write(dir.path().join("running.txt"), "running\n").unwrap();
-        git(dir.path(), &["add", "running.txt"]);
-        git(
-            dir.path(),
-            &["commit", "-q", "-m", "waap agent run aa-00000001"],
-        );
-        let relative_path = agent_worktree_dir("aa-00000001");
-        let worktree = create_worktree(dir.path(), "aa-00000001", &relative_path).unwrap();
-
-        fs::write(worktree.join("feature.txt"), "feature\n").unwrap();
-        git(&worktree, &["add", "feature.txt"]);
-        git(&worktree, &["commit", "-q", "-m", "feature aa-00000001"]);
-
-        fs::write(dir.path().join("other.txt"), "other\n").unwrap();
-        git(dir.path(), &["add", "other.txt"]);
-        git(dir.path(), &["commit", "-q", "-m", "other agent"]);
-
-        git(&worktree, &["rebase", "main"]);
-        git(dir.path(), &["merge", "--ff-only", "aa-00000001"]);
-
-        let merges = git(dir.path(), &["rev-list", "--merges", "HEAD"]);
-        assert!(merges.is_empty(), "unexpected merge commits: {merges}");
-        assert!(dir.path().join("other.txt").exists());
-        assert!(dir.path().join("feature.txt").exists());
-
-        remove_worktree(dir.path(), &relative_path).unwrap();
+            .contains("cleanup also failed: cleanup failed"));
     }
 
     #[test]
@@ -733,9 +595,14 @@ mod tests {
         use std::time::Duration;
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path());
+        let state = tempdir().unwrap();
         let agent_id = "aa-00000001";
-        seed_agent_record(dir.path(), agent_id, "ready");
+        write_file(
+            &state.path().join("agents/aa-00000001/agent.md"),
+            "+++\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"ready\"\n+++\n",
+        );
         let root = dir.path().to_path_buf();
+        let state_root = state.path().to_path_buf();
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let owner = std::thread::spawn(move || {
@@ -749,7 +616,7 @@ mod tests {
             });
             run_agent_with_backend(
                 &root,
-                &root,
+                &state_root,
                 &OutputFormat::Json,
                 agent_id,
                 &AgentSystem::Opencode,
@@ -761,7 +628,7 @@ mod tests {
         let mut contender = Backend::Fake(FakeBackend::default());
         let error = run_agent_with_backend(
             dir.path(),
-            dir.path(),
+            state.path(),
             &OutputFormat::Json,
             agent_id,
             &AgentSystem::Opencode,
@@ -771,13 +638,13 @@ mod tests {
         assert!(error.to_string().contains("running -> running"));
         assert!(contender.fake().start_calls.is_empty());
         assert_eq!(
-            read_agent_record(dir.path(), agent_id).unwrap().0.status,
+            read_agent_record(state.path(), agent_id).unwrap().0.status,
             "running"
         );
         release_tx.send(()).unwrap();
         assert_eq!(owner.join().unwrap(), ExitCode::SUCCESS);
         assert_eq!(
-            read_agent_record(dir.path(), agent_id).unwrap().0.status,
+            read_agent_record(state.path(), agent_id).unwrap().0.status,
             "completed"
         );
     }
@@ -900,7 +767,6 @@ mod tests {
                     read_agent_record(dir.path(), agent_id).unwrap().0.status,
                     "ready"
                 );
-                assert!(!dir.path().join(agent_worktree_dir(agent_id)).exists());
             }
         }
     }
@@ -932,7 +798,6 @@ mod tests {
             read_agent_record(dir.path(), agent_id).unwrap().0.status,
             "ready"
         );
-        assert!(!dir.path().join(agent_worktree_dir(agent_id)).exists());
 
         match previous {
             Some(value) => std::env::set_var("CODEX_REASONING_EFFORT", value),
@@ -967,7 +832,6 @@ mod tests {
             read_agent_record(dir.path(), agent_id).unwrap().0.status,
             "ready"
         );
-        assert!(!dir.path().join(agent_worktree_dir(agent_id)).exists());
         match previous {
             Some(value) => std::env::set_var("WAAP_PI_REASONING_EFFORT", value),
             None => std::env::remove_var("WAAP_PI_REASONING_EFFORT"),
@@ -975,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    fn run_agent_passes_start_context_after_worktree_creation() {
+    fn run_agent_passes_start_context_for_application_checkout() {
         for system in [
             AgentSystem::Opencode,
             AgentSystem::Claude,
@@ -1008,19 +872,11 @@ mod tests {
             assert_eq!(call.agent_id, agent_id);
             assert_eq!(call.prompt, build_agent_goal(dir.path(), agent_id));
             assert_eq!(call.repository_root, dir.path().canonicalize().unwrap());
-            assert!(call.worktree_dir.ends_with("worktrees/aa-00000001"));
-            assert!(call.worktree_existed);
-            assert!(!call.worktree_dir.exists());
 
             let (metadata, _) = read_agent_record(dir.path(), agent_id).unwrap();
             assert_eq!(metadata.status, "completed");
             assert_eq!(metadata.system, Some(system));
             assert_eq!(metadata.session_id.as_deref(), Some("ses_started"));
-            let running_record = git(dir.path(), &["show", "HEAD~2:agents/aa-00000001/agent.md"]);
-            assert!(running_record.contains("status = \"running\""));
-            assert!(!running_record.contains("session_id ="));
-            let started_record = git(dir.path(), &["show", "HEAD~1:agents/aa-00000001/agent.md"]);
-            assert!(started_record.contains("session_id = \"ses_started\""));
         }
     }
 
@@ -1060,22 +916,11 @@ mod tests {
         assert_eq!(backend.fake().wait_calls.load(Ordering::SeqCst), 1);
         let (metadata, _) = read_agent_record(dir.path(), agent_id).unwrap();
         assert_eq!(metadata.session_id.as_deref(), Some("th_authentic"));
-        let running_record = git(dir.path(), &["show", "HEAD~2:agents/aa-00000001/agent.md"]);
-        assert!(running_record.contains("status = \"running\""));
-        assert!(!running_record.contains("session_id ="));
-        let subjects = git(dir.path(), &["log", "-3", "--format=%s"]);
-        assert_eq!(
-            subjects.lines().collect::<Vec<_>>(),
-            [
-                "waap agent completed aa-00000001",
-                "waap agent codex session aa-00000001",
-                "waap agent run aa-00000001"
-            ]
-        );
+        assert_eq!(metadata.status, "completed");
     }
 
     #[test]
-    fn run_agent_failed_outcome_cleans_worktree_and_persists_failed_status() {
+    fn run_agent_failed_outcome_persists_failed_status() {
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path());
         let agent_id = "aa-00000001";
@@ -1101,11 +946,6 @@ mod tests {
         assert_eq!(metadata.status, "failed");
         assert_eq!(metadata.session_id.as_deref(), Some("claude-session"));
         assert_eq!(backend.fake().wait_calls.load(Ordering::SeqCst), 1);
-        assert!(!dir.path().join(agent_worktree_dir(agent_id)).exists());
-        assert_eq!(
-            git(dir.path(), &["log", "-1", "--format=%s"]),
-            "waap agent failed aa-00000001"
-        );
     }
 
     #[test]
@@ -1180,7 +1020,7 @@ mod tests {
     }
 
     #[test]
-    fn long_socket_path_fails_before_worktree_socket_or_backend_creation() {
+    fn long_socket_path_fails_before_socket_or_backend_creation() {
         use std::os::unix::fs::PermissionsExt;
 
         let repository = tempdir().unwrap();
@@ -1191,12 +1031,6 @@ mod tests {
         let runtime = runtime_base.path().join("x".repeat(100));
         fs::create_dir(&runtime).unwrap();
         fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
-        let worktrees = git(repository.path(), &["worktree", "list", "--porcelain"])
-            .lines()
-            .filter(|line| line.starts_with("worktree "))
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        let branches = git(repository.path(), &["branch", "--list"]);
         let mut backend = Backend::Fake(FakeBackend::default());
         let error = super::run_agent_with_backend(
             repository.path(),
@@ -1214,20 +1048,10 @@ mod tests {
         assert!(backend.fake().start_calls.is_empty());
         assert_eq!(backend.fake().wait_calls.load(Ordering::SeqCst), 0);
         assert!(!runtime.join("waap").exists());
-        assert!(!repository.path().join("worktrees").exists());
-        assert_eq!(
-            git(repository.path(), &["worktree", "list", "--porcelain"])
-                .lines()
-                .filter(|line| line.starts_with("worktree "))
-                .map(str::to_owned)
-                .collect::<Vec<_>>(),
-            worktrees
-        );
-        assert_eq!(git(repository.path(), &["branch", "--list"]), branches);
     }
 
     #[test]
-    fn run_agent_backend_error_cleans_worktree_and_propagates() {
+    fn run_agent_backend_error_propagates() {
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path());
         let agent_id = "aa-00000001";
@@ -1250,34 +1074,6 @@ mod tests {
         assert_eq!(error.to_string(), "launch failed");
         assert_eq!(backend.fake().start_calls.len(), 1);
         assert_eq!(backend.fake().wait_calls.load(Ordering::SeqCst), 0);
-        assert!(!dir.path().join(agent_worktree_dir(agent_id)).exists());
-        assert_eq!(
-            read_agent_record(dir.path(), agent_id).unwrap().0.status,
-            "failed"
-        );
-    }
-
-    #[test]
-    fn run_agent_worktree_creation_error_persists_failed_status() {
-        let dir = tempdir().unwrap();
-        init_repo_with_commit(dir.path());
-        let agent_id = "aa-00000001";
-        seed_agent_record(dir.path(), agent_id, "ready");
-        git(dir.path(), &["branch", agent_id]);
-        let mut backend = Backend::Fake(FakeBackend::default());
-
-        let error = run_agent_with_backend(
-            dir.path(),
-            dir.path(),
-            &OutputFormat::Json,
-            agent_id,
-            &AgentSystem::Opencode,
-            &mut backend,
-        )
-        .unwrap_err();
-
-        assert!(error.to_string().contains("git worktree failed"));
-        assert_eq!(backend.fake().start_calls.len(), 0);
         assert_eq!(
             read_agent_record(dir.path(), agent_id).unwrap().0.status,
             "failed"
@@ -1317,39 +1113,7 @@ mod tests {
     }
 
     #[test]
-    fn run_agent_cleanup_error_persists_failed_status() {
-        let dir = tempdir().unwrap();
-        init_repo_with_commit(dir.path());
-        let agent_id = "aa-00000001";
-        seed_agent_record(dir.path(), agent_id, "ready");
-        let git_admin = dir.path().join(".git/worktrees").join(agent_id);
-        let mut backend = Backend::Fake(FakeBackend {
-            wait_action: Some(Box::new(move || {
-                fs::remove_dir_all(&git_admin)?;
-                Ok(())
-            })),
-            ..FakeBackend::default()
-        });
-
-        let error = run_agent_with_backend(
-            dir.path(),
-            dir.path(),
-            &OutputFormat::Json,
-            agent_id,
-            &AgentSystem::Opencode,
-            &mut backend,
-        )
-        .unwrap_err();
-
-        assert!(error.to_string().contains("git worktree failed"));
-        assert_eq!(
-            read_agent_record(dir.path(), agent_id).unwrap().0.status,
-            "failed"
-        );
-    }
-
-    #[test]
-    fn run_agent_wait_error_occurs_after_session_persistence_and_cleans_worktree() {
+    fn run_agent_wait_error_occurs_after_session_persistence() {
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path());
         let agent_id = "aa-00000001";
@@ -1375,7 +1139,6 @@ mod tests {
         let metadata = read_agent_record(dir.path(), agent_id).unwrap().0;
         assert_eq!(metadata.status, "failed");
         assert_eq!(metadata.session_id.as_deref(), Some("ses_started"));
-        assert!(!dir.path().join(agent_worktree_dir(agent_id)).exists());
     }
 
     #[test]
@@ -1480,41 +1243,6 @@ mod tests {
     }
 
     #[test]
-    fn completion_persistence_error_rolls_back_then_persists_failed_status() {
-        let dir = tempdir().unwrap();
-        init_repo_with_commit(dir.path());
-        let agent_id = "aa-00000001";
-        seed_agent_record(dir.path(), agent_id, "running");
-
-        let primary = transition_and_commit_status(
-            dir.path(),
-            &OutputFormat::Json,
-            agent_id,
-            AgentStatus::Completed,
-            "Completed agent",
-            "invalid\0commit message",
-        )
-        .unwrap_err();
-        assert_eq!(
-            read_agent_record(dir.path(), agent_id).unwrap().0.status,
-            "running"
-        );
-
-        let error = persist_failed_after_error(dir.path(), &OutputFormat::Json, agent_id, primary);
-
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        assert!(error.to_string().contains("nul byte"));
-        assert_eq!(
-            read_agent_record(dir.path(), agent_id).unwrap().0.status,
-            "failed"
-        );
-        assert_eq!(
-            git(dir.path(), &["log", "-1", "--format=%s"]),
-            format!("waap agent failed {agent_id}")
-        );
-    }
-
-    #[test]
     fn run_agent_rejects_every_terminal_status_without_starting_backend() {
         for status in ["completed", "failed", "aborted"] {
             let dir = tempdir().unwrap();
@@ -1544,7 +1272,7 @@ mod tests {
     }
 
     #[test]
-    fn mark_running_persists_and_commits_running_transition() {
+    fn mark_running_persists_running_transition() {
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path());
         let agent_id = "aa-00000001";
@@ -1565,14 +1293,10 @@ mod tests {
             read_agent_record(dir.path(), agent_id).unwrap().0.status,
             "running"
         );
-        assert_eq!(
-            git(dir.path(), &["log", "-1", "--format=%s"]),
-            format!("waap agent run {agent_id}")
-        );
     }
 
     #[test]
-    fn generated_session_ids_are_visible_on_main_during_runs() {
+    fn generated_session_ids_are_visible_in_shared_state_during_runs() {
         for (system, session_id) in [
             (AgentSystem::Opencode, "ses_live"),
             (AgentSystem::Codex, "th_live"),
@@ -1593,7 +1317,6 @@ mod tests {
                 &body,
             )
             .unwrap();
-            let mut worktree = AgentWorktree::create(dir.path(), agent_id).unwrap();
             update_agent_session(
                 dir.path(),
                 &OutputFormat::Json,
@@ -1607,18 +1330,11 @@ mod tests {
             assert_eq!(main_metadata.status, "running");
             assert_eq!(main_metadata.system, Some(system.clone()));
             assert_eq!(main_metadata.session_id.as_deref(), Some(session_id));
-
-            let (branch_metadata, _) = read_agent_record(worktree.dir(), agent_id).unwrap();
-            assert_eq!(branch_metadata.status, "running");
-            assert_eq!(branch_metadata.system, Some(system));
-            assert_eq!(branch_metadata.session_id, None);
-
-            worktree.cleanup().unwrap();
         }
     }
 
     #[test]
-    fn mark_completed_updates_status_and_commits() {
+    fn mark_completed_updates_status() {
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path());
         let agent_id = "aa-00000001";
@@ -1628,10 +1344,6 @@ mod tests {
 
         let contents = fs::read_to_string(&path).unwrap();
         assert!(contents.contains("status = \"completed\"\n"));
-        let subject = git(dir.path(), &["log", "-1", "--format=%s"]);
-        assert_eq!(subject, format!("waap agent completed {agent_id}"));
-        let merges = git(dir.path(), &["rev-list", "--merges", "HEAD"]);
-        assert!(merges.is_empty(), "unexpected merge commits: {merges}");
     }
 
     #[test]
@@ -1759,7 +1471,7 @@ mod tests {
     }
 
     #[test]
-    fn update_agent_session_writes_codex_session_id_and_system_and_commits() {
+    fn update_agent_session_writes_codex_session_id_and_system() {
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path());
         let agent_id = "aa-00000001";
@@ -1778,11 +1490,6 @@ mod tests {
         assert!(contents.contains("status = \"running\"\n"));
         assert!(contents.contains("session_id = \"th_abc123\"\n"));
         assert!(contents.contains("system = \"codex\"\n"));
-
-        let subject = git(dir.path(), &["log", "-1", "--format=%s"]);
-        assert_eq!(subject, format!("waap agent codex session {agent_id}"));
-        let merges = git(dir.path(), &["rev-list", "--merges", "HEAD"]);
-        assert!(merges.is_empty(), "unexpected merge commits: {merges}");
     }
 
     #[test]
@@ -1902,10 +1609,6 @@ mod tests {
         let (metadata, _) = read_agent_record(dir.path(), agent_id).unwrap();
         assert_eq!(metadata.session_id.as_deref(), Some("th_abc123"));
         assert_eq!(metadata.system, Some(AgentSystem::Codex));
-        assert_eq!(
-            git(dir.path(), &["log", "-1", "--format=%s"]),
-            format!("waap agent codex session {agent_id}")
-        );
     }
 
     fn abort_agent(root: &Path, agent_id: &str) -> std::io::Result<()> {

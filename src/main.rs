@@ -3,11 +3,9 @@ mod app;
 mod check;
 mod cli;
 mod frontmatter;
-mod git;
 mod ids;
 mod init;
 mod record;
-mod repair;
 mod root;
 mod state;
 #[cfg(test)]
