@@ -610,6 +610,15 @@ while IFS= read -r ignored; do :; done
 
 #[test]
 fn test_stop_uses_shared_socket_after_steering_and_owner_persists_aborted() {
+    assert_pi_stop_outcome("aborted", "aborted");
+}
+
+#[test]
+fn test_pi_natural_completion_wins_race_with_acknowledged_stop() {
+    assert_pi_stop_outcome("stop", "completed");
+}
+
+fn assert_pi_stop_outcome(stop_reason: &str, status: &str) {
     let project = Project::new();
     let agent_id = project.create_agent("pi-process-abort");
     let fake = project.root.join("fake-pi-abort");
@@ -635,13 +644,13 @@ fn test_stop_uses_shared_socket_after_steering_and_owner_persists_aborted() {
       printf '%s\n' '{"type":"response","id":"waap-4","command":"clear_queue","success":true}'
       ;;
     *'"type":"abort"'*)
-      printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"aborted"}}'
+      printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"STOP_REASON"}}'
       printf '%s\n' '{"type":"agent_settled"}'
       printf '%s\n' '{"type":"response","id":"waap-5","command":"abort","success":true}'
       ;;
   esac
 done
-"#.to_owned() + &build_shutdown_notification_script()),
+"#.replace("STOP_REASON", stop_reason) + &build_shutdown_notification_script()),
     );
     let runner = project
         .build_command()
@@ -691,7 +700,7 @@ done
     assert_success(&owner);
     assert!(!String::from_utf8_lossy(&owner.stdout).contains("shutdown-notification"));
     assert!(!String::from_utf8_lossy(&owner.stderr).contains("transition"));
-    assert_record(&project, &agent_id, "aborted", "pi", "pi-abort-session");
+    assert_record(&project, &agent_id, status, "pi", "pi-abort-session");
     assert_eq!(
         fs::read_to_string(&log)
             .unwrap()

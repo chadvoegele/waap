@@ -55,9 +55,13 @@ impl Fixture {
         } else {
             "session_id = \"original-session\"\n"
         };
-        fs::write(self.record_path(), format!(
-            "+++\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"{status}\"\n{session}{}+++\n\nOriginal instructions.\n",
-            system.map(|s| format!("system = \"{s}\"\n")).unwrap_or_default())).unwrap();
+        let system = system
+            .map(|s| format!("system = \"{s}\"\n"))
+            .unwrap_or_default();
+        let record = format!(
+            "+++\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"{status}\"\n{session}{system}+++\n"
+        );
+        fs::write(self.record_path(), record).unwrap();
     }
 
     fn record_path(&self) -> PathBuf {
@@ -208,6 +212,12 @@ fn disconnect_after_request_never_connects_to_a_replacement_or_starts() {
             let request: Value = serde_json::from_str(&line).unwrap();
             assert_eq!(request["prompt"], TASK);
             assert_eq!(request["method"], "steer");
+            let lock = fs::OpenOptions::new()
+                .write(true)
+                .open(fixture.repo.path().join(".state/.waap-runtime/state.lock"))
+                .unwrap();
+            lock.try_lock()
+                .expect("steering must release the state lock before waiting");
             fs::remove_file(fixture.socket()).unwrap();
             let replacement = fixture.listener();
             stream.shutdown(std::net::Shutdown::Both).unwrap();
@@ -393,6 +403,12 @@ fn run_preserves_status_validation_and_ready_failure_with_missing_runtime() {
 fn cli_surfaces_backend_rejections_and_uncertainty_without_backend_filtering_or_state_changes() {
     let fixture = Fixture::new();
     let listener = fixture.listener();
+    fixture.record("running", None);
+    let invalid = fixture.snapshot();
+    let output = fixture.steer("aa-test", "data").output().unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("field system"));
+    assert_eq!(fixture.snapshot(), invalid);
     for system in [Some("claude"), Some("opencode"), Some("pi")] {
         fixture.record("running", system);
         let before = fixture.snapshot();
@@ -476,6 +492,12 @@ fn cli_reports_runtime_configuration_missing_and_stale_socket_errors() {
     assert!(
         diagnostic(&fixture.steer("aa-test", "data").output().unwrap()).contains("stale endpoint")
     );
+    let asap = fixture
+        .command()
+        .args(["agent", "prompt", "--agent-id", "aa-test", "--text", TASK])
+        .output()
+        .unwrap();
+    assert!(diagnostic(&asap).contains("stale endpoint"));
     assert!(fixture.socket().exists());
     let long = fixture.runtime.path().join("x".repeat(80));
     fs::create_dir(&long).unwrap();

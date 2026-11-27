@@ -12,9 +12,9 @@ This skill describes an end-to-end waap test by making a simple 2D heat equation
 1. Create a new repository in a temporary directory.
 2. Write a spec for a 2D heat equation simulator using a finite difference method.
 3. Use the waap skill to create a ticket to write the implementation tickets based on the spec.
-4. Run a waap planner agent for that ticket.
-5. Repeatedly run waap developer agents for unblocked pending tickets.
-6. While the visualization developer is running, steer it to write the final ASCII-art visualization to `final-heatmap.txt` and commit it.
+4. Register a planner with `waap agent new` and send the planner instructions for that ticket with `waap agent prompt --agent-id "$planner_id" --delivery=start < planner-task.md`.
+5. For each unblocked pending ticket, register a developer and send its resolved instructions with `waap agent prompt --agent-id "$developer_id" --delivery=start < developer-task.md`.
+6. While the visualization developer is running on Pi or Codex, send `waap agent prompt --agent-id "$developer_id" --delivery=steer --text='Write the final ASCII-art visualization to final-heatmap.txt and commit it.'` from another terminal.
 7. Run the final program and compare its visualization with `final-heatmap.txt`.
 8. Verify the output is numerically plausible and satisfies the spec.
 

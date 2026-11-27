@@ -59,6 +59,8 @@ with open(os.environ['WAAP_TEST_PID_FILE'], 'w') as file:
     file.write(str(os.getpid()))
 mode = os.environ['WAAP_TEST_MODE']
 if mode == 'startup-held':
+    with open(os.environ['WAAP_TEST_PID_FILE'] + '.launches', 'a') as file:
+        file.write(f'{os.getpid()}\n')
     time.sleep(60)
 root = os.path.dirname(os.environ['WAAP_TEST_PID_FILE'])
 if mode == 'check-lifecycle':
@@ -309,7 +311,7 @@ fn codex_success_failure_and_malformed_startup_reap_process() {
 }
 
 #[test]
-fn sigterm_during_async_startup_reaps_child() {
+fn concurrent_starts_claim_once_and_sigterm_during_startup_reaps_the_child() {
     let repo = tempfile::tempdir().unwrap();
     let runtime = tempfile::tempdir().unwrap();
     let root = repo.path();
@@ -324,29 +326,48 @@ fn sigterm_during_async_startup_reaps_child() {
     )
     .status
     .success());
-    let mut child = RunningChild(Some(
-        waap_command(root, "startup-held", runtime.path())
-            .args([
-                "agent",
-                "prompt",
-                "--delivery=start",
-                "--agent-id",
-                "aa-test",
-                "--text",
-                TASK,
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
-    ));
+    let lock = fs::OpenOptions::new()
+        .write(true)
+        .open(root.join(".state/.waap-runtime/state.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let spawn = || {
+        RunningChild(Some(
+            waap_command(root, "startup-held", runtime.path())
+                .args([
+                    "agent",
+                    "prompt",
+                    "--delivery=start",
+                    "--agent-id",
+                    "aa-test",
+                    "--text",
+                    TASK,
+                ])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        ))
+    };
+    let (mut a, mut b) = (spawn(), spawn());
+    drop(lock);
+
+    let mut a_rejected = false;
     wait_until(|| {
-        fs::read_to_string(root.join("backend.pid"))
-            .ok()
-            .and_then(|pid| pid.parse::<u32>().ok())
-            .is_some()
+        a_rejected = a.0.as_mut().unwrap().try_wait().unwrap().is_some();
+        a_rejected || b.0.as_mut().unwrap().try_wait().unwrap().is_some()
     });
+    let (mut rejected, mut child) = if a_rejected { (a, b) } else { (b, a) };
+    let output = rejected.0.take().unwrap().wait_with_output().unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("running -> running"));
+
+    let launches = root.join("backend.pid.launches");
+    wait_until(|| fs::read_to_string(&launches).is_ok_and(|text| text.ends_with('\n')));
     let pid = fs::read_to_string(root.join("backend.pid")).unwrap();
+    assert_eq!(fs::read_to_string(&launches).unwrap(), format!("{pid}\n"));
+    assert!(child.0.as_mut().unwrap().try_wait().unwrap().is_none());
     assert!(Command::new("kill")
         .args(["-TERM", &child.0.as_ref().unwrap().id().to_string()])
         .status()
@@ -357,6 +378,7 @@ fn sigterm_during_async_startup_reaps_child() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("startup interrupted"));
     assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    assert_eq!(fs::read_to_string(launches).unwrap(), format!("{pid}\n"));
     assert!(
         fs::read_to_string(root.join(".state/agents/aa-test/agent.md"))
             .unwrap()

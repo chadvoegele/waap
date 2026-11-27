@@ -17,9 +17,9 @@ waap stores state in a directory under `~/.local/state/waap/data/`. Set `--waap-
 `waap` uses two types:
 
 1. `waap` tickets describe implementation work and live at `${waap_data}/tickets/<ticket-id>/ticket.md`.
-2. `waap` agents contain agent instructions, e.g. `AGENTS.md`, and live at `${waap_data}/agents/<agent-id>/agent.md`.
+2. `waap` agents track a registered backend, the latest turn's status, and its session ID once opened. Their metadata lives at `${waap_data}/agents/<agent-id>/agent.md`.
 
-The records use TOML frontmatter for structured `waap` metadata and the markdown body for unstructured content. The schema is intentionally plain text for agent-friendliness, and can be validated anytime with `waap check` using the `waap` CLI. Git tracking is optional: if you track state, stage and commit changes yourself.
+Records use TOML frontmatter for metadata; tickets also have a Markdown body. Prompts are sent directly to the agent, not stored in its record. Run `waap check` to validate the state. Git tracking is optional: if you track state, stage and commit changes yourself.
 
 Frequently but not always, agents are assigned to work on tickets.
 
@@ -51,36 +51,40 @@ status = "pending"
 Implement the file picker
 ```
 
-Next create an agent to work on the ticket:
+Next register an agent to work on the ticket. Pi is the default backend; choose a different backend with `--system` at registration.
 
-```
-printf "Continue working on `tt-file-picker` until done" | waap agent new --name="File Picker Implementer"
-```
-
-This creates an `agent.md` file at `${waap_data}/agents/aa-file-picker-implementer/agent.md` like
-
-```
-+++
-name = "File Picker Implementer"
-creation_date = 2026-07-06T10:47:39Z
-status = "ready"
-+++
-
-Continue working on `tt-file-picker` until done
+```sh
+waap agent new --name "File Picker Implementer" --system pi
+# Agent ID: aa-file-picker-implementer
 ```
 
-Then run your agent with `waap agent run --agent-id aa-file-picker-implementer`.
+Registration creates a metadata-only `agent.md` with `status = "ready"` and does not open a session. Use the returned ID to send instructions, either with `--text` or by redirecting a Markdown file into `agent prompt`:
 
-Steer a running agent with `waap agent steer --agent-id aa-file-picker-implementer --prompt "Focus on keyboard navigation"`.
-Stop a running agent with `waap agent stop --agent-id aa-file-picker-implementer`.
+```sh
+waap agent prompt --agent-id aa-file-picker-implementer --delivery=start \
+  --text='Continue working on `tt-file-picker` until done.'
+# Or: waap agent prompt --agent-id aa-file-picker-implementer --delivery=start < task.md
+```
+
+From another terminal, steer the active turn or stop it:
+
+```sh
+waap agent prompt --agent-id aa-file-picker-implementer --delivery=steer \
+  --text='Focus on keyboard navigation.'
+waap agent stop --agent-id aa-file-picker-implementer
+```
+
+Without `--delivery`, the default `asap` starts a turn if possible or steers the active turn. Use `start` or `steer` explicitly when only one is intended. Steering is supported by Pi and Codex.
+
+After completion or a stop with a saved session, send another `--delivery=start` prompt to continue the same conversation. Exact resume currently requires Pi 1.5.2, the original launch checkout, and the same session store. Other backends reject resume instead of creating a replacement. The backend runs at the root of the checkout you invoke WAAP from, including linked worktrees; WAAP does not manage those worktrees. See [Agent prompt delivery](specs/agent-turns.md).
 
 ## `waap` Loop
 
 For more complex workflows, follow the same idea but with multiple tickets and use a `waap` loop:
 
 1. While there are unblocked tickets,
-    1. Create agents to complete the work.
-    2. Run the agents.
+    1. Register agents to complete the work.
+    2. Send each agent its task with `agent prompt --delivery=start`.
     3. Add new tickets as needed.
 
 ## CLI
@@ -115,11 +119,18 @@ cargo build --release
 To run checks:
 
 ```sh
-cargo clippy
+cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 cargo test
+python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-To run the end-to-end test:
+To test against the installed Pi 1.5.2 binary and a local model provider stub (no API credentials needed):
+
+```sh
+python3 tests/pi_real_smoke.py target/debug/waap --shutdown-notification
+```
+
+To run the heat-equation end-to-end test:
 
 Ask an agent to run `.agents/skills/waap-heat-equation-e2e-test/SKILL.md`.

@@ -300,28 +300,54 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let old = UnixListener::bind(path).unwrap();
         let mut receiver = None;
-        let code = prompt_agent(repo.path(), root.path(), || {
-            let lock = crate::state::StateLock::acquire(root.path())?;
+        let replace_owner = || {
+            let lock = std::fs::OpenOptions::new()
+                .write(true)
+                .open(root.path().join(".waap-runtime/state.lock"))?;
+            lock.try_lock()
+                .expect("routing must release the state lock before connecting");
             std::fs::remove_file(path)?;
+            seed(root.path(), AgentStatus::Completed, Some("saved"));
+            seed(root.path(), AgentStatus::Running, Some("saved"));
             let replacement = UnixListener::bind(path)?;
             drop(lock);
             let state = root.path().to_owned();
             receiver = Some(std::thread::spawn(move || {
                 let (mut stream, _) = replacement.accept().unwrap();
-                stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
                 let mut frame = String::new();
                 BufReader::new(&stream).read_line(&mut frame).unwrap();
                 let request: serde_json::Value = serde_json::from_str(&frame).unwrap();
                 assert_eq!(request["prompt"], TEXT);
+                assert_eq!(request["method"], "steer");
                 let _lock = crate::state::StateLock::acquire(&state).unwrap();
-                writeln!(stream, "{}", serde_json::json!({"version":1,"request_id":request["request_id"],"accepted":true})).unwrap();
+                let reply = serde_json::json!({
+                    "version": 1, "request_id": request["request_id"], "accepted": true
+                });
+                writeln!(stream, "{reply}").unwrap();
+                replacement
             }));
             Ok(control)
-        }, &OutputFormat::Json, request(Delivery::Asap)).unwrap();
-        receiver.unwrap().join().unwrap();
+        };
+        let code = prompt_agent(
+            repo.path(),
+            root.path(),
+            replace_owner,
+            &OutputFormat::Json,
+            request(Delivery::Asap),
+        )
+        .unwrap();
+        let replacement = receiver.unwrap().join().unwrap();
         assert_eq!(code, ExitCode::SUCCESS);
-        old.set_nonblocking(true).unwrap();
-        assert_eq!(old.accept().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        for listener in [old, replacement] {
+            listener.set_nonblocking(true).unwrap();
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+        }
         assert_eq!(
             read_agent_record(root.path(), ID).unwrap().0.status,
             "running"

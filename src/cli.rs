@@ -79,7 +79,7 @@ pub(crate) enum AgentCommand {
         #[arg(long, value_enum)]
         reasoning_effort: Option<ReasoningEffort>,
     },
-    /// Get an existing agent's metadata and markdown content.
+    /// Get an existing agent's record.
     Get {
         #[arg(long)]
         agent_id: String,

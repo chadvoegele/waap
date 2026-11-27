@@ -69,8 +69,8 @@ class Provider(http.server.BaseHTTPRequestHandler):
                 if len(self.state.requests) == 1:
                     self.state.ready.set()
                     assert self.state.release.wait(15)
-                    self.send_tool_call("printf 'real Pi tool execution\\n' > smoke.txt && git add smoke.txt "
-                                        "&& git -c commit.gpgsign=false commit -m 'Pi smoke'")
+                    self.send_tool_call("pwd -P > first-cwd.txt && printf 'real Pi tool execution\\n' > smoke.txt "
+                                        "&& git add smoke.txt && git -c commit.gpgsign=false commit -m 'Pi smoke'")
                 else:
                     self.send_chunk({"content": "smoke complete"})
                     self.send_chunk({}, "stop")
@@ -164,12 +164,24 @@ def stop_owner(owner):
 
 def read_agent(state, agent):
     record = state / "agents" / agent / "agent.md"
-    return tomllib.loads(record.read_text().split("+++", 2)[1])
+    opening, metadata, body = record.read_text().split("+++", 2)
+    assert not opening and not body.strip(), record
+    return tomllib.loads(metadata)
+
+
+def git_inventory(repo, env):
+    refs = dict(line.split() for line in run(
+        ["git", "for-each-ref", "--format=%(refname) %(objectname)"], cwd=repo, env=env
+    ).splitlines())
+    worktrees = run(["git", "worktree", "list", "--porcelain"], cwd=repo, env=env)
+    return refs, worktrees
 
 
 def session_files(env):
-    default_store = Path(env["PI_CODING_AGENT_DIR"]) / "sessions"
-    return set(Path(env.get("PI_CODING_AGENT_SESSION_DIR", default_store)).rglob("*.jsonl"))
+    stores = [Path(env["PI_CODING_AGENT_DIR"]) / "sessions"]
+    if "PI_CODING_AGENT_SESSION_DIR" in env:
+        stores.append(Path(env["PI_CODING_AGENT_SESSION_DIR"]))
+    return {session for store in stores for session in store.rglob("*.jsonl")}
 
 
 def verify_run(repo, state, env, agent, provider):
@@ -182,6 +194,7 @@ def verify_run(repo, state, env, agent, provider):
     assert not list(Path(env["XDG_RUNTIME_DIR"]).rglob("*.sock"))
     assert session_files(env), "Pi did not persist the real session"
     if provider.mode == "complete":
+        assert Path((repo / "first-cwd.txt").read_text().strip()) == repo.resolve()
         assert "real Pi tool execution" in run(["git", "show", "HEAD:smoke.txt"], cwd=repo, env=env)
         assert any("Include snow 雪 in your review" in json.dumps(request, ensure_ascii=False)
                    for request in provider.requests[1:]), provider.requests
@@ -189,19 +202,24 @@ def verify_run(repo, state, env, agent, provider):
     return record
 
 
-def run_smoke_case(base, checkout, other, state, env, provider):
+def run_smoke_case(base, repo, checkout, other, state, env, provider):
     config = Path(env["PI_CODING_AGENT_DIR"])
     (config / "shutdown-ran").unlink(missing_ok=True)
     nested = checkout / "nested"
     nested.mkdir(exist_ok=True)
+    before = git_inventory(repo, env)
     sentinel = uuid.uuid4().hex
     agent = json.loads(run(base + ["--output-format", "json", "agent", "new", "--name", provider.mode],
                            cwd=nested, env=env))["agent_id"]
+    ready = read_agent(state, agent)
+    assert ready["status"] == "ready" and ready["system"] == "pi" and "session_id" not in ready, ready
     prompt = base + ["agent", "prompt", "--delivery=start", "--agent-id", agent,
                      "--model", "local-smoke/fixture"]
-    owner = subprocess.Popen(prompt + ["--text", f"Remember this smoke sentinel: {sentinel}"],
-                             cwd=nested, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                             text=True, start_new_session=True)
+    task = nested / "task.md"
+    task.write_text(f"# Smoke task\n\nRemember this smoke sentinel: {sentinel}\n")
+    with task.open() as stdin:
+        owner = subprocess.Popen(prompt, stdin=stdin, cwd=nested, env=env, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True, start_new_session=True)
     try:
         assert provider.ready.wait(15), "real Pi did not contact the local provider"
         if provider.mode == "complete":
@@ -218,12 +236,33 @@ def run_smoke_case(base, checkout, other, state, env, provider):
         provider.release.set()
         stop_owner(owner)
 
+    after_first = git_inventory(repo, env)
+    if provider.mode == "complete":
+        # The fixture explicitly committed to smoke; WAAP must not move other refs or worktrees.
+        refs, worktrees = before
+        old = refs["refs/heads/smoke"]
+        new = run(["git", "rev-parse", "HEAD"], cwd=checkout, env=env).strip()
+        assert run(["git", "rev-parse", "HEAD^"], cwd=checkout, env=env).strip() == old
+        refs = {**refs, "refs/heads/smoke": new}
+        block = f"worktree {checkout.resolve()}\nHEAD {old}\nbranch refs/heads/smoke\n"
+        assert block in worktrees
+        expected = worktrees.replace(block, block.replace(f"HEAD {old}", f"HEAD {new}"))
+        assert after_first == (refs, expected)
+    else:
+        assert after_first == before
+
     files = session_files(env)
     session, = (path for path in files if json.loads(path.read_bytes().splitlines()[0])["id"] == first["session_id"])
     original = session.read_bytes()
+    assert Path(json.loads(original.splitlines()[0])["cwd"]) == checkout.resolve()
     provider.reset("resume")
-    followup = prompt + ["--text", "Recall the earlier smoke sentinel and check your tool directory."]
-    run(followup, cwd=other, env=env, error="run from the original checkout")
+    followup_text = "Recall the earlier smoke sentinel and check your tool directory."
+    followup = prompt + ["--text", followup_text]
+    for artifact in ["resume-cwd.txt", "recalled.txt"]:
+        (checkout / artifact).unlink(missing_ok=True)
+    other_nested = other / "nested"
+    other_nested.mkdir(exist_ok=True)
+    run(followup, cwd=other_nested, env=env, error="run from the original checkout")
     assert not provider.requests and session.read_bytes() == original
     assert read_agent(state, agent) == first
     assert session_files(env) == files
@@ -235,11 +274,13 @@ def run_smoke_case(base, checkout, other, state, env, provider):
     assert len(provider.requests) == 2, provider.requests
     assert (checkout / "recalled.txt").read_text() == sentinel
     assert Path((checkout / "resume-cwd.txt").read_text().strip()) == checkout.resolve()
-    assert not (other / "resume-cwd.txt").exists()
+    assert not (other / "resume-cwd.txt").exists() and not (repo / "resume-cwd.txt").exists()
+    assert git_inventory(repo, env) == after_first
     completed = read_agent(state, agent)
     assert completed == {**first, "status": "completed"}
     assert session_files(env) == files
-    assert session.read_bytes().startswith(original)
+    resumed = session.read_bytes()
+    assert resumed.startswith(original) and followup_text.encode() in resumed[len(original):]
     assert not list(Path(env["XDG_RUNTIME_DIR"]).rglob("*.sock"))
 
     session.unlink()
@@ -279,14 +320,14 @@ def main():
             checkout, other = root / "linked", root / "other"
             run(["git", "worktree", "add", "-qb", "smoke", str(checkout)], cwd=repo, env=env)
             run(["git", "worktree", "add", "-q", "--detach", str(other)], cwd=repo, env=env)
-            state = root / "state"
-            base = [str(args.waap.resolve()), "--waap-root", str(state)]
+            base = [str(args.waap.resolve())]
+            state = Path(env["HOME"]) / ".local/state/waap/data" / repo.resolve().relative_to("/")
             run(base + ["init"], cwd=repo, env=env)
             provider.reset("complete")
-            run_smoke_case(base, checkout, other, state, env, provider)
+            run_smoke_case(base, repo, checkout, other, state, env, provider)
             provider.reset("stop")
             env["PI_CODING_AGENT_SESSION_DIR"] = str(root / "shared Pi sessions")
-            run_smoke_case(base, checkout, other, state, env, provider)
+            run_smoke_case(base, repo, checkout, other, state, env, provider)
     finally:
         provider.release.set()
         server.shutdown()
