@@ -12,13 +12,15 @@ Use one WAAP command to send a prompt to an agent. The caller can start a turn, 
 
 ## Context
 
-Today, `agent new` stores a prompt in `agent.md`. `agent run` sends a reference to that file, creates a temporary execution worktree, and only accepts a `ready` agent. This proposal supersedes those parts of the [main spec](spec.md) and [backend spec](agent-system-backend.md), and replaces the standalone CLI in the [steering spec](agent-steering.md). Existing live steering delivery and acknowledgement semantics still apply.
+Today, `agent new` stores a prompt in `agent.md`. `agent run` sends a reference to that file and only accepts a `ready` agent. This proposal supersedes those parts of the [main spec](spec.md) and [backend spec](agent-system-backend.md), and replaces the standalone CLI in the [steering spec](agent-steering.md). Existing live steering delivery and acknowledgement semantics still apply.
+
+The [shared state directory](waap-state-worktree.md) and [execution directory](spec.md#execution-directory) already separate record storage from agent execution. WAAP does not manage Git for either; users may track state in Git, and the developer role manages its own execution worktree.
 
 ## Goals
 
 - Register an agent and select its backend without opening a session.
 - Send the first prompt and later prompts through `agent prompt`, preserving the backend session across turns.
-- Let callers choose delivery explicitly and leave execution worktree management to the agent or caller.
+- Let callers choose delivery explicitly without changing where state is stored or where agents run.
 
 ## Non-goals
 
@@ -81,21 +83,21 @@ For a `ready` agent, `start` must create a session on the registered backend, pe
 | `ready` | `agent stop --agent-id <id>` cancels the agent before its first turn. | `aborted` |
 | `running` | `prompt` takes the `steer` path and delivers to the active turn. | `running` (unchanged) |
 | `running` | The turn finishes successfully. | `completed` |
-| `running` | The owner confirms the turn was stopped after `agent stop` or an interrupt. | `aborted` |
+| `running` | `agent stop` or an interrupt cancels the active turn before it completes normally. | `aborted` |
 | `running` | First-session startup or turn execution fails. | `failed` |
 | `running` | A follow-up fails to reopen its saved session before submission. | Prior `completed` or `aborted` status |
 
-WAAP must claim `running` atomically before starting backend work. Only one invocation may own a turn. Its owner stays attached until settlement and persists the actual outcome. Accepting a stop request alone does not end the turn; if natural completion wins the race, record `completed`. Stopping a `ready` agent leaves no session to resume. `agent stop` without an ID targets only `running` agents.
+WAAP must claim `running` atomically under the shared state directory lock before starting backend work. Only one invocation may own a turn. Release the lock before backend work or waits on the live owner. Record changes use the existing atomic writes; these commands must not modify Git state or report commit hashes. The invocation that starts a turn stays attached until settlement and persists the actual outcome. Accepting a stop request alone does not end the turn; if natural completion wins the race, record `completed`. Stopping a `ready` agent leaves no session to resume. `agent stop` without an ID targets only `running` agents.
 
 This table lists all lifecycle transitions. Rejected commands and metadata updates do not change status; `failed` has no outgoing transition in this release.
 
 ### Execution directory
 
-Use the resolved repository root as the backend's working directory. WAAP must not create, reuse, or remove a Git execution worktree on an agent's behalf. Agents or callers that need isolation must manage it themselves. A resumed session restores conversation history, not a filesystem snapshot.
+Preserve the existing [launch behavior](spec.md#execution-directory): start the backend at the root of the application checkout containing the invocation directory, including when that checkout is a linked worktree. This is not necessarily the primary checkout used to resolve the default shared state path. WAAP does not manage execution worktrees; isolation is up to the agent or caller. A resumed session restores conversation history, not a filesystem snapshot.
 
 ## Compatibility
 
-Backward compatibility with the previous agent record format and CLI structure is not required. No state migration, legacy record reader, or command aliases are required. `agent prompt` replaces `agent run` and `agent steer`; callers that require steering only must use `--delivery=steer`. Scripts must move prompt redirection from `new` to `prompt` and select the backend at `new`. Leave historical execution worktrees and branches untouched.
+Backward compatibility with the previous agent record format and CLI structure is not required. No state migration, legacy record reader, or command aliases are required. `agent prompt` replaces `agent run` and `agent steer`; callers that require steering only must use `--delivery=steer`. Scripts must move prompt redirection from `new` to `prompt` and select the backend at `new`.
 
 Backend resume may ship incrementally. Pi is the proposed first backend; each backend must demonstrate exact-session resume before advertising support. Existing per-turn model and reasoning options should remain available when starting turns without changing the registered backend.
 
@@ -111,4 +113,5 @@ Backend resume may ship incrementally. Pi is the proposed first backend; each ba
 - Start a first turn, complete it, and start a follow-up. Verify that it recalls information from the first turn and preserves the session ID. Repeat after an explicit stop with a saved session ID.
 - Verify all three delivery modes against active and idle agents, including that omitting `--delivery` behaves like explicit `asap` in both cases. Verify that `asap` does not fall back after failed steering and that a turn finishing during live delivery cannot silently trigger a new turn. Verify that `--delivery=queue` is rejected without changing state.
 - Verify that concurrent requests cannot create overlapping turns, and that unavailable sessions and unsupported operations never create a replacement session.
-- Verify the working directory and that no path creates or removes an execution worktree.
+- Verify registration and turn state changes in a plain state directory and a user-managed Git checkout with its index locked. Confirm that no Git index or ref changes and no commit hash appears in the reports.
+- Verify that first and later turns launched from a subdirectory of a linked checkout start at that checkout's root, resolve the shared state, and leave existing worktrees and branches untouched.
