@@ -1,5 +1,5 @@
 +++
-status = "draft"
+status = "final"
 created = 2026-11-26
 last_update = 2026-11-27
 +++
@@ -27,6 +27,7 @@ The [shared state directory](waap-state-worktree.md) and [execution directory](s
 - Queued follow-ups (`--delivery=queue`) and image input (`--image`); both are future scope.
 - Creating empty sessions at registration, switching backends mid-session, or emulating resume by replaying history.
 - Changing WAAP state storage, recovering stale `running` records, or retrying `failed` agents in the initial release.
+- Fixing pre-existing lifecycle ownership bugs as part of the prompt change.
 
 ## Specification
 
@@ -65,11 +66,15 @@ Omitting `--delivery` must behave exactly like `--delivery=asap`.
 | `steer` | Reject without starting a turn. | Deliver to the current turn using native steering. |
 | `asap` | Act as `start`. | Act as `steer`. |
 
-Route each request once. If the chosen turn ends before live delivery, the live owner is unreachable, or the backend does not support steering, return an error rather than falling back to another mode. If delivery may already have occurred, report uncertainty without automatically retrying. A stale `running` record, or an owner not yet accepting steering requests, must not be treated as idle. `failed` agents are outside the initial delivery scope.
+Route each request once. A read of `running` selects the steering path but does not identify a specific turn. Steering targets the turn owned by the WAAP process that accepts the control connection, even if a new turn started between the status read and the connection. If that connection closes before delivery, the owner is unreachable or not accepting steering, or the backend does not support steering, return an error without reconnecting or falling back to `start`. If delivery may already have occurred, report uncertainty without automatically retrying. A stale `running` record must not be treated as idle. `failed` agents are outside the initial delivery scope.
+
+Starting a turn preserves backend output streaming. Do not add an output field or event announcing which delivery mode `asap` selected.
 
 ### Starting and resuming turns
 
 For a `ready` agent, `start` must create a session on the registered backend, persist the adapter's session ID, and send the first prompt. For a `completed` or `aborted` agent, `start` must reopen the session identified by the stored `system` and `session_id` and send the prompt as a new turn. Missing metadata, a missing session, or an unsupported resume operation must result in an error, not a replacement session. WAAP must not require a backend to accept the WAAP agent ID as its session ID.
+
+Each WAAP process that starts a turn owns only that turn and exits after settlement. A follow-up uses a new WAAP process to resume the saved backend session. Backend turn IDs, when available, remain in memory and must not be written to WAAP state.
 
 ### Agent lifecycle
 
@@ -111,7 +116,8 @@ Backend resume may ship incrementally. Pi is the proposed first backend; each ba
 - Exercise every lifecycle transition, including stop before first start, natural completion racing a stop, and rollback after a failed reopen. Verify that steering, rejected commands, and metadata updates leave status unchanged.
 - Verify exact text delivery from `--text` and redirected Markdown. Reject missing or blank input and `--image` without changing state. Verify no prompt content is written to `agent.md`.
 - Start a first turn, complete it, and start a follow-up. Verify that it recalls information from the first turn and preserves the session ID. Repeat after an explicit stop with a saved session ID.
-- Verify all three delivery modes against active and idle agents, including that omitting `--delivery` behaves like explicit `asap` in both cases. Verify that `asap` does not fall back after failed steering and that a turn finishing during live delivery cannot silently trigger a new turn. Verify that `--delivery=queue` is rejected without changing state.
+- Verify all three delivery modes against active and idle agents, including that omitting `--delivery` behaves like explicit `asap`. Verify that starting a turn streams backend output without adding a field or event announcing the selected delivery mode. Verify that `--delivery=queue` is rejected without changing state.
+- Verify that a replacement owner listening before the steering CLI connects is the target. If the connected owner exits while delivery is pending, verify that the CLI neither reconnects to a replacement owner nor starts a new turn.
 - Verify that concurrent requests cannot create overlapping turns, and that unavailable sessions and unsupported operations never create a replacement session.
 - Verify registration and turn state changes in a plain state directory and a user-managed Git checkout with its index locked. Confirm that no Git index or ref changes and no commit hash appears in the reports.
 - Verify that first and later turns launched from a subdirectory of a linked checkout start at that checkout's root, resolve the shared state, and leave existing worktrees and branches untouched.
