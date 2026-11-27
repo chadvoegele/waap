@@ -43,7 +43,7 @@ waap agent stop
 
 ## State Model
 
-Use the waap CLI to change plain-text records. To track state in Git, use a checkout you manage and commit changes yourself. Git ignores the lock in `.waap-runtime/`.
+Use the waap CLI to change plain-text records. To track state in Git, use a checkout you manage and commit changes yourself.
 
 ### Running Outside the Sandbox
 
