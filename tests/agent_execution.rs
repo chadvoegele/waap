@@ -60,6 +60,7 @@ if mode == 'startup-held':
     time.sleep(60)
 root = os.path.dirname(os.environ['WAAP_TEST_PID_FILE'])
 if mode == 'check-lifecycle':
+    assert os.getcwd() == root
     record_path = Path(root) / '.state/agents/aa-test/agent.md'
     record = record_path.read_text()
     assert 'status = "running"' in record
@@ -81,6 +82,8 @@ for line in sys.stdin:
         time.sleep(60)
     result = {}
     if method == 'thread/start':
+        if mode == 'check-lifecycle':
+            assert request['params']['cwd'] == root
         result = {'thread': {'id': 'th_test'}}
     if method == 'turn/start':
         if mode == 'check-lifecycle':
@@ -168,11 +171,25 @@ exit 99
 }
 
 #[test]
-fn agent_run_persists_lifecycle_with_a_locked_state_index() {
+fn agent_run_uses_application_checkout_and_leaves_git_untouched() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     init_repo(root);
     seed_backend(root);
+    let existing = root.join("worktrees/aa-test");
+    git(
+        root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "aa-test",
+            existing.to_str().unwrap(),
+        ],
+    );
+    fs::write(existing.join("uncommitted.txt"), "preserve me").unwrap();
+    let worktrees = git(root, &["worktree", "list", "--porcelain"]);
+    let branches = git(root, &["branch", "--list"]);
     let state = root.join(".state");
     fs::create_dir(&state).unwrap();
     init_repo(&state);
@@ -192,12 +209,17 @@ fn agent_run_persists_lifecycle_with_a_locked_state_index() {
     assert_eq!(git(&state, &["rev-parse", "HEAD"]), head);
     assert_eq!(fs::read(state.join(".git/index")).unwrap(), index);
     assert!(state.join(".git/index.lock").is_file());
-    assert!(!root.join("worktrees/aa-test").exists());
+    assert_eq!(git(root, &["worktree", "list", "--porcelain"]), worktrees);
+    assert_eq!(git(root, &["branch", "--list"]), branches);
+    assert_eq!(
+        fs::read_to_string(existing.join("uncommitted.txt")).unwrap(),
+        "preserve me"
+    );
     assert!(waap(root, &["check"], "completed").status.success());
 }
 
 #[test]
-fn codex_success_failure_and_malformed_startup_reap_process_and_clean_worktree() {
+fn codex_success_failure_and_malformed_startup_reap_process() {
     for (mode, status, success) in [
         ("completed", "completed", true),
         ("failed", "failed", false),
@@ -246,14 +268,12 @@ fn codex_success_failure_and_malformed_startup_reap_process_and_clean_worktree()
             !Path::new(&format!("/proc/{pid}")).exists(),
             "backend was not reaped"
         );
-        assert!(!root.join("worktrees/aa-test").exists());
-        assert!(!git(root, &["worktree", "list"]).contains("worktrees/aa-test"));
         assert!(waap(root, &["check"], mode).status.success());
     }
 }
 
 #[test]
-fn sigterm_during_async_startup_reaps_child_before_worktree_cleanup() {
+fn sigterm_during_async_startup_reaps_child() {
     let repo = tempfile::tempdir().unwrap();
     let runtime = tempfile::tempdir().unwrap();
     let root = repo.path();
@@ -291,8 +311,6 @@ fn sigterm_during_async_startup_reaps_child_before_worktree_cleanup() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("startup interrupted"));
     assert!(!Path::new(&format!("/proc/{pid}")).exists());
-    assert!(!root.join("worktrees/aa-test").exists());
-    assert!(!git(root, &["worktree", "list"]).contains("worktrees/aa-test"));
     assert!(
         fs::read_to_string(root.join(".state/agents/aa-test/agent.md"))
             .unwrap()
@@ -332,12 +350,6 @@ fn native_codex_steering_through_run_owner_preserves_state_output_and_cleanup() 
             json!({"agent_id":run.agent_id, "accepted":true})
         );
         assert_eq!(run.snapshot(), before);
-        assert!(run
-            .repo
-            .path()
-            .join("worktrees")
-            .join(&run.agent_id)
-            .is_dir());
         if interrupt {
             run.stop();
         } else {
@@ -519,13 +531,6 @@ impl SteeringRun {
         assert!(record.contains("session_id = \"th_test\""));
         assert!(!self.repo.path().join("pkill-used").exists());
         assert!(!self.socket.exists());
-        assert!(!self
-            .repo
-            .path()
-            .join("worktrees")
-            .join(&self.agent_id)
-            .exists());
-        assert!(!git(self.repo.path(), &["worktree", "list"]).contains(&self.agent_id));
         let pid = fs::read_to_string(self.repo.path().join("backend.pid")).unwrap();
         assert!(!Path::new(&format!("/proc/{pid}")).exists());
         let later = self.steer("after exit").output().unwrap();
@@ -604,12 +609,6 @@ fn native_failures_reach_cli_without_prompt_disclosure_retries_or_lifecycle_chan
         } else {
             assert_eq!(run.snapshot(), before);
             assert!(run.socket.exists());
-            assert!(run
-                .repo
-                .path()
-                .join("worktrees")
-                .join(&run.agent_id)
-                .is_dir());
             run.stop();
             run.finish("aborted", true);
         }

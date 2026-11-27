@@ -1,7 +1,7 @@
 +++
 status = "final"
 created = 2026-11-25
-last_update = 2026-11-25
+last_update = 2026-11-27
 +++
 
 # Shared waap state directory
@@ -35,9 +35,9 @@ CLI -> resolve state path -> acquire StateLock -> read and validate records
 
 `waap init` creates missing `agents/` and `tickets/` directories and reports the resolved path. Existing records stay intact. `waap check` reports the state path and validates the records on disk regardless of Git status.
 
-State access uses a per-directory lock under the Git-ignored `.waap-runtime/` directory. waap must hold the lock across a read, validation, and atomic record update. The lock is released before waiting for an external agent. `waap agent run` persists `running` before launch, records the session ID before running the session, and persists the final status after the session and worktree cleanup.
+State access uses a per-directory lock under the Git-ignored `.waap-runtime/` directory. waap must hold the lock across a read, validation, and atomic record update. The lock is released before waiting for an external agent. `waap agent run` persists `running` before launch, records the session ID before running the session, and persists the final status after the session and backend cleanup.
 
-State commands must not manage Git branches, the index, commits, or remotes, and report no commit hash. Agent execution still creates an isolated Git worktree from the application checkout's HEAD and removes it afterward.
+State commands must not manage Git branches, the index, commits, or remotes, and report no commit hash. See [Execution Directory](spec.md#execution-directory) for agent launch behavior.
 
 When the primary checkout moves, stop commands and agents before moving a plain state directory. Use `waap check` from the new checkout to identify the destination, create its parent directories, move the old directory, then run `waap check` again. An explicit state path can stay in place. There is no `waap repair` command.
 

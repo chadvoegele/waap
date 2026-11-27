@@ -1,5 +1,7 @@
 # Agent system backend
 
+The [execution directory specification](spec.md#execution-directory) supersedes any launcher-managed worktree behavior described here.
+
 This design describes the original backend refactor. The [shared state directory specification](waap-state-worktree.md) supersedes its state-commit and commit-report behavior.
 
 Design for consolidating Opencode, Claude, and Codex behavior behind one

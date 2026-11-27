@@ -56,7 +56,7 @@ impl PiBackend {
     ) -> io::Result<AgentSessionRun> {
         let mut sigterm = signal(SignalKind::terminate())?;
         let mut sigint = signal(SignalKind::interrupt())?;
-        let mut command = build_pi_command(&self.config, context.agent_id, context.worktree_dir);
+        let mut command = build_pi_command(&self.config, context.agent_id, context.repository_root);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -80,7 +80,7 @@ impl PiBackend {
         let (client, session_id) = match started {
             Ok(started) => started,
             Err(error) => {
-                return super::worktree::collapse_errors(Err(error), process.terminate().await)
+                return super::run::collapse_errors(Err(error), process.terminate().await)
             }
         };
         Ok(AgentSessionRun::new(

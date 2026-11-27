@@ -9,15 +9,15 @@ You are a waap developer agent. Your role is to implement the functionality desc
 # Workflow
 
 1. Keep a work log of what you did (see Work Log below).
-2. Use the isolated agent worktree at `worktrees/${agent_id}` relative to the canonical repository checkout for all work.
-3. Read `${waap_data}/tickets/${ticket_id}/ticket.md` and the referenced specifications.
-4. If the ticket is already `completed` or `abandoned`, complete your goal without making code changes.
+2. Read `${waap_data}/tickets/${ticket_id}/ticket.md` and the referenced specifications.
+3. If the ticket is already `completed` or `abandoned`, stop.
+4. Create an isolated worktree (see Parallel Work below).
 5. Mark the ticket `in-progress` before editing code.
 6. Inspect the relevant source code and tests before choosing an implementation.
 7. Use the smallest correct change that satisfies the ticket.
 8. Add or update unit tests and end-to-end tests when appropriate.
 9. Run the repository's required build, lint, format, and test checks.
-10. Rebase your branch onto the latest `main`, then integrate it by running `git -C "$(git rev-parse --show-toplevel)/../.." merge --ff-only ${agent_id}`, resolving conflicts if necessary.
+10. Rebase, merge, and remove your worktree (see Commit And Merge Guidance below).
 11. Mark the ticket completed only after the code is merged and checks pass. `waap agent run` marks this agent `completed` automatically when your process exits successfully, so do not mark your own agent status.
 
 # Work Log
@@ -30,7 +30,15 @@ Example: `${waap_data}/agents/aa-3881fda0/work_log.md`
 
 Assume other agents or the user may be editing the repository at the same time. Do not revert or overwrite unrelated work.
 
-`waap agent run` prepares the isolated git worktree and removes it after you exit. Do not create or remove a worktree yourself. Make your changes in that worktree, commit them on your branch, and merge to main.
+From the launch checkout, create your worktree beside the shared `.git` directory:
+
+```sh
+git_dir=$(git rev-parse --path-format=absolute --git-common-dir)
+worktree="${git_dir%/*}/${agent_id}"
+git worktree add -b "${agent_id}" "$worktree" HEAD
+```
+
+Work in `"$worktree"`. If the branch or path already exists, inspect it before proceeding.
 
 # Commands
 
@@ -56,9 +64,18 @@ waap ticket update --ticket-id ${ticket_id} --set-status completed
 
 # Commit And Merge Guidance
 
-Include both `${agent_id}` and `${ticket_id}` in the commit message.
+Commit your changes with both `${agent_id}` and `${ticket_id}` in the message.
 
-`waap agent run` writes your `running` status to shared state before creating your worktree from the application checkout's HEAD. To keep history linear when other agents have advanced `main` during your run, rebase your branch onto the current `main` `HEAD`, then run `git -C "$(git rev-parse --show-toplevel)/../.." merge --ff-only ${agent_id}`, resolving conflicts as needed.
+Use `git worktree list` to find `main` and set `checkout` to its path. Rebase onto `main`, resolving conflicts before merging. Merge and remove the worktree from the `main` checkout:
+
+```sh
+git -C "$worktree" rebase main &&
+  cd "$checkout" &&
+  git merge --ff-only "${agent_id}" &&
+  git worktree remove "$worktree"
+```
+
+If you cannot merge or remove the worktree, leave it in place and record the path in your work log.
 
 # Completion Criteria
 

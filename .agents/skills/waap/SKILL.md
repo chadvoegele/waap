@@ -105,7 +105,7 @@ It is helpful to ensure continuity across agents, to also instruct the agent to 
 
 ## Agent Parallelization
 
-`waap agent run` owns the agent worktree lifecycle. Before launching the selected system, it creates an isolated git worktree (`worktrees/<agent-id>`); after the system process exits it removes that worktree. Detailed agent instructions specify where the agent works and how it integrates changes, allowing merge, push, or pull-request workflows without changing the launcher.
+`waap agent run` starts the agent at the root of the launch checkout. The [Developer role](./roles/developer/agent.md) creates and removes its own worktree.
 
 ## Agent Frontmatter
 
