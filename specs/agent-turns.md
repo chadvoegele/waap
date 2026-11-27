@@ -8,7 +8,7 @@ last_update = 2026-11-26
 
 ## Purpose
 
-Use one WAAP command to send a prompt to an agent. The caller chooses whether to start a turn, steer the current turn, or queue a follow-up.
+Use one WAAP command to send a prompt to an agent. The caller can start a turn, steer the current turn, or let WAAP choose based on whether a turn is active.
 
 ## Context
 
@@ -22,7 +22,7 @@ Today, `agent new` stores a prompt in `agent.md`. `agent run` sends a reference 
 
 ## Non-goals
 
-- Image input (`--image`) or other non-text inputs.
+- Queued follow-ups (`--delivery=queue`) and image input (`--image`); both are future scope.
 - Creating empty sessions at registration, switching backends mid-session, or emulating resume by replaying history.
 - Changing WAAP state storage, recovering stale `running` records, or retrying `failed` agents in the initial release.
 
@@ -34,7 +34,6 @@ waap agent new --system pi
 waap agent prompt --agent-id aa-1234abcd --delivery=start < task.md
 # From another terminal, while a turn is active:
 waap agent prompt --agent-id aa-1234abcd --delivery=steer --text='Focus on keyboard navigation.'
-waap agent prompt --agent-id aa-1234abcd --delivery=queue --text='Add a regression test.'
 # Omit --delivery to start or steer based on whether a turn is active:
 waap agent prompt --agent-id aa-1234abcd --text='Check the accessibility notes.'
 ```
@@ -43,8 +42,7 @@ waap agent prompt --agent-id aa-1234abcd --text='Check the accessibility notes.'
 Registration ───→ Agent record
 Prompt input ───→ Delivery routing ───→ Turn owner ───→ Backend session
                        │                    ▲
-                       ├──→ Live control ───┤
-                       └──→ Follow-up queue ┘
+                       └──→ Live control ───┘
 ```
 
 ### Registration and input
@@ -59,22 +57,17 @@ Omitting `--delivery` must behave exactly like `--delivery=asap`.
 
 | Mode | Agent can start a turn | Turn active |
 | --- | --- | --- |
-| `start` | Start a new turn. | Reject without steering or queueing. |
+| `start` | Start a new turn. | Reject without steering. |
 | `steer` | Reject without starting a turn. | Deliver to the current turn using native steering. |
-| `queue` | Reject; there is no active turn to queue behind. | Queue a new turn for after the active turn settles. |
 | `asap` | Act as `start`. | Act as `steer`. |
 
-Route each request once. If the chosen turn ends before live delivery, the live owner is unreachable, or the backend does not support steering, return an error rather than falling back to another mode. If delivery may already have occurred, report uncertainty without automatically retrying. A stale `running` record, or an owner not yet accepting steering or queue requests, must not be treated as idle. `failed` agents are outside the initial delivery scope.
+Route each request once. If the chosen turn ends before live delivery, the live owner is unreachable, or the backend does not support steering, return an error rather than falling back to another mode. If delivery may already have occurred, report uncertainty without automatically retrying. A stale `running` record, or an owner not yet accepting steering requests, must not be treated as idle. `failed` agents are outside the initial delivery scope.
 
 ### Starting and resuming turns
 
 For a `ready` agent, `start` must create a session on the registered backend, persist the adapter's session ID, and send the first prompt. For a `completed` or `aborted` agent, `start` must reopen the session identified by the stored `system` and `session_id` and send the prompt as a new turn. Missing metadata, a missing session, or an unsupported resume operation must result in an error, not a replacement session. WAAP must not require a backend to accept the WAAP agent ID as its session ID.
 
 Only one owner may start turns for an agent at a time. WAAP must claim `running` atomically before starting backend work. The owner remains attached and records the final outcome as `completed`, `aborted`, or `failed`. If reopening fails before submission, restore the prior status and keep the session identity. `agent update` must not be able to claim a turn.
-
-### Queued follow-ups
-
-An accepted queue request is acknowledged as **queued**, not delivered. After normal turn completion, the owner must start queued prompts as new turns in acceptance order on the same backend session, without injecting text into the current turn. The turn owner must serialize settlement, queue acceptance, and starting the next turn so that it cannot acknowledge a request after it has stopped processing follow-ups. An explicit stop must not start another turn from the queue.
 
 ### Execution directory
 
@@ -86,16 +79,15 @@ Use the resolved repository root as the backend's working directory. WAAP must n
 
 Backend resume may ship incrementally. Pi is the proposed first backend; each backend must demonstrate exact-session resume before advertising support. Existing per-turn model and reasoning options should remain available when starting turns without changing the registered backend.
 
-## Open questions
+## Future scope
 
-- Should the queue exist only for the lifetime of the live owner, or survive process exit? How should callers learn that accepted but undelivered entries were discarded after a failure or stop?
+`--delivery=queue` will accept follow-up prompts only while a turn is active, for delivery as a new turn after the current one finishes. Queue lifecycle and durability are outside this specification.
 
 ## Verification
 
 - Verify that `new` records the explicit or default backend without reading stdin or opening a session.
 - Verify exact text delivery from `--text` and redirected Markdown. Reject missing or blank input and `--image` without changing state. Verify no prompt content is written to `agent.md`.
 - Start a first turn, complete it, and start a follow-up. Verify that it recalls information from the first turn and preserves the session ID. Repeat after an explicit stop with a saved session ID.
-- Verify all four delivery modes against active and idle agents, including that omitting `--delivery` behaves like explicit `asap` in both cases. Verify that `asap` does not fall back after failed steering and that a turn finishing during live delivery cannot silently trigger a new turn.
-- Queue multiple prompts and verify acknowledgement before delivery, FIFO new turns on the same session, and no queued turn starting after stop.
+- Verify all three delivery modes against active and idle agents, including that omitting `--delivery` behaves like explicit `asap` in both cases. Verify that `asap` does not fall back after failed steering and that a turn finishing during live delivery cannot silently trigger a new turn. Verify that `--delivery=queue` is rejected without changing state.
 - Verify that concurrent requests cannot create overlapping turns, and that unavailable sessions and unsupported operations never create a replacement session.
 - Verify the working directory and that no path creates or removes an execution worktree.
