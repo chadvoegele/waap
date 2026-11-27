@@ -15,7 +15,6 @@ use crate::agent::{
 use crate::check::{check_waap, print_check_result};
 use crate::cli::{AgentCommand, Cli, Command, TicketCommand};
 use crate::init::{init_project, print_init_report};
-use crate::repair::{print_repair_report, repair_project};
 use crate::root::{find_control_root, find_git_root, find_waap_root};
 use crate::ticket::{
     create_ticket, get_ticket, list_tickets, print_ticket_get_report, print_ticket_list,
@@ -76,7 +75,7 @@ pub(crate) fn run() -> ExitCode {
     }
 
     match cli.command {
-        Command::Init => match init_project(repository_root, waap_root) {
+        Command::Init => match init_project(waap_root) {
             Ok(report) => {
                 print_init_report(&cli.output_format, &report);
                 ExitCode::SUCCESS
@@ -90,15 +89,6 @@ pub(crate) fn run() -> ExitCode {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::from(1)
-            }
-        }
-        Command::Repair => {
-            match repair_project(repository_root, waap_root, cli.waap_root.is_some()) {
-                Ok(report) => {
-                    print_repair_report(&cli.output_format, &report);
-                    ExitCode::SUCCESS
-                }
-                Err(error) => command_error("failed to repair waap state", error),
             }
         }
         Command::Agent { command } => match command {

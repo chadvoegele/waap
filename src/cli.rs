@@ -16,7 +16,7 @@ pub(crate) struct Cli {
     #[arg(long, value_enum, default_value = "human-readable", global = true)]
     pub(crate) output_format: OutputFormat,
 
-    /// Waap state directory. Defaults to the repository's dedicated state worktree.
+    /// Override the shared state directory for the application repository.
     #[arg(long, global = true)]
     pub(crate) waap_root: Option<PathBuf>,
 
@@ -32,12 +32,10 @@ pub(crate) enum OutputFormat {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
-    /// Initialize a new waap project.
+    /// Create missing state directories without changing existing records.
     Init,
     /// Validate waap state.
     Check,
-    /// Repair and relocate a moved waap state worktree.
-    Repair,
     /// Manage agents.
     Agent {
         #[command(subcommand)]

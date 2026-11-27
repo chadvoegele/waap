@@ -2,16 +2,14 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 
-use crate::git::run_git;
-
-/// Serializes a state read/modify/commit transaction across waap processes.
+/// Serializes access to the shared state across waap processes.
 pub(crate) struct StateLock {
     file: File,
 }
 
 impl StateLock {
     pub(crate) fn acquire_for_read(state_root: &Path) -> io::Result<Option<Self>> {
-        if state_root.is_dir() && crate::root::find_git_root(state_root).is_ok() {
+        if state_root.is_dir() {
             Self::acquire(state_root).map(Some)
         } else {
             Ok(None)
@@ -19,16 +17,12 @@ impl StateLock {
     }
 
     pub(crate) fn acquire(state_root: &Path) -> io::Result<Self> {
-        let output = run_git(
-            state_root,
-            &[
-                "rev-parse".into(),
-                "--path-format=absolute".into(),
-                "--git-dir".into(),
-            ],
-        )?;
-        let git_dir = String::from_utf8_lossy(&output.stdout);
-        let path = Path::new(git_dir.trim()).join("waap-state.lock");
+        let runtime_dir = state_root.join(".waap-runtime");
+        let ignore = runtime_dir.join(".gitignore");
+        if !ignore.try_exists()? {
+            write_record_atomically(&ignore, "*\n")?;
+        }
+        let path = runtime_dir.join("state.lock");
         // Keep the inode after unlocking: unlinking it would let later callers lock a different file.
         let file = OpenOptions::new()
             .create(true)
@@ -87,16 +81,14 @@ pub(crate) fn write_record_atomically(path: &Path, contents: &str) -> io::Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_git::init_repo_with_commit;
 
     #[test]
     fn state_lock_excludes_other_handles_and_releases_on_drop() {
         let dir = tempfile::tempdir().unwrap();
-        init_repo_with_commit(dir.path());
         let lock = StateLock::acquire(dir.path()).unwrap();
         let contender = OpenOptions::new()
             .write(true)
-            .open(dir.path().join(".git/waap-state.lock"))
+            .open(dir.path().join(".waap-runtime/state.lock"))
             .unwrap();
         assert!(matches!(
             contender.try_lock(),
@@ -110,12 +102,11 @@ mod tests {
     #[test]
     fn state_lock_drop_unlocks_while_a_duplicate_descriptor_remains_open() {
         let dir = tempfile::tempdir().unwrap();
-        init_repo_with_commit(dir.path());
         let lock = StateLock::acquire(dir.path()).unwrap();
         let duplicated_file = lock.file.try_clone().unwrap();
         let contender = OpenOptions::new()
             .write(true)
-            .open(dir.path().join(".git/waap-state.lock"))
+            .open(dir.path().join(".waap-runtime/state.lock"))
             .unwrap();
         assert!(matches!(
             contender.try_lock(),

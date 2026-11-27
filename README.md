@@ -10,7 +10,7 @@
 
 I found that an effective pattern for running autonomous agents was making a `TODO.md` and pointing the agent to it with a `/goal`. `waap` formalizes this approach, promoting tickets and agents to first class. It persists context into files to get you out of the "my chat history is my context" approach, parallelizes agent execution, and rapidly gets you to [level 8](https://www.augmentcode.com/guides/steve-yegge-8-levels-ai-assisted-development).
 
-For each repository, waap stores state in a dedicated `waap` branch worktree under `~/.local/state/waap/data/`. The resolved worktree is referred to below as `${waap_data}` and is reported by `waap check`.
+waap stores state in a directory under `~/.local/state/waap/data/`. Set `--waap-root <path>` to override the default. `waap check` reports the state directory (`${waap_data}` below).
 
 ## Design
 
@@ -19,7 +19,7 @@ For each repository, waap stores state in a dedicated `waap` branch worktree und
 1. `waap` tickets describe implementation work and live at `${waap_data}/tickets/<ticket-id>/ticket.md`.
 2. `waap` agents contain agent instructions, e.g. `AGENTS.md`, and live at `${waap_data}/agents/<agent-id>/agent.md`.
 
-The records use TOML frontmatter for structured `waap` metadata and the markdown body for unstructured content. The schema is intentionally plain text for agent-friendliness, and can be validated anytime with `waap check` using the `waap` CLI. The records are persisted in `git` so that agents can refer to past context.
+The records use TOML frontmatter for structured `waap` metadata and the markdown body for unstructured content. The schema is intentionally plain text for agent-friendliness, and can be validated anytime with `waap check` using the `waap` CLI. Git tracking is optional: if you track state, stage and commit changes yourself.
 
 Frequently but not always, agents are assigned to work on tickets.
 
@@ -32,8 +32,6 @@ In a `git` repo, initialize a new `waap` project:
 ```sh
 waap init
 ```
-
-For a repository that still has `.waap`, run `scripts/migrate-legacy-waap.py` from its primary checkout instead. If the repository is moved later, run `waap repair` to relocate and repair its state worktree.
 
 Then create a ticket that describes the work to be done:
 

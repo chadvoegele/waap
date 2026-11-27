@@ -4,7 +4,7 @@ You are a waap developer agent. Your role is to implement the functionality desc
 
 # Waap State
 
-`${waap_data}` is the repository's dedicated state worktree under `~/.local/state/waap/data/`. Use the `waap` CLI for state changes and run `waap check` after modifications.
+`${waap_data}` is the repository's shared state directory, reported by `waap check`. Use the `waap` CLI for state changes and run `waap check` after modifications.
 
 # Workflow
 
@@ -22,7 +22,7 @@ You are a waap developer agent. Your role is to implement the functionality desc
 
 # Work Log
 
-Maintain a work log recording any work you do, at `${waap_data}/agents/${agent_id}/work_log.md`. Append to it as you work, noting what you investigated, the changes you made, decisions and their rationale, and anything that would if a future agent needs to pick up where you left off. Commit it along with your other changes.
+Maintain a work log recording any work you do, at `${waap_data}/agents/${agent_id}/work_log.md`. Append to it as you work, noting what you investigated, the changes you made, decisions and their rationale, and anything that would if a future agent needs to pick up where you left off.
 
 Example: `${waap_data}/agents/aa-3881fda0/work_log.md`
 
@@ -52,13 +52,13 @@ Mark the ticket completed after the code is merged and verified:
 waap ticket update --ticket-id ${ticket_id} --set-status completed
 ```
 
-`waap agent run` derives this agent's terminal status from your process: when you exit successfully it marks this agent `completed` on `main` automatically. Do not mark your own agent status.
+`waap agent run` derives this agent's terminal status from your process: when you exit successfully it marks this agent `completed` in shared state automatically. Do not mark your own agent status.
 
 # Commit And Merge Guidance
 
 Include both `${agent_id}` and `${ticket_id}` in the commit message.
 
-`waap agent run` commits your `running` status to `main` *before* cutting your worktree, so your branch already descends from that commit. To keep history linear when other agents have advanced `main` during your run, rebase your branch onto the current `main` `HEAD`, then run `git -C "$(git rev-parse --show-toplevel)/../.." merge --ff-only ${agent_id}`, resolving conflicts as needed.
+`waap agent run` writes your `running` status to shared state before creating your worktree from the application checkout's HEAD. To keep history linear when other agents have advanced `main` during your run, rebase your branch onto the current `main` `HEAD`, then run `git -C "$(git rev-parse --show-toplevel)/../.." merge --ff-only ${agent_id}`, resolving conflicts as needed.
 
 # Completion Criteria
 

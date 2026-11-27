@@ -1,7 +1,7 @@
 +++
 status = "draft"
 created = 2026-10-20
-last_update = 2026-11-06
+last_update = 2026-11-25
 +++
 
 # Pi agent system
@@ -101,7 +101,7 @@ records, or protocol diagnostics.
 
 ### Startup and task outcome
 
-The shared owner must validate readiness/configuration, commit `running` with
+The shared owner must validate readiness/configuration, persist `running` with
 the selected system, create the isolated worktree, and start Pi. Startup sends
 `get_state` with a unique string ID and requires a matching successful response
 with nonempty `data.sessionId`. The owner persists that ID and binds the shared
@@ -134,7 +134,7 @@ acknowledgements across settlement; it must not close their control connections.
 A tool error alone does not determine the outcome. The model may recover.
 Shared main behavior maps completed and intentionally aborted runs to owner
 exit zero, and errors/failed runs to nonzero. The owner performs cleanup before
-committing the terminal status. The stop CLI never writes terminal state for a
+persisting the terminal status. The stop CLI never writes terminal state for a
 live Pi run.
 
 ### Steering
@@ -181,8 +181,8 @@ without native acknowledgement. A rejected CLI stop can leave the run active;
 queue clearing, if already acknowledged, has removed any pending messages.
 
 Stop acceptance is distinct from completion. Human output says `Stop accepted
-for agent`. JSON preserves `stopped_agents` and `commit`; a Pi-only stop has
-`commit:null` and may report `running` while the owner finishes cleanup. Inspect
+for agent`. JSON reports `stopped_agents`; a Pi-only stop may report `running`
+while the owner finishes cleanup. Inspect
 `agent get` for terminal status. Ready cancellation and mixed-system stop-all
 keep existing shared behavior.
 
@@ -246,7 +246,7 @@ stop-reason mapping, all prompt/steer dispositions, correlated success/rejection
 settle-before/after-ack, delayed preflight concurrent with stop, pre-prompt
 cancellation, expiry, malformed/lost acknowledgement, and no retry.
 
-Process integration must verify default Pi selection, session commit before
+Process integration must verify default Pi selection, session persistence before
 prompt, text forwarding, native steering/clear/abort through the shared socket,
 reordered CLI arguments, ready cancellation, terminal persistence by the owner,
 stop failure/uncertainty, child reaping, descendant-held stdout, handled input,

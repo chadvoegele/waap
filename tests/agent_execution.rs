@@ -27,7 +27,6 @@ fn waap_command(root: &Path, mode: &str, runtime: &Path) -> Command {
     isolate_git_config(&mut command);
     command
         .current_dir(root)
-        .env("GIT_CONFIG_VALUE_2", root.join(".git/hooks"))
         .env(
             "PATH",
             format!(
@@ -53,12 +52,19 @@ fn seed_backend(root: &Path) {
         &path,
         r#"#!/usr/bin/python3
 import json, os, sys, time
+from pathlib import Path
 with open(os.environ['WAAP_TEST_PID_FILE'], 'w') as file:
     file.write(str(os.getpid()))
 mode = os.environ['WAAP_TEST_MODE']
 if mode == 'startup-held':
     time.sleep(60)
 root = os.path.dirname(os.environ['WAAP_TEST_PID_FILE'])
+if mode == 'check-lifecycle':
+    record_path = Path(root) / '.state/agents/aa-test/agent.md'
+    record = record_path.read_text()
+    assert 'status = "running"' in record
+    assert 'system = "codex"' in record
+    assert 'session_id =' not in record
 steers = 0
 def emit(value):
     print(json.dumps(value), flush=True)
@@ -77,6 +83,10 @@ for line in sys.stdin:
     if method == 'thread/start':
         result = {'thread': {'id': 'th_test'}}
     if method == 'turn/start':
+        if mode == 'check-lifecycle':
+            record = record_path.read_text()
+            assert 'status = "running"' in record
+            assert 'session_id = "th_test"' in record
         if mode == 'steering-startup':
             while not os.path.exists(os.path.join(root, 'release-start')):
                 time.sleep(0.005)
@@ -158,35 +168,32 @@ exit 99
 }
 
 #[test]
-fn failed_initial_claim_restores_ready_record_and_allows_retry() {
+fn agent_run_persists_lifecycle_with_a_locked_state_index() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     init_repo(root);
     seed_backend(root);
+    let state = root.join(".state");
+    fs::create_dir(&state).unwrap();
+    init_repo(&state);
+    let head = git(&state, &["rev-parse", "HEAD"]);
+    let index = fs::read(state.join(".git/index")).unwrap();
+    fs::File::create(state.join(".git/index.lock")).unwrap();
     assert!(waap(root, &["init"], "completed").status.success());
     assert!(waap(root, &["agent", "new", "--name", "Test"], "completed")
         .status
         .success());
-    let path = root.join(".state/agents/aa-test/agent.md");
-    let original = fs::read_to_string(&path).unwrap();
-    let head = git(&root.join(".state"), &["rev-parse", "HEAD"]);
-    let hook = root.join(".git/hooks/pre-commit");
-    fs::write(&hook, "#!/bin/sh\nrm -- \"$0\"\nexit 1\n").unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
     let args = ["agent", "run", "--agent-id", "aa-test", "--system", "codex"];
-    let failed = waap(root, &args, "completed");
-    assert!(!failed.status.success());
-    assert!(String::from_utf8_lossy(&failed.stderr).contains("git commit"));
-    assert_eq!(fs::read_to_string(&path).unwrap(), original);
-    assert_eq!(git(&root.join(".state"), &["rev-parse", "HEAD"]), head);
-    assert!(!root.join("backend.pid").exists());
+    let output = waap(root, &args, "check-lifecycle");
+    assert!(output.status.success(), "{output:?}");
+    let record = fs::read_to_string(state.join("agents/aa-test/agent.md")).unwrap();
+    assert!(record.contains("status = \"completed\""));
+    assert!(record.contains("session_id = \"th_test\""));
+    assert_eq!(git(&state, &["rev-parse", "HEAD"]), head);
+    assert_eq!(fs::read(state.join(".git/index")).unwrap(), index);
+    assert!(state.join(".git/index.lock").is_file());
     assert!(!root.join("worktrees/aa-test").exists());
     assert!(waap(root, &["check"], "completed").status.success());
-    let retry = waap(root, &args, "completed");
-    assert!(retry.status.success(), "{retry:?}");
-    assert!(fs::read_to_string(path)
-        .unwrap()
-        .contains("status = \"completed\""));
 }
 
 #[test]
@@ -212,11 +219,6 @@ fn codex_success_failure_and_malformed_startup_reap_process_and_clean_worktree()
                 "status = \"ready\"\nsession_id = \"existing\"",
             );
             fs::write(&path, contents).unwrap();
-            git(&root.join(".state"), &["add", "agents/aa-test/agent.md"]);
-            git(
-                &root.join(".state"),
-                &["commit", "-q", "-m", "Seed conflicting session"],
-            );
         }
         let output = waap(
             root,
@@ -477,7 +479,7 @@ impl SteeringRun {
         (
             fs::read(state.join(format!("agents/{}/agent.md", self.agent_id))).unwrap(),
             git(&state, &["rev-parse", "HEAD"]),
-            git(&state, &["status", "--porcelain"]),
+            git(&state, &["status", "--porcelain", "--", "."]),
         )
     }
 
@@ -515,10 +517,6 @@ impl SteeringRun {
             "{record}"
         );
         assert!(record.contains("session_id = \"th_test\""));
-        assert!(
-            snapshot.2.is_empty(),
-            "unexpected persisted files: {snapshot:?}"
-        );
         assert!(!self.repo.path().join("pkill-used").exists());
         assert!(!self.socket.exists());
         assert!(!self
@@ -723,8 +721,6 @@ fn stop_all_routes_mixed_backends_and_preserves_ready_agents() {
         "status = \"running\"\nsession_id = \"ses_claude\"",
     );
     fs::write(legacy, contents).unwrap();
-    git(&state, &["add", "agents"]);
-    git(&state, &["commit", "-qm", "seed mixed agents"]);
     let output = waap_command(root, run.mode, run.runtime.path())
         .args(["--output-format", "json", "agent", "stop"])
         .output()
@@ -874,7 +870,7 @@ fn stop_waits_for_ack_after_completion_and_releases_state_lock() {
     let output = stop.0.take().unwrap().wait_with_output().unwrap();
     assert!(output.status.success(), "{output:?}");
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(report["commit"].is_null());
+    assert!(report.get("commit").is_none());
     assert_eq!(report["stopped_agents"][0]["agent_id"], run.agent_id);
     run.finish("aborted", true);
 }

@@ -1,5 +1,7 @@
 # Add `codex` as an agent-run system
 
+This plan describes the original Codex integration. The [shared state directory specification](waap-state-worktree.md) supersedes its state-commit behavior.
+
 Implementation plan for adding `codex` as a third value of `waap agent run
 --system`, alongside `opencode` and `claude`.
 

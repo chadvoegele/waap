@@ -7,23 +7,11 @@ use crate::agent::{
     write_agent_record, AgentReport, AgentStatus,
 };
 use crate::cli::OutputFormat;
-use crate::git::{commit_paths, Committed};
 
-pub(crate) fn print_updated_agent_report(
-    output_format: &OutputFormat,
-    committed: &Committed<AgentReport>,
-) {
-    let report = &committed.value;
+pub(crate) fn print_updated_agent_report(output_format: &OutputFormat, report: &AgentReport) {
     match output_format {
-        OutputFormat::Json => {
-            let mut value = agent_report_json(report);
-            value["commit"] = serde_json::json!(committed.commit);
-            println!("{value}");
-        }
-        OutputFormat::HumanReadable => {
-            print_agent_report_human("Updated agent", report);
-            println!("Commit: {}", committed.commit);
-        }
+        OutputFormat::Json => println!("{}", agent_report_json(report)),
+        OutputFormat::HumanReadable => print_agent_report_human("Updated agent", report),
     }
 }
 
@@ -32,25 +20,9 @@ pub(crate) fn update_agent(
     agent_id: &str,
     set_status: Option<&AgentStatus>,
     set_session_id: Option<&str>,
-) -> io::Result<Committed<AgentReport>> {
+) -> io::Result<AgentReport> {
     let _lock = crate::state::StateLock::acquire(waap_root)?;
-    let report = update_agent_record(waap_root, agent_id, set_status, set_session_id)?;
-    let commit = commit_paths(
-        waap_root,
-        &[report.path.as_path()],
-        &format!("waap agent update {}", report.agent_id),
-    )
-    .map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("failed to commit waap state change: {error}"),
-        )
-    })?;
-
-    Ok(Committed {
-        value: report,
-        commit,
-    })
+    update_agent_record(waap_root, agent_id, set_status, set_session_id)
 }
 
 fn update_agent_record(

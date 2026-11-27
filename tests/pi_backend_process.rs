@@ -227,10 +227,6 @@ while IFS= read -r ignored; do :; done
     assert!(prompt_state.contains("session_id = \"pi-process-session\""));
     assert!(prompt_state.contains("Complete when instructions in"));
     assert!(!project.get_worktree_path(&agent_id).exists());
-    let subjects = git(&project.state, &["log", "--pretty=%s"]);
-    assert!(subjects.contains(&format!("waap agent run {agent_id}")));
-    assert!(subjects.contains(&format!("waap agent pi session {agent_id}")));
-    assert!(subjects.contains(&format!("waap agent completed {agent_id}")));
     assert_reaped(&pid);
 }
 
@@ -396,11 +392,6 @@ fn test_stop_rejects_running_record_without_system_without_mutation() {
         ),
     )
     .unwrap();
-    git(&project.state, &["add", "agents"]);
-    git(
-        &project.state,
-        &["commit", "-q", "-m", "seed legacy running record"],
-    );
     let before_record = fs::read(&record_path).unwrap();
     let before_head = git(&project.state, &["rev-parse", "HEAD"]);
 
