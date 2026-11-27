@@ -1,3 +1,4 @@
+use super::resume::ExactSession;
 use crate::agent::{AgentRunOptions, ReasoningEffort};
 use clap::ValueEnum;
 use std::env;
@@ -101,21 +102,39 @@ pub(super) fn build_pi_command(
     config: &PiRunConfig,
     agent_id: &str,
     repository_root: &Path,
+    resume: Option<&ExactSession<'_>>,
 ) -> Command {
-    let mut command = Command::new(&config.executable);
-    command
-        .arg("--mode")
-        .arg("rpc")
-        .arg("--approve")
-        .arg("--name")
-        .arg(format!("waap {agent_id}"))
-        .current_dir(repository_root);
+    let mut command = build_base_command(config, repository_root);
+    command.args(["--mode", "rpc", "--approve"]);
+    if let Some(session) = resume {
+        // A missing explicit file path can initialize a new Pi session. Use
+        // the preflighted full ID in its store and do not rename the session.
+        command
+            .arg("--session")
+            .arg(session.id())
+            .arg("--session-dir")
+            .arg(session.directory());
+    } else {
+        command.arg("--name").arg(format!("waap {agent_id}"));
+    }
     if let Some(model) = &config.model {
         command.arg("--model").arg(model);
     }
     if let Some(effort) = config.reasoning_effort {
         command.arg("--thinking").arg(effort.as_str());
     }
+    command
+}
+
+pub(super) fn build_version_command(config: &PiRunConfig, repository_root: &Path) -> Command {
+    let mut command = build_base_command(config, repository_root);
+    command.arg("--version").stdin(std::process::Stdio::null());
+    command
+}
+
+fn build_base_command(config: &PiRunConfig, repository_root: &Path) -> Command {
+    let mut command = Command::new(&config.executable);
+    command.current_dir(repository_root);
     for name in [
         "PI_SESSION_ID",
         "PI_SESSION_FILE",
@@ -163,7 +182,7 @@ mod tests {
             env::set_var("WAAP_PI_REASONING_EFFORT", effort.as_str());
             let config = PiRunConfig::load_from_env(&AgentRunOptions::default()).unwrap();
             assert_eq!(config.reasoning_effort, Some(effort));
-            let command = build_pi_command(&config, "aa-12345678", Path::new("/repo"));
+            let command = build_pi_command(&config, "aa-12345678", Path::new("/repo"), None);
             let args = command.as_std().get_args().collect::<Vec<_>>();
             assert_eq!(args[args.len() - 2], "--thinking");
             assert_eq!(args[args.len() - 1], effort.as_str());
@@ -228,7 +247,7 @@ mod tests {
             ..PiRunConfig::default()
         };
         let dir = Path::new("/repo/with space");
-        let command = build_pi_command(&config, "aa-12345678", dir);
+        let command = build_pi_command(&config, "aa-12345678", dir, None);
 
         assert_eq!(command.as_std().get_program(), "pi");
         assert_eq!(

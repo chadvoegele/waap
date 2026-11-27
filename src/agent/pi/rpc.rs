@@ -1,10 +1,20 @@
 use std::io;
+use std::path::PathBuf;
 use std::time::Instant;
 
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 const MAX_RECORD_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct PiState {
+    pub(super) session_id: String,
+    pub(super) session_file: Option<PathBuf>,
+    pub(super) message_count: Option<usize>,
+}
 
 pub(super) struct PiClient<R, W, O> {
     reader: R,
@@ -113,20 +123,20 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin, O: AsyncWrite + Unpin> PiCl
         Ok(Some(value))
     }
 
-    pub(super) async fn fetch_session_id(&mut self, deadline: Instant) -> io::Result<String> {
+    pub(super) async fn fetch_state(&mut self, deadline: Instant) -> io::Result<PiState> {
         tokio::time::timeout_at(deadline.into(), async {
             let id = self.send("get_state", json!({}), deadline).await?;
             loop {
                 let record = self.receive().await?;
                 if record["type"] == "response" && record["id"] == id {
                     validate_response(&record, "get_state")?.map_err(io::Error::other)?;
-                    return record["data"]["sessionId"]
-                        .as_str()
-                        .filter(|id| !id.trim().is_empty())
-                        .map(str::to_owned)
-                        .ok_or_else(|| {
-                            build_protocol_error("Pi get_state response is missing data.sessionId")
-                        });
+                    let state = PiState::deserialize(&record["data"]).map_err(|error| {
+                        build_protocol_error(format!("invalid Pi get_state data: {error}"))
+                    })?;
+                    if state.session_id.trim().is_empty() {
+                        return Err(build_protocol_error("Pi get_state sessionId is blank"));
+                    }
+                    return Ok(state);
                 }
                 self.handle_event(&record, deadline).await?;
             }
@@ -354,7 +364,7 @@ mod tests {
         );
         let mut client = PiClient::new(BufReader::new(input.as_bytes()), Vec::new(), Vec::new());
         assert_eq!(
-            client.fetch_session_id(deadline).await.unwrap(),
+            client.fetch_state(deadline).await.unwrap().session_id,
             "real-session"
         );
         let command: Value = serde_json::from_slice(client.writer.as_ref().unwrap()).unwrap();
@@ -367,18 +377,18 @@ mod tests {
             let bytes = format!("{record}\n");
             let mut client =
                 PiClient::new(BufReader::new(bytes.as_bytes()), Vec::new(), Vec::new());
-            assert!(client.fetch_session_id(deadline).await.is_err());
+            assert!(client.fetch_state(deadline).await.is_err());
         }
         let mut client = PiClient::new(BufReader::new(&b""[..]), Vec::new(), Vec::new());
         assert_eq!(
-            client.fetch_session_id(deadline).await.unwrap_err().kind(),
+            client.fetch_state(deadline).await.unwrap_err().kind(),
             io::ErrorKind::UnexpectedEof
         );
         let (input, _peer) = duplex(128);
         let mut client = PiClient::new(BufReader::new(input), Vec::new(), Vec::new());
         assert_eq!(
             client
-                .fetch_session_id(Instant::now() + Duration::from_millis(10))
+                .fetch_state(Instant::now() + Duration::from_millis(10))
                 .await
                 .unwrap_err()
                 .kind(),

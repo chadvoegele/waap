@@ -294,6 +294,280 @@ while IFS= read -r ignored; do :; done
     assert_reaped(&pid);
 }
 
+const SAVED_PI_ID: &str = "0193fd5b-d717-7000-8000-123456789abc";
+
+struct ResumeFixture {
+    project: Project,
+    agent_id: String,
+    store: PathBuf,
+    session: PathBuf,
+    other: PathBuf,
+}
+
+impl ResumeFixture {
+    fn new(prior: &str, id: &str) -> Self {
+        let project = Project::new();
+        let agent_id = project.create_agent("resume");
+        let record = project.get_agent_record_path(&agent_id);
+        let ready = fs::read_to_string(&record).unwrap();
+        fs::write(
+            record,
+            ready.replace(
+                "status = \"ready\"",
+                &format!("status = \"{prior}\"\nsession_id = \"{id}\""),
+            ),
+        )
+        .unwrap();
+        let store = project._temp.path().join("Pi session store");
+        fs::create_dir(&store).unwrap();
+        let session = store.join("existing.jsonl");
+        let other = project._temp.path().join("other.jsonl");
+        Self {
+            project,
+            agent_id,
+            store,
+            session,
+            other,
+        }
+    }
+
+    fn write_session(&self, path: &Path, id: &str, cwd: &Path) {
+        let header = serde_json::json!({"type":"session","version":3,"id":id,"cwd":cwd});
+        fs::write(path, format!("{header}\n{{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":\"prior turn\"}}}}\n")).unwrap();
+    }
+
+    fn run(&self, mode: &str, store_via: &str) -> Output {
+        let subdir = self.project.root.join("nested");
+        fs::create_dir(&subdir).unwrap();
+        let mut command = self.project.build_command();
+        command
+            .current_dir(subdir)
+            .env("WAAP_PI_BIN", get_fake_pi_runner_path())
+            .env("WAAP_PI_MODEL", "env-model")
+            .env("WAAP_PI_REASONING_EFFORT", "low")
+            .env("WAAP_FAKE_RESUME_MODE", mode)
+            .env("WAAP_FAKE_RESUME_ID", SAVED_PI_ID)
+            .env("WAAP_FAKE_SESSION_FILE", &self.session)
+            .env("WAAP_FAKE_OTHER_FILE", &self.other)
+            .env("WAAP_FAKE_PID", self.artifact("pid"))
+            .env("WAAP_FAKE_ARGV", self.artifact("argv"))
+            .env("WAAP_FAKE_VERSION", self.artifact("version"))
+            .env("WAAP_FAKE_CWD", self.artifact("cwd"))
+            .env("WAAP_FAKE_LOG", self.artifact("rpc"))
+            .env_remove("PI_CODING_AGENT_SESSION_DIR")
+            .env("PI_CODING_AGENT_DIR", self.artifact("pi-config"))
+            .args([
+                "agent",
+                "prompt",
+                "--delivery=start",
+                "--agent-id",
+                &self.agent_id,
+                "--model",
+                "cli-model",
+                "--reasoning-effort",
+                "off",
+                "--text",
+                TASK,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        match store_via {
+            "env" => {
+                command.env("PI_CODING_AGENT_SESSION_DIR", "../Pi session store");
+            }
+            "project-settings" => {
+                fs::create_dir(self.project.root.join(".pi")).unwrap();
+                fs::write(
+                    self.project.root.join(".pi/settings.json"),
+                    r#"{"sessionDir":"../Pi session store"}"#,
+                )
+                .unwrap();
+            }
+            "global-settings" => {
+                fs::create_dir(self.artifact("pi-config")).unwrap();
+                fs::write(
+                    self.artifact("pi-config/settings.json"),
+                    r#"{"sessionDir":"../Pi session store"}"#,
+                )
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let output = wait_output(command.spawn().unwrap());
+        assert!(!self.project.get_socket_path(&self.agent_id).exists());
+        output
+    }
+
+    fn artifact(&self, name: &str) -> PathBuf {
+        self.project._temp.path().join(name)
+    }
+}
+
+#[test]
+fn test_resume_opens_exact_existing_history_and_submits_once() {
+    for (prior, store_via) in [
+        ("completed", "env"),
+        ("aborted", "project-settings"),
+        ("completed", "global-settings"),
+    ] {
+        let fixture = ResumeFixture::new(prior, SAVED_PI_ID);
+        fixture.write_session(&fixture.session, SAVED_PI_ID, &fixture.project.root);
+        assert_success(&fixture.run("exact", store_via));
+        assert_record(
+            &fixture.project,
+            &fixture.agent_id,
+            "completed",
+            "pi",
+            SAVED_PI_ID,
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.artifact("cwd"))
+                .unwrap()
+                .trim_end(),
+            fixture.project.root.to_str().unwrap()
+        );
+        let argv = fs::read_to_string(fixture.artifact("argv")).unwrap();
+        assert_eq!(
+            argv.lines().collect::<Vec<_>>(),
+            [
+                "--mode",
+                "rpc",
+                "--approve",
+                "--session",
+                SAVED_PI_ID,
+                "--session-dir",
+                fixture.store.to_str().unwrap(),
+                "--model",
+                "cli-model",
+                "--thinking",
+                "off",
+            ]
+        );
+        let commands = fs::read_to_string(fixture.artifact("rpc")).unwrap();
+        let commands: Vec<serde_json::Value> = commands
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0]["type"], "get_state");
+        assert_eq!(commands[1]["type"], "prompt");
+        assert_eq!(commands[1]["message"], TASK);
+        assert_reaped(&fixture.artifact("pid"));
+    }
+}
+
+#[test]
+fn test_resume_preflight_failures_do_not_launch_pi() {
+    for (prior, mode, error) in [
+        ("completed", "missing", "not found"),
+        ("aborted", "prefix-only", "not found"),
+        ("completed", "partial-id", "full Pi session UUID"),
+        (
+            "completed",
+            "wrong-checkout",
+            "run from the original checkout",
+        ),
+        ("aborted", "duplicate", "multiple Pi files match"),
+        (
+            "completed",
+            "unsupported",
+            "requires verified Pi version 1.5.2",
+        ),
+    ] {
+        let id = if mode == "partial-id" {
+            &SAVED_PI_ID[..8]
+        } else {
+            SAVED_PI_ID
+        };
+        let fixture = ResumeFixture::new(prior, id);
+        let root = &fixture.project.root;
+        match mode {
+            "prefix-only" => fixture.write_session(&fixture.session, &format!("{id}-other"), root),
+            "partial-id" | "unsupported" => {
+                fixture.write_session(&fixture.session, SAVED_PI_ID, root)
+            }
+            "wrong-checkout" => {
+                fixture.write_session(&fixture.session, id, fixture.project._temp.path())
+            }
+            "duplicate" => {
+                fixture.write_session(&fixture.session, id, root);
+                fixture.write_session(&fixture.store.join("duplicate.jsonl"), id, root);
+            }
+            _ => (),
+        }
+        let record = fixture.project.get_agent_record_path(&fixture.agent_id);
+        let before = fs::read(&record).unwrap();
+        let output = fixture.run(mode, "env");
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(error),
+            "{output:?}"
+        );
+        assert_eq!(fs::read(record).unwrap(), before);
+        assert_eq!(fixture.artifact("version").exists(), mode == "unsupported");
+        assert!(!fixture.artifact("pid").exists());
+        assert!(!fixture.artifact("rpc").exists());
+    }
+}
+
+#[test]
+fn test_resume_rejects_wrong_rpc_identity_or_lost_history_without_submitting() {
+    for (prior, mode, error) in [
+        ("completed", "wrong-id", "but RPC returned"),
+        ("aborted", "wrong-file", "different session file"),
+        (
+            "completed",
+            "changed-checkout",
+            "run from the original checkout",
+        ),
+        (
+            "completed",
+            "empty-history",
+            "did not report reopened conversation history",
+        ),
+        ("aborted", "deleted", "before submission"),
+    ] {
+        let fixture = ResumeFixture::new(prior, SAVED_PI_ID);
+        fixture.write_session(&fixture.session, SAVED_PI_ID, &fixture.project.root);
+        if mode == "wrong-file" {
+            fixture.write_session(&fixture.other, "different-header-id", &fixture.project.root);
+        } else if mode == "changed-checkout" {
+            fixture.write_session(&fixture.other, SAVED_PI_ID, fixture.project._temp.path());
+        }
+        let record = fixture.project.get_agent_record_path(&fixture.agent_id);
+        let before = fs::read(&record).unwrap();
+        let session_bytes = fs::read(&fixture.session).unwrap();
+        let output = fixture.run(mode, "env");
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(error),
+            "{output:?}"
+        );
+        assert_eq!(fs::read(record).unwrap(), before);
+        if mode == "deleted" {
+            assert_eq!(fs::read_dir(&fixture.store).unwrap().count(), 0);
+        } else {
+            let expected_bytes = if mode == "changed-checkout" {
+                fs::read(&fixture.other).unwrap()
+            } else {
+                session_bytes
+            };
+            assert_eq!(fs::read(&fixture.session).unwrap(), expected_bytes);
+            let rpc = fs::read_to_string(fixture.artifact("rpc")).unwrap();
+            let command: serde_json::Value = serde_json::from_str(&rpc).unwrap();
+            assert_eq!(command["type"], "get_state");
+        }
+        assert_eq!(
+            fs::read_to_string(fixture.artifact("argv"))
+                .unwrap()
+                .matches("--session\n")
+                .count(),
+            1
+        );
+        assert_reaped(&fixture.artifact("pid"));
+    }
+}
+
 #[test]
 fn test_fake_pi_failure_exits_nonzero_persists_failed() {
     let project = Project::new();

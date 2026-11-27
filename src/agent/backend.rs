@@ -124,26 +124,22 @@ impl Backend {
         context: StartContext<'_>,
         receiver: Receiver<Command>,
     ) -> io::Result<AgentSessionRun> {
-        if let SessionOpen::ResumeExact(id) = intent {
+        match (self, intent) {
+            (Self::Pi(b), _) => b.open(intent, context, receiver).await,
+            (Self::Claude(b), SessionOpen::Fresh) => b.start(context, receiver).await,
+            (Self::Codex(b), SessionOpen::Fresh) => b.start(context, receiver).await,
+            (Self::Opencode(b), SessionOpen::Fresh) => b.start(context, receiver).await,
             #[cfg(test)]
-            if let Self::Fake(backend) = self {
-                if backend.supports_resume {
-                    backend.resume_calls.push(id.clone());
-                    return backend.prepare(receiver);
-                }
+            (Self::Fake(b), SessionOpen::Fresh) => b.start(context, receiver).await,
+            #[cfg(test)]
+            (Self::Fake(b), SessionOpen::ResumeExact(id)) if b.supports_resume => {
+                b.resume_calls.push(id.clone());
+                b.prepare(receiver)
             }
-            return Err(io::Error::new(
+            (_, SessionOpen::ResumeExact(id)) => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("backend does not support exact resume of session {id}"),
-            ));
-        }
-        match self {
-            Self::Claude(b) => b.start(context, receiver).await,
-            Self::Codex(b) => b.start(context, receiver).await,
-            Self::Opencode(b) => b.start(context, receiver).await,
-            Self::Pi(b) => b.start(context, receiver).await,
-            #[cfg(test)]
-            Self::Fake(b) => b.start(context, receiver).await,
+            )),
         }
     }
     pub(super) async fn abort(&mut self, context: AbortContext<'_>) -> io::Result<AbortOutcome> {

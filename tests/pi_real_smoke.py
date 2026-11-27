@@ -7,10 +7,13 @@ import json
 import logging
 import os
 from pathlib import Path
+import shlex
 import signal
 import subprocess
 import tempfile
 import threading
+import tomllib
+import uuid
 
 
 @dataclass
@@ -41,9 +44,7 @@ class Provider(http.server.BaseHTTPRequestHandler):
         self.wfile.write(("data: " + json.dumps(record) + "\n\n").encode())
         self.wfile.flush()
 
-    def send_tool_call(self):
-        command = ("printf 'real Pi tool execution\\n' > smoke.txt && git add smoke.txt "
-                   "&& git -c commit.gpgsign=false commit -m 'Pi smoke'")
+    def send_tool_call(self, command):
         self.send_chunk({"tool_calls": [{
             "index": 0, "id": "smoke-tool", "type": "function",
             "function": {"name": "bash", "arguments": json.dumps({"command": command})}
@@ -64,12 +65,20 @@ class Provider(http.server.BaseHTTPRequestHandler):
                 self.state.ready.set()
                 self.state.release.wait(15)
                 self.send_chunk({}, "stop")
+            elif self.state.mode == "complete":
+                if len(self.state.requests) == 1:
+                    self.state.ready.set()
+                    assert self.state.release.wait(15)
+                    self.send_tool_call("printf 'real Pi tool execution\\n' > smoke.txt && git add smoke.txt "
+                                        "&& git -c commit.gpgsign=false commit -m 'Pi smoke'")
+                else:
+                    self.send_chunk({"content": "smoke complete"})
+                    self.send_chunk({}, "stop")
             elif len(self.state.requests) == 1:
-                self.state.ready.set()
-                assert self.state.release.wait(15)
-                self.send_tool_call()
+                recalled = find_sentinel(request["messages"])
+                self.send_tool_call(f"pwd -P > resume-cwd.txt; printf '%s' {shlex.quote(recalled)} > recalled.txt")
             else:
-                self.send_chunk({"content": "smoke complete"})
+                self.send_chunk({"content": find_sentinel(request["messages"])})
                 self.send_chunk({}, "stop")
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
@@ -77,10 +86,25 @@ class Provider(http.server.BaseHTTPRequestHandler):
             pass
 
 
-def run(args, *, cwd, env, text=None):
+def find_sentinel(messages):
+    for message in messages:
+        if message["role"] != "user":
+            continue
+        content = message["content"]
+        text = content if isinstance(content, str) else " ".join(part.get("text", "") for part in content)
+        marker = "Remember this smoke sentinel: "
+        if marker in text:
+            return text.split(marker, 1)[1].split()[0]
+    return "history-not-reopened"
+
+
+def run(args, *, cwd, env, text=None, error=None):
     result = subprocess.run(args, cwd=cwd, env=env, input=text, text=True,
-                            capture_output=True, timeout=20)
-    assert result.returncode == 0, (args, result.stdout, result.stderr)
+                            capture_output=True, timeout=25)
+    if error is None:
+        assert result.returncode == 0, (args, result.stdout, result.stderr)
+    else:
+        assert result.returncode != 0 and error in result.stderr, (args, result.stdout, result.stderr)
     return result.stdout
 
 
@@ -138,45 +162,93 @@ def stop_owner(owner):
             pass
 
 
-def verify_run(repo, env, agent, provider):
+def read_agent(state, agent):
+    record = state / "agents" / agent / "agent.md"
+    return tomllib.loads(record.read_text().split("+++", 2)[1])
+
+
+def session_files(env):
+    default_store = Path(env["PI_CODING_AGENT_DIR"]) / "sessions"
+    return set(Path(env.get("PI_CODING_AGENT_SESSION_DIR", default_store)).rglob("*.jsonl"))
+
+
+def verify_run(repo, state, env, agent, provider):
     config = Path(env["PI_CODING_AGENT_DIR"])
     if (config / "extensions/shutdown.ts").exists():
         assert (config / "shutdown-ran").read_text() == "yes"
     status = "completed" if provider.mode == "complete" else "aborted"
-    record = (repo / ".state/agents" / agent / "agent.md").read_text()
-    assert f'status = "{status}"' in record, record
-    assert 'system = "pi"' in record and "session_id =" in record
+    record = read_agent(state, agent)
+    assert record["status"] == status and record["system"] == "pi", record
     assert not list(Path(env["XDG_RUNTIME_DIR"]).rglob("*.sock"))
-    assert list((config / "sessions").rglob("*.jsonl")), "Pi did not persist the real session"
+    assert session_files(env), "Pi did not persist the real session"
     if provider.mode == "complete":
-        assert "real Pi tool execution" in run(["git", "show", f"{agent}:smoke.txt"], cwd=repo, env=env)
+        assert "real Pi tool execution" in run(["git", "show", "HEAD:smoke.txt"], cwd=repo, env=env)
         assert any("Include snow 雪 in your review" in json.dumps(request, ensure_ascii=False)
                    for request in provider.requests[1:]), provider.requests
     logging.info("real Pi %s: %s, session persisted, socket cleaned", provider.mode, status)
+    return record
 
 
-def run_smoke_case(base, repo, env, provider):
-    (Path(env["PI_CODING_AGENT_DIR"]) / "shutdown-ran").unlink(missing_ok=True)
+def run_smoke_case(base, checkout, other, state, env, provider):
+    config = Path(env["PI_CODING_AGENT_DIR"])
+    (config / "shutdown-ran").unlink(missing_ok=True)
+    nested = checkout / "nested"
+    nested.mkdir(exist_ok=True)
+    sentinel = uuid.uuid4().hex
     agent = json.loads(run(base + ["--output-format", "json", "agent", "new", "--name", provider.mode],
-                           cwd=repo, env=env, text="Complete the local smoke fixture."))["agent_id"]
-    owner = subprocess.Popen(base + ["agent", "run", "--agent-id", agent, "--model", "local-smoke/fixture"],
-                             cwd=repo, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           cwd=nested, env=env))["agent_id"]
+    prompt = base + ["agent", "prompt", "--delivery=start", "--agent-id", agent,
+                     "--model", "local-smoke/fixture"]
+    owner = subprocess.Popen(prompt + ["--text", f"Remember this smoke sentinel: {sentinel}"],
+                             cwd=nested, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              text=True, start_new_session=True)
     try:
         assert provider.ready.wait(15), "real Pi did not contact the local provider"
         if provider.mode == "complete":
-            run(base + ["agent", "steer", "--agent-id", agent, "--prompt", "Include snow 雪 in your review"],
-                cwd=repo, env=env)
+            run(base + ["agent", "prompt", "--delivery=steer", "--agent-id", agent,
+                        "--text", "Include snow 雪 in your review"], cwd=nested, env=env)
             provider.release.set()
         else:
-            run(base + ["agent", "stop", "--agent-id", agent], cwd=repo, env=env)
+            run(base + ["agent", "stop", "--agent-id", agent], cwd=nested, env=env)
         out, err = owner.communicate(timeout=15)
         assert owner.returncode == 0, (out, err)
         assert "shutdown-notification" not in out + err, (out, err)
-        verify_run(repo, env, agent, provider)
+        first = verify_run(checkout, state, env, agent, provider)
     finally:
         provider.release.set()
         stop_owner(owner)
+
+    files = session_files(env)
+    session, = (path for path in files if json.loads(path.read_bytes().splitlines()[0])["id"] == first["session_id"])
+    original = session.read_bytes()
+    provider.reset("resume")
+    followup = prompt + ["--text", "Recall the earlier smoke sentinel and check your tool directory."]
+    run(followup, cwd=other, env=env, error="run from the original checkout")
+    assert not provider.requests and session.read_bytes() == original
+    assert read_agent(state, agent) == first
+    assert session_files(env) == files
+
+    (config / "shutdown-ran").unlink(missing_ok=True)
+    assert sentinel in run(followup, cwd=nested, env=env)
+    if (config / "extensions/shutdown.ts").exists():
+        assert (config / "shutdown-ran").read_text() == "yes"
+    assert len(provider.requests) == 2, provider.requests
+    assert (checkout / "recalled.txt").read_text() == sentinel
+    assert Path((checkout / "resume-cwd.txt").read_text().strip()) == checkout.resolve()
+    assert not (other / "resume-cwd.txt").exists()
+    completed = read_agent(state, agent)
+    assert completed == {**first, "status": "completed"}
+    assert session_files(env) == files
+    assert session.read_bytes().startswith(original)
+    assert not list(Path(env["XDG_RUNTIME_DIR"]).rglob("*.sock"))
+
+    session.unlink()
+    provider.reset("resume")
+    run(followup, cwd=nested, env=env, error="not found")
+    assert not provider.requests and read_agent(state, agent) == completed
+    assert session_files(env) == files - {session}
+    logging.info("real Pi resume after %s: recalled sentinel in original checkout; cross-checkout and missing history rejected",
+                 first["status"])
 
 
 def main():
@@ -204,11 +276,17 @@ def main():
             env = build_environment(config, runtime, args.pi)
             run(["git", "init", "-q", "--initial-branch=main"], cwd=repo, env=env)
             run(["git", "commit", "--allow-empty", "-qm", "seed"], cwd=repo, env=env)
-            base = [str(args.waap.resolve()), "--waap-root", str(repo / ".state")]
+            checkout, other = root / "linked", root / "other"
+            run(["git", "worktree", "add", "-qb", "smoke", str(checkout)], cwd=repo, env=env)
+            run(["git", "worktree", "add", "-q", "--detach", str(other)], cwd=repo, env=env)
+            state = root / "state"
+            base = [str(args.waap.resolve()), "--waap-root", str(state)]
             run(base + ["init"], cwd=repo, env=env)
-            for mode in ["complete", "stop"]:
-                provider.reset(mode)
-                run_smoke_case(base, repo, env, provider)
+            provider.reset("complete")
+            run_smoke_case(base, checkout, other, state, env, provider)
+            provider.reset("stop")
+            env["PI_CODING_AGENT_SESSION_DIR"] = str(root / "shared Pi sessions")
+            run_smoke_case(base, checkout, other, state, env, provider)
     finally:
         provider.release.set()
         server.shutdown()
