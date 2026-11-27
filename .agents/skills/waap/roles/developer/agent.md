@@ -33,7 +33,6 @@ Assume other agents or the user may be editing the repository at the same time. 
 From the launch checkout, create your worktree beside the shared `.git` directory:
 
 ```sh
-checkout=$(git rev-parse --show-toplevel)
 git_dir=$(git rev-parse --path-format=absolute --git-common-dir)
 worktree="${git_dir%/*}/${agent_id}"
 git worktree add -b "${agent_id}" "$worktree" HEAD
@@ -67,14 +66,16 @@ waap ticket update --ticket-id ${ticket_id} --set-status completed
 
 Commit your changes with both `${agent_id}` and `${ticket_id}` in the message.
 
-Use `git worktree list` to find `main` and set `main_checkout` to its checkout path. Rebase onto `main`, resolve conflicts, and fast-forward that checkout:
+Use `git worktree list` to find `main` and set `checkout` to its path. Rebase onto `main`, resolving conflicts before merging. Merge and remove the worktree from the `main` checkout:
 
 ```sh
-git -C "$worktree" rebase main
-git -C "$main_checkout" merge --ff-only "${agent_id}"
+git -C "$worktree" rebase main &&
+  cd "$checkout" &&
+  git merge --ff-only "${agent_id}" &&
+  git worktree remove "$worktree"
 ```
 
-After merging, return to `"$checkout"` and run `git worktree remove "$worktree"`. If you cannot merge or remove the worktree, leave it in place and record the path in your work log.
+If you cannot merge or remove the worktree, leave it in place and record the path in your work log.
 
 # Completion Criteria
 
