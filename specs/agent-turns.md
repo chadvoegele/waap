@@ -35,8 +35,8 @@ waap agent prompt --agent-id aa-1234abcd --delivery=start < task.md
 # From another terminal, while a turn is active:
 waap agent prompt --agent-id aa-1234abcd --delivery=steer --text='Focus on keyboard navigation.'
 waap agent prompt --agent-id aa-1234abcd --delivery=queue --text='Add a regression test.'
-# To start or steer based on whether a turn is active:
-waap agent prompt --agent-id aa-1234abcd --delivery=asap --text='Check the accessibility notes.'
+# Omit --delivery to start or steer based on whether a turn is active:
+waap agent prompt --agent-id aa-1234abcd --text='Check the accessibility notes.'
 ```
 
 ```text
@@ -51,9 +51,11 @@ Prompt input ───→ Delivery routing ───→ Turn owner ───→ 
 
 `agent new [--system <backend>]` must generate and return a WAAP agent ID and write a metadata-only `agent.md` with `creation_date`, `status = "ready"`, and `system`. The default is Pi. Registration must not read stdin, start a backend, or assign a backend `session_id`. The new interface omits `--name`; the generated agent ID is the handle for later commands.
 
-`agent prompt --agent-id <id> --delivery=<mode> [--text=<text>]` must use `--text` if supplied, otherwise read redirected stdin to EOF. It must reject missing or whitespace-only input without changing state or contacting the backend, and must not wait for interactive input. It must preserve the text and send it as prompt content, without writing it to `agent.md` or constructing a file-reference prompt.
+`agent prompt --agent-id <id> [--delivery=<mode>] [--text=<text>]` must use `--text` if supplied, otherwise read redirected stdin to EOF. It must reject missing or whitespace-only input without changing state or contacting the backend, and must not wait for interactive input. It must preserve the text and send it as prompt content, without writing it to `agent.md` or constructing a file-reference prompt.
 
 ### Delivery modes
+
+Omitting `--delivery` must behave exactly like `--delivery=asap`.
 
 | Mode | Agent can start a turn | Turn active |
 | --- | --- | --- |
@@ -86,7 +88,6 @@ Backend resume may ship incrementally. Pi is the proposed first backend; each ba
 
 ## Open questions
 
-- Should `--delivery` remain required as shown, or should `asap` be the default?
 - Should the queue exist only for the lifetime of the live owner, or survive process exit? How should callers learn that accepted but undelivered entries were discarded after a failure or stop?
 
 ## Verification
@@ -94,7 +95,7 @@ Backend resume may ship incrementally. Pi is the proposed first backend; each ba
 - Verify that `new` records the explicit or default backend without reading stdin or opening a session.
 - Verify exact text delivery from `--text` and redirected Markdown. Reject missing or blank input and `--image` without changing state. Verify no prompt content is written to `agent.md`.
 - Start a first turn, complete it, and start a follow-up. Verify that it recalls information from the first turn and preserves the session ID. Repeat after an explicit stop with a saved session ID.
-- Verify all four delivery modes against active and idle agents. Verify that `asap` does not fall back after failed steering and that a turn finishing during live delivery cannot silently trigger a new turn.
+- Verify all four delivery modes against active and idle agents, including that omitting `--delivery` behaves like explicit `asap` in both cases. Verify that `asap` does not fall back after failed steering and that a turn finishing during live delivery cannot silently trigger a new turn.
 - Queue multiple prompts and verify acknowledgement before delivery, FIFO new turns on the same session, and no queued turn starting after stop.
 - Verify that concurrent requests cannot create overlapping turns, and that unavailable sessions and unsupported operations never create a replacement session.
 - Verify the working directory and that no path creates or removes an execution worktree.
