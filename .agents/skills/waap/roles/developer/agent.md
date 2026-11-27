@@ -30,11 +30,12 @@ Example: `${waap_data}/agents/aa-3881fda0/work_log.md`
 
 Assume other agents or the user may be editing the repository at the same time. Do not revert or overwrite unrelated work.
 
-From the launch checkout, create a worktree and branch for your agent:
+From the launch checkout, create your worktree beside the shared `.git` directory:
 
 ```sh
 checkout=$(git rev-parse --show-toplevel)
-worktree="$checkout/worktrees/${agent_id}"
+git_dir=$(git rev-parse --path-format=absolute --git-common-dir)
+worktree="${git_dir%/*}/${agent_id}"
 git worktree add -b "${agent_id}" "$worktree" HEAD
 ```
 
