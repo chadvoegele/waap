@@ -92,17 +92,30 @@ fn init_and_mutations_work_outside_any_state_checkout() {
     project.check();
 
     let name = "a\n+++\nb";
-    for (kind, id_option, id, status) in [
-        ("ticket", "--ticket-id", "tt-a-b", "completed"),
-        ("agent", "--agent-id", "aa-a-b", "aborted"),
-    ] {
-        project.json("# Body\n", &[kind, "new", "--name", name]);
-        project.json("", &[kind, "update", id_option, id, "--set-status", status]);
-        let report = project.json("", &[kind, "get", id_option, id]);
-        assert_eq!(report["metadata"]["name"], name);
-        assert_eq!(report["metadata"]["status"], status);
-        assert!(report["content"].as_str().unwrap().ends_with("# Body\n"));
-    }
+    project.json("# Body\n", &["ticket", "new", "--name", name]);
+    project.json(
+        "",
+        &[
+            "ticket",
+            "update",
+            "--ticket-id",
+            "tt-a-b",
+            "--set-status",
+            "completed",
+        ],
+    );
+    let ticket = project.json("", &["ticket", "get", "--ticket-id", "tt-a-b"]);
+    assert_eq!(ticket["metadata"]["name"], name);
+    assert_eq!(ticket["metadata"]["status"], "completed");
+    assert!(ticket["content"].as_str().unwrap().ends_with("# Body\n"));
+
+    project.json("", &["agent", "new", "--name", name]);
+    project.json("", &["agent", "stop", "--agent-id", "aa-a-b"]);
+    let agent = project.json("", &["agent", "get", "--agent-id", "aa-a-b"]);
+    assert_eq!(agent["metadata"]["name"], name);
+    assert_eq!(agent["metadata"]["status"], "aborted");
+    assert_eq!(agent["metadata"]["system"], "pi");
+    assert_eq!(agent["content"], "");
     project.json("", &["init"]);
     assert!(state.join("tickets/tt-a-b/ticket.md").exists());
     assert!(state.join("agents/aa-a-b/agent.md").exists());
@@ -140,10 +153,7 @@ fn user_checkout_preserves_index_refs_and_git_config_while_index_is_locked() {
             "in-progress",
         ],
     );
-    project.json(
-        "# Purpose\n",
-        &["agent", "new", "--name", "Custom Agent_123"],
-    );
+    project.json("", &["agent", "new", "--name", "Custom Agent_123"]);
     let report = project.json("", &["agent", "stop", "--agent-id", "aa-custom-agent123"]);
     assert_eq!(report["stopped_agents"][0]["metadata"]["status"], "aborted");
     assert_eq!(
@@ -166,30 +176,32 @@ fn user_checkout_preserves_index_refs_and_git_config_while_index_is_locked() {
 }
 
 #[test]
-fn agent_update_rejects_invalid_transitions_without_changing_record() {
+fn agent_update_cannot_override_status_session_or_backend() {
     let project = Project::initialized();
-    let report = project.json("# Purpose\n", &["agent", "new"]);
+    let report = project.json("", &["agent", "new"]);
     let id = report["agent_id"].as_str().unwrap();
     let path = project.state.join("agents").join(id).join("agent.md");
-    let update = |status| {
-        project.run(
-            "",
-            &["agent", "update", "--agent-id", id, "--set-status", status],
-        )
-    };
     let ready = fs::read(&path).unwrap();
-    let rejected = update("completed");
-    assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr)
-        .contains("invalid agent status transition: ready -> completed"));
-    assert_eq!(fs::read(&path).unwrap(), ready);
-    assert!(update("running").status.success());
-    let running = fs::read(&path).unwrap();
-    let rejected = update("aborted");
-    assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr)
-        .contains(&format!("waap agent stop --agent-id {id}")));
-    assert_eq!(fs::read(&path).unwrap(), running);
+    for (flag, value) in [
+        ("--set-status", "completed"),
+        ("--set-status", "running"),
+        ("--set-session-id", "session"),
+        ("--set-system", "codex"),
+    ] {
+        let rejected = project.run("", &["agent", "update", "--agent-id", id, flag, value]);
+        assert!(!rejected.status.success());
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains(flag));
+        assert_eq!(fs::read(&path).unwrap(), ready);
+    }
+    let renamed = project.json(
+        "",
+        &["agent", "update", "--agent-id", id, "--set-name", "Renamed"],
+    );
+    assert_eq!(renamed["agent_id"], id);
+    assert_eq!(renamed["metadata"]["name"], "Renamed");
+    assert_eq!(renamed["metadata"]["status"], "ready");
+    assert_eq!(renamed["metadata"]["system"], "pi");
+    assert!(renamed["metadata"]["session_id"].is_null());
 }
 
 #[test]

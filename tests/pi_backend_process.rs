@@ -12,6 +12,8 @@ use tempfile::{tempdir, TempDir};
 
 use common::{git, init_repo, isolate_git_config};
 
+const TASK: &str = "  # Test 雪\n\n'quoted' `$HOME`\n";
+
 struct Project {
     _temp: TempDir,
     root: PathBuf,
@@ -66,10 +68,15 @@ impl Project {
     }
 
     fn create_agent(&self, name: &str) -> String {
-        let output = self.run_command(
-            "Complete the deterministic fixture.\n",
-            &["--output-format", "json", "agent", "new", "--name", name],
-        );
+        self.register_agent(name, None)
+    }
+
+    fn register_agent(&self, name: &str, system: Option<&str>) -> String {
+        let mut args = vec!["--output-format", "json", "agent", "new", "--name", name];
+        if let Some(system) = system {
+            args.extend(["--system", system]);
+        }
+        let output = self.run_command("", &args);
         assert_success(&output);
         serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["agent_id"]
             .as_str()
@@ -182,6 +189,45 @@ fn assert_record(project: &Project, agent_id: &str, status: &str, system: &str, 
 }
 
 #[test]
+fn registration_does_not_wait_for_eof_or_start_a_backend() {
+    let project = Project::new();
+    let record = project.get_agent_record_path("aa-no-input");
+    let mut child = project
+        .build_command()
+        .args([
+            "agent",
+            "new",
+            "--name",
+            "No Input",
+            "--system",
+            "opencode",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("OPENCODE_SERVER_URL")
+        .env_remove("OPENCODE_SERVER_USERNAME")
+        .env_remove("OPENCODE_SERVER_PASSWORD")
+        .env_remove("OPENCODE_SERVER_MODEL")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let held_open = child.stdin.take().unwrap();
+    let output = wait_output(child);
+    drop(held_open);
+    assert_success(&output);
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["agent_id"], "aa-no-input");
+    assert_eq!(report["metadata"]["status"], "ready");
+    assert_eq!(report["metadata"]["system"], "opencode");
+    assert!(report["metadata"]["session_id"].is_null());
+    let record = fs::read_to_string(record).unwrap();
+    assert!(record.ends_with("system = \"opencode\"\n+++\n"));
+    assert!(!record.contains("session_id"));
+}
+
+#[test]
 fn test_omitted_system_runs_fake_pi_after_authentic_session_is_persisted() {
     let project = Project::new();
     let agent_id = project.create_agent("pi-process-success");
@@ -203,25 +249,48 @@ while IFS= read -r ignored; do :; done
 "#,
     );
 
-    let output = project
+    let mut child = project
         .build_command()
-        .args(["agent", "run", "--agent-id", &agent_id])
+        .args([
+            "agent",
+            "prompt",
+            "--agent-id",
+            &agent_id,
+            "--output-format",
+            "json",
+        ])
         .env("WAAP_PI_BIN", get_fake_pi_runner_path())
         .env("WAAP_FAKE_PI_SCRIPT", &fake)
         .env("WAAP_FAKE_PID", &pid)
         .env("WAAP_FAKE_RECORD", project.get_agent_record_path(&agent_id))
         .env("WAAP_FAKE_SNAPSHOT", &snapshot)
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
-
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(TASK.as_bytes())
+        .unwrap();
+    let output = wait_output(child);
     assert_success(&output);
-    assert!(String::from_utf8_lossy(&output.stdout).contains("fake-pi-output"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("fake-pi-output"));
+    assert!(!stdout.contains("delivery") && !stdout.contains("asap"));
     assert_record(&project, &agent_id, "completed", "pi", "pi-process-session");
     let prompt_state = fs::read_to_string(snapshot).unwrap();
     assert!(prompt_state.contains("status = \"running\""));
     assert!(prompt_state.contains("system = \"pi\""));
     assert!(prompt_state.contains("session_id = \"pi-process-session\""));
-    assert!(prompt_state.contains("Complete when instructions in"));
+    let (record, request) = prompt_state.rsplit_once("+++\n").unwrap();
+    assert!(!record.contains("# Test"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(request).unwrap()["message"],
+        TASK
+    );
     assert_reaped(&pid);
 }
 
@@ -245,7 +314,15 @@ while IFS= read -r ignored; do :; done
 
     let output = project
         .build_command()
-        .args(["agent", "run", "--system", "pi", "--agent-id", &agent_id])
+        .args([
+            "agent",
+            "prompt",
+            "--delivery=start",
+            "--agent-id",
+            &agent_id,
+            "--text",
+            TASK,
+        ])
         .env("WAAP_PI_BIN", get_fake_pi_runner_path())
         .env("WAAP_FAKE_PI_SCRIPT", fake)
         .env("WAAP_FAKE_PID", &pid)
@@ -294,7 +371,15 @@ done
     );
     let runner = project
         .build_command()
-        .args(["agent", "run", "--system", "pi", "--agent-id", &agent_id])
+        .args([
+            "agent",
+            "prompt",
+            "--delivery=start",
+            "--agent-id",
+            &agent_id,
+            "--text",
+            TASK,
+        ])
         .env("WAAP_PI_BIN", get_fake_pi_runner_path())
         .env("WAAP_FAKE_PI_SCRIPT", fake)
         .env("WAAP_FAKE_PID", &pid)
@@ -312,10 +397,11 @@ done
         "",
         &[
             "agent",
-            "steer",
+            "prompt",
+            "--delivery=steer",
             "--agent-id",
             &agent_id,
-            "--prompt",
+            "--text",
             prompt,
         ],
     );
@@ -379,10 +465,12 @@ fn test_stop_rejects_running_record_without_system_without_mutation() {
     let ready = fs::read_to_string(&record_path).unwrap();
     fs::write(
         &record_path,
-        ready.replace(
-            "status = \"ready\"",
-            "status = \"running\"\nsession_id = \"legacy-session\"",
-        ),
+        ready
+            .replace(
+                "status = \"ready\"",
+                "status = \"running\"\nsession_id = \"legacy-session\"",
+            )
+            .replace("system = \"pi\"\n", ""),
     )
     .unwrap();
     let before_record = fs::read(&record_path).unwrap();
@@ -391,7 +479,7 @@ fn test_stop_rejects_running_record_without_system_without_mutation() {
     let output = project.run_command("", &["agent", "stop", "--agent-id", &agent_id]);
 
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("no persisted system"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("field system"));
     assert_eq!(fs::read(record_path).unwrap(), before_record);
     assert_eq!(git(&project.state, &["rev-parse", "HEAD"]), before_head);
 }
@@ -399,7 +487,7 @@ fn test_stop_rejects_running_record_without_system_without_mutation() {
 #[test]
 fn test_codex_shared_control_stop_keeps_owner_outcome_and_cleanup() {
     let project = Project::new();
-    let agent_id = project.create_agent("codex-process-abort");
+    let agent_id = project.register_agent("codex-process-abort", Some("codex"));
     let bin = project.root.join("fake-bin");
     fs::create_dir(&bin).unwrap();
     let fake = bin.join("codex");
@@ -441,7 +529,15 @@ done
     );
     let runner = project
         .build_command()
-        .args(["agent", "run", "--agent-id", &agent_id, "--system", "codex"])
+        .args([
+            "agent",
+            "prompt",
+            "--delivery=start",
+            "--agent-id",
+            &agent_id,
+            "--text",
+            TASK,
+        ])
         .env("PATH", path)
         .env("WAAP_FAKE_LOG", &log)
         .env("WAAP_FAKE_READY", &ready)
@@ -501,7 +597,15 @@ while IFS= read -r ignored; do :; done
         let output = wait_output(
             project
                 .build_command()
-                .args(["agent", "run", "--agent-id", &agent_id])
+                .args([
+                    "agent",
+                    "prompt",
+                    "--delivery=start",
+                    "--agent-id",
+                    &agent_id,
+                    "--text",
+                    TASK,
+                ])
                 .env("WAAP_PI_BIN", get_fake_pi_runner_path())
                 .env("WAAP_FAKE_PI_SCRIPT", fake)
                 .env("WAAP_FAKE_PID", &pid)
@@ -537,7 +641,15 @@ while IFS= read -r ignored; do :; done
         let output = wait_output(
             project
                 .build_command()
-                .args(["agent", "run", "--agent-id", &agent_id])
+                .args([
+                    "agent",
+                    "prompt",
+                    "--delivery=start",
+                    "--agent-id",
+                    &agent_id,
+                    "--text",
+                    TASK,
+                ])
                 .env("WAAP_PI_BIN", get_fake_pi_runner_path())
                 .env("WAAP_FAKE_PI_SCRIPT", fake)
                 .env("WAAP_FAKE_PID", &pid)
@@ -582,7 +694,15 @@ while IFS= read -r ignored; do :; done
         let output = wait_output(
             project
                 .build_command()
-                .args(["agent", "run", "--agent-id", &agent_id])
+                .args([
+                    "agent",
+                    "prompt",
+                    "--delivery=start",
+                    "--agent-id",
+                    &agent_id,
+                    "--text",
+                    TASK,
+                ])
                 .env("WAAP_PI_BIN", get_fake_pi_runner_path())
                 .env("WAAP_FAKE_PI_SCRIPT", fake)
                 .env("WAAP_FAKE_PID", &pid)
@@ -631,7 +751,15 @@ while IFS= read -r ignored; do :; done
     );
     let runner = project
         .build_command()
-        .args(["agent", "run", "--agent-id", &agent_id])
+        .args([
+            "agent",
+            "prompt",
+            "--delivery=start",
+            "--agent-id",
+            &agent_id,
+            "--text",
+            TASK,
+        ])
         .env("WAAP_PI_BIN", get_fake_pi_runner_path())
         .env("WAAP_FAKE_PI_SCRIPT", fake)
         .env("WAAP_FAKE_PID", &pid)
@@ -667,7 +795,7 @@ fn test_startup_protocol_failures_reap_child_without_submitting_task_work() {
         let fake = project.root.join("startup-pi");
         let pid = project.root.join("startup-pi.pid");
         write_pi_script(&fake, &format!("IFS= read -r state\nprintf '%s\\n' '{response}'\n"));
-        let output = wait_output(project.build_command().args(["agent", "run", "--agent-id", &agent_id])
+        let output = wait_output(project.build_command().args(["agent", "prompt", "--delivery=start", "--agent-id", &agent_id, "--text", TASK])
             .env("WAAP_PI_BIN", get_fake_pi_runner_path()).env("WAAP_FAKE_PI_SCRIPT", fake).env("WAAP_FAKE_PID", &pid)
             .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap());
         assert!(!output.status.success());
@@ -708,7 +836,15 @@ done
     );
     let runner = project
         .build_command()
-        .args(["agent", "run", "--agent-id", &agent_id])
+        .args([
+            "agent",
+            "prompt",
+            "--delivery=start",
+            "--agent-id",
+            &agent_id,
+            "--text",
+            TASK,
+        ])
         .env("WAAP_PI_BIN", get_fake_pi_runner_path())
         .env("WAAP_FAKE_PI_SCRIPT", fake)
         .env("WAAP_FAKE_PID", &pid)
@@ -767,7 +903,15 @@ done
         );
         let runner = project
             .build_command()
-            .args(["agent", "run", "--agent-id", &agent_id])
+            .args([
+                "agent",
+                "prompt",
+                "--delivery=start",
+                "--agent-id",
+                &agent_id,
+                "--text",
+                TASK,
+            ])
             .env("WAAP_PI_BIN", get_fake_pi_runner_path())
             .env("WAAP_FAKE_PI_SCRIPT", fake)
             .env("WAAP_FAKE_PID", &pid)

@@ -39,9 +39,7 @@ impl ClaudeBackend {
         );
         Ok(AgentSessionRun::new(
             session_id,
-            Runner::Claude(ClaudeRunner {
-                child: spawn_claude_attached(&command)?,
-            }),
+            Runner::Claude(ClaudeRunner::Prepared(command)),
             receiver,
         ))
     }
@@ -53,20 +51,30 @@ impl ClaudeBackend {
     }
 }
 
-pub(super) struct ClaudeRunner {
-    child: AgentProcess,
+pub(super) enum ClaudeRunner {
+    Prepared(ClaudeRunCommand),
+    Attached(AgentProcess),
 }
 impl ClaudeRunner {
     pub(super) async fn run(&mut self, receiver: Receiver<Command>) -> io::Result<RunOutcome> {
+        if let Self::Prepared(command) = self {
+            *self = Self::Attached(spawn_claude_attached(command)?);
+        }
+        let Self::Attached(child) = self else {
+            unreachable!()
+        };
         super::unsupported_commands::await_with_unsupported_commands(
-            async { Ok(RunOutcome::from_exit_status(self.child.wait().await?)) },
+            async { Ok(RunOutcome::from_exit_status(child.wait().await?)) },
             receiver,
             "claude",
         )
         .await
     }
     pub(super) async fn cleanup(&mut self) -> io::Result<()> {
-        self.child.terminate().await
+        match self {
+            Self::Prepared(_) => Ok(()),
+            Self::Attached(child) => child.terminate().await,
+        }
     }
 }
 
@@ -76,7 +84,7 @@ struct ClaudeRunConfig {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct ClaudeRunCommand {
+pub(super) struct ClaudeRunCommand {
     program: String,
     args: Vec<String>,
     working_dir: PathBuf,
@@ -145,6 +153,7 @@ fn build_claude_run_command(
         args.push("--model".to_string());
         args.push(model.clone());
     }
+    args.push("--".to_string());
     args.push(prompt.to_string());
 
     ClaudeRunCommand {
@@ -179,7 +188,7 @@ mod tests {
             .stdin(Stdio::piped());
         let mut child = super::AgentProcess::spawn(&mut command).unwrap();
         let release = child.take_stdin().unwrap();
-        (super::ClaudeRunner { child }, release)
+        (super::ClaudeRunner::Attached(child), release)
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -205,7 +214,10 @@ mod tests {
             RunOutcome::Failed(std::process::ExitCode::from(7))
         );
         drop(execution);
-        assert_eq!(runner.child.wait().await.unwrap().code(), Some(7));
+        let super::ClaudeRunner::Attached(child) = &mut runner else {
+            unreachable!()
+        };
+        assert_eq!(child.wait().await.unwrap().code(), Some(7));
         runner.cleanup().await.unwrap();
         assert!(matches!(
             dispatcher
@@ -222,7 +234,10 @@ mod tests {
     async fn concrete_runner_completion_releases_queued_replies() {
         let (mut runner, mut release) = pending_runner();
         release.write_all(b"finish\n").await.unwrap();
-        assert_eq!(runner.child.wait().await.unwrap().code(), Some(7));
+        let super::ClaudeRunner::Attached(child) = &mut runner else {
+            unreachable!()
+        };
+        assert_eq!(child.wait().await.unwrap().code(), Some(7));
         let (dispatcher, receiver) = CommandDispatcher::create_channel();
         let steering = dispatcher.steer("queued", Instant::now() + Duration::from_secs(30));
         tokio::pin!(steering);
@@ -270,7 +285,10 @@ mod tests {
                 })
             ));
             runner.cleanup().await.unwrap();
-            assert!(!runner.child.wait().await.unwrap().success());
+            let super::ClaudeRunner::Attached(child) = &mut runner else {
+                unreachable!()
+            };
+            assert!(!child.wait().await.unwrap().success());
         }
     }
 
@@ -281,9 +299,8 @@ mod tests {
             args: vec!["-c".into(), "while :; do :; done".into()],
             working_dir: std::env::temp_dir(),
         };
-        let mut runner = super::super::backend::Runner::Claude(super::ClaudeRunner {
-            child: spawn_claude_attached(&command).unwrap(),
-        });
+        let mut runner =
+            super::super::backend::Runner::Claude(super::ClaudeRunner::Prepared(command));
         crate::agent::control::tests::assert_backend_socket_rejection(&mut runner, "claude").await;
         runner.cleanup().await.unwrap();
     }
@@ -366,6 +383,7 @@ mod tests {
                     "{\"sandbox\":{\"enabled\":false}}".to_string(),
                     "--model".to_string(),
                     "opus".to_string(),
+                    "--".to_string(),
                     "Complete when instructions in /agents/aa-3881fda0/agent.md are satisfied"
                         .to_string(),
                 ],

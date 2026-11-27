@@ -10,8 +10,8 @@ use serde_json::json;
 
 use crate::frontmatter::{
     invalid_frontmatter_error, parse_frontmatter, parse_frontmatter_from_contents,
-    reject_unknown_fields, require_datetime, require_optional_string,
-    require_optional_string_choice, require_string_choice, serialize_record,
+    reject_unknown_fields, require_datetime, require_optional_string, require_string_choice,
+    serialize_record,
 };
 use crate::ids::{available_record_id, is_record_id};
 use crate::record::{markdown_body_after_frontmatter, WaapRecordKind};
@@ -28,6 +28,7 @@ mod new;
 mod opencode;
 mod pi;
 mod process;
+mod prompt;
 mod run;
 mod runtime;
 mod steer;
@@ -45,8 +46,7 @@ static PI_ENV_LOCK: Mutex<()> = Mutex::new(());
 pub(crate) use get::{load_agent_content, load_agent_report, print_agent_content_report};
 pub(crate) use list::{list_agents, print_agent_list};
 pub(crate) use new::{create_agent, print_created_agent_report};
-pub(crate) use run::run_agent;
-pub(crate) use steer::{print_steering_report, steer_agent};
+pub(crate) use prompt::{prompt_agent, read_prompt, PromptRequest};
 pub(crate) use stop::{print_agent_stop_report, stop_agents_with_systems};
 pub(crate) use update::{print_updated_agent_report, update_agent};
 
@@ -56,7 +56,7 @@ pub(crate) struct AgentMetadata {
     pub(crate) creation_date: String,
     pub(crate) status: String,
     pub(crate) session_id: Option<String>,
-    pub(crate) system: Option<AgentSystem>,
+    pub(crate) system: AgentSystem,
 }
 
 impl AgentMetadata {
@@ -81,7 +81,7 @@ impl AgentMetadata {
         require_optional_string(value, "role", path, &mut errors);
         require_string_choice(value, "status", &AgentStatus::labels(), path, &mut errors);
         require_optional_string(value, "session_id", path, &mut errors);
-        require_optional_string_choice(value, "system", &AgentSystem::labels(), path, &mut errors);
+        require_string_choice(value, "system", &AgentSystem::labels(), path, &mut errors);
         if !errors.is_empty() {
             return Err(errors);
         }
@@ -103,7 +103,8 @@ impl AgentMetadata {
             system: value
                 .get("system")
                 .and_then(Value::as_str)
-                .and_then(AgentSystem::parse),
+                .and_then(AgentSystem::parse)
+                .expect("validated system"),
         })
     }
 
@@ -117,9 +118,7 @@ impl AgentMetadata {
         if let Some(session_id) = &self.session_id {
             lines.push_str(&format!("session_id = {}\n", toml_string(session_id)));
         }
-        if let Some(system) = &self.system {
-            lines.push_str(&format!("system = {}\n", toml_string(system.as_str())));
-        }
+        lines.push_str(&format!("system = {}\n", toml_string(self.system.as_str())));
         lines
     }
 }
@@ -226,6 +225,7 @@ impl AgentStatus {
         let allowed = matches!(
             (self, next),
             (Self::Ready, Self::Running | Self::Aborted)
+                | (Self::Aborted | Self::Completed, Self::Running)
                 | (
                     Self::Running,
                     Self::Completed | Self::Failed | Self::Aborted
@@ -343,7 +343,7 @@ impl AgentSystem {
                 if let Some(option) = option {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        format!("{option} is only supported with --system codex or pi"),
+                        format!("{option} is only supported for agents registered with --system codex or pi"),
                     ));
                 }
             }
@@ -408,6 +408,7 @@ pub(crate) fn print_agent_report_human(header: &str, report: &AgentReport) {
     }
     println!("Creation date: {}", report.metadata.creation_date);
     println!("Status: {}", report.metadata.status);
+    println!("System: {}", report.metadata.system.as_str());
     if let Some(session_id) = &report.metadata.session_id {
         println!("Session ID: {session_id}");
     }
@@ -423,6 +424,7 @@ pub(crate) fn agent_report_json(report: &AgentReport) -> serde_json::Value {
             "creation_date": report.metadata.creation_date,
             "status": report.metadata.status,
             "session_id": report.metadata.session_id,
+            "system": report.metadata.system.as_str(),
         },
         "file_size": report.file_size,
     })
@@ -446,7 +448,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = super::agent_path(dir.path(), "aa-test");
         let record = |version| {
-            format!("+++\nname = \"{version}\"\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"ready\"\n+++\n{version}")
+            format!("+++\nname = \"{version}\"\ncreation_date = 2026-06-18T15:00:34Z\nstatus = \"ready\"\nsystem = \"pi\"\n+++\n{version}")
         };
         crate::state::write_record_atomically(&path, &record("a")).unwrap();
         std::thread::scope(|scope| {
@@ -552,6 +554,8 @@ mod tests {
         let allowed = [
             (AgentStatus::Ready, AgentStatus::Running),
             (AgentStatus::Ready, AgentStatus::Aborted),
+            (AgentStatus::Completed, AgentStatus::Running),
+            (AgentStatus::Aborted, AgentStatus::Running),
             (AgentStatus::Running, AgentStatus::Completed),
             (AgentStatus::Running, AgentStatus::Failed),
             (AgentStatus::Running, AgentStatus::Aborted),
@@ -578,7 +582,7 @@ mod tests {
             creation_date: "2026-06-18T15:00:34Z".to_string(),
             status: "ready".to_string(),
             session_id: None,
-            system: None,
+            system: AgentSystem::Pi,
         };
 
         transition_agent_status(&mut metadata, AgentStatus::Running).unwrap();
@@ -705,7 +709,7 @@ mod tests {
                 creation_date: "2026-06-18T15:00:34Z".to_string(),
                 status: "running".to_string(),
                 session_id: Some("ses_123".to_string()),
-                system: None,
+                system: AgentSystem::Pi,
             },
             file_size: 456,
         };
@@ -720,6 +724,7 @@ mod tests {
                     "creation_date": "2026-06-18T15:00:34Z",
                     "status": "running",
                     "session_id": "ses_123",
+                    "system": "pi",
                 },
                 "file_size": 456,
             })

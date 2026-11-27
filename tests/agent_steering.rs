@@ -13,6 +13,8 @@ use std::time::Duration;
 use common::{git, init_repo, isolate_git_config};
 use serde_json::{json, Value};
 
+const TASK: &str = "  # Test 雪\n\n'quoted' `$HOME`\n";
+
 struct Fixture {
     repo: tempfile::TempDir,
     runtime: tempfile::TempDir,
@@ -92,7 +94,15 @@ impl Fixture {
 
     fn steer(&self, id: &str, prompt: &str) -> Command {
         let mut command = self.command();
-        command.args(["agent", "steer", "--agent-id", id, "--prompt", prompt]);
+        command.args([
+            "agent",
+            "prompt",
+            "--delivery=steer",
+            "--agent-id",
+            id,
+            "--text",
+            prompt,
+        ]);
         command
     }
 
@@ -139,7 +149,11 @@ fn cli_preserves_prompt_and_state_with_human_and_json_success() {
     let listener = fixture.listener();
     let before = fixture.snapshot();
     let prompt = "  雪\n\"quotes\" 'apostrophe' $(touch injected) ; & `pwd`  ";
-    for format in ["human-readable", "json"] {
+    for (format, delivery) in [
+        ("human-readable", Some("--delivery=asap")),
+        ("json", None),
+        ("json", Some("--delivery=steer")),
+    ] {
         thread::scope(|scope| {
             let server = scope.spawn(|| {
                 serve(&listener, |request| {
@@ -149,7 +163,9 @@ fn cli_preserves_prompt_and_state_with_human_and_json_success() {
                 })
             });
             let output = fixture
-                .steer("aa-test", prompt)
+                .command()
+                .args(["agent", "prompt", "--agent-id", "aa-test", "--text", prompt])
+                .args(delivery)
                 .args(["--output-format", format])
                 .output()
                 .unwrap();
@@ -163,6 +179,7 @@ fn cli_preserves_prompt_and_state_with_human_and_json_success() {
             } else {
                 let stdout = String::from_utf8(output.stdout).unwrap();
                 assert!(stdout.contains("aa-test") && stdout.contains("accepted"));
+                assert!(!stdout.contains("asap") && !stdout.contains("Delivery:"));
             }
             let request = server.join().unwrap();
             assert_eq!(request["prompt"], prompt);
@@ -173,6 +190,45 @@ fn cli_preserves_prompt_and_state_with_human_and_json_success() {
         assert_eq!(fixture.snapshot(), before);
         assert!(!fixture.repo.path().join("injected").exists());
     }
+}
+
+#[test]
+fn disconnect_after_request_never_connects_to_a_replacement_or_starts() {
+    let fixture = Fixture::new();
+    let old = fixture.listener();
+    let before = fixture.snapshot();
+    thread::scope(|scope| {
+        let server = scope.spawn(|| {
+            let (stream, _) = old.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["prompt"], TASK);
+            assert_eq!(request["method"], "steer");
+            fs::remove_file(fixture.socket()).unwrap();
+            let replacement = fixture.listener();
+            stream.shutdown(std::net::Shutdown::Both).unwrap();
+            replacement
+        });
+        let output = fixture
+            .command()
+            .args(["agent", "prompt", "--agent-id", "aa-test", "--text", TASK])
+            .output()
+            .unwrap();
+        let error = diagnostic(&output);
+        assert!(error.contains("acceptance is unknown"), "{error}");
+        assert!(error.contains("no automatic retry"), "{error}");
+        let replacement = server.join().unwrap();
+        replacement.set_nonblocking(true).unwrap();
+        assert_eq!(
+            replacement.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    });
+    assert_eq!(fixture.snapshot(), before);
 }
 
 #[test]
@@ -222,10 +278,22 @@ fn run_logs_unhealthy_local_agent_exit_by_default() {
         ("kill -TERM $$", "signal: 15"),
     ] {
         let fixture = Fixture::new();
-        fixture.record("ready", None);
+        fixture.record("ready", Some("claude"));
         let bin = tempfile::tempdir().unwrap();
         let claude = bin.path().join("claude");
-        fs::write(&claude, format!("#!/bin/sh\n{script}\n")).unwrap();
+        let check_submission = r#"set -eu
+session=
+previous=
+for arg in "$@"; do
+    if [ "$previous" = --session-id ]; then session=$arg; fi
+    previous=$arg
+done
+[ "$previous" = "$WAAP_TEST_PROMPT" ]
+[ -n "$session" ]
+grep -Fqx 'status = "running"' "$WAAP_TEST_RECORD"
+grep -Fqx "session_id = \"$session\"" "$WAAP_TEST_RECORD"
+"#;
+        fs::write(&claude, format!("#!/bin/sh\n{check_submission}{script}\n")).unwrap();
         fs::set_permissions(&claude, fs::Permissions::from_mode(0o700)).unwrap();
         let path = std::env::join_paths(
             [bin.path().to_path_buf()]
@@ -236,14 +304,17 @@ fn run_logs_unhealthy_local_agent_exit_by_default() {
         let output = fixture
             .command()
             .env("PATH", path)
+            .env("WAAP_TEST_RECORD", fixture.record_path())
+            .env("WAAP_TEST_PROMPT", TASK)
             .env_remove("WAAP_LOG_LEVEL")
             .args([
                 "agent",
-                "run",
+                "prompt",
+                "--delivery=start",
                 "--agent-id",
                 "aa-test",
-                "--system",
-                "claude",
+                "--text",
+                TASK,
             ])
             .output()
             .unwrap();
@@ -268,14 +339,22 @@ fn run_preserves_status_validation_and_ready_failure_with_missing_runtime() {
         let before = fixture.snapshot();
         let output = fixture
             .command()
-            .args(["agent", "run", "--agent-id", agent_id, "--system", "claude"])
+            .args([
+                "agent",
+                "prompt",
+                "--delivery=start",
+                "--agent-id",
+                agent_id,
+                "--text",
+                TASK,
+            ])
             .env_remove("XDG_RUNTIME_DIR")
             .output()
             .unwrap();
         assert!(diagnostic(&output).contains(message));
         assert_eq!(fixture.snapshot(), before);
     }
-    fixture.record("ready", None);
+    fixture.record("ready", Some("claude"));
     let state = fixture.repo.path().join(".state");
     let before = git(&state, &["rev-parse", "HEAD"]);
     let worktree_paths = || {
@@ -290,11 +369,12 @@ fn run_preserves_status_validation_and_ready_failure_with_missing_runtime() {
         .command()
         .args([
             "agent",
-            "run",
+            "prompt",
+            "--delivery=start",
             "--agent-id",
             "aa-test",
-            "--system",
-            "claude",
+            "--text",
+            TASK,
         ])
         .env_remove("XDG_RUNTIME_DIR")
         .output()
@@ -313,7 +393,7 @@ fn run_preserves_status_validation_and_ready_failure_with_missing_runtime() {
 fn cli_surfaces_backend_rejections_and_uncertainty_without_backend_filtering_or_state_changes() {
     let fixture = Fixture::new();
     let listener = fixture.listener();
-    for system in [Some("claude"), Some("opencode"), None] {
+    for system in [Some("claude"), Some("opencode"), Some("pi")] {
         fixture.record("running", system);
         let before = fixture.snapshot();
         let message = format!(

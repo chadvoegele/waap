@@ -73,20 +73,7 @@ pub(crate) fn stop_agents_with_systems(
     };
     let mut agent_stops = Vec::new();
     for report in selected {
-        let mut backend = report
-            .metadata
-            .system
-            .as_ref()
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "invalid agent metadata: running agent {} has no persisted system; restore its system field before retrying stop",
-                        report.agent_id
-                    ),
-                )
-            })?
-            .backend(None)?;
+        let mut backend = report.metadata.system.backend(None)?;
         agent_stops.push(stop_agent_session(
             waap_root,
             &control_root,
@@ -232,10 +219,10 @@ mod tests {
         write_agent(dir.path(), "aa-test", "running");
         let mut report = load_agent_report(dir.path(), "aa-test").unwrap();
         for system in [
-            None,
-            Some(AgentSystem::Claude),
-            Some(AgentSystem::Opencode),
-            Some(AgentSystem::Codex),
+            AgentSystem::Pi,
+            AgentSystem::Claude,
+            AgentSystem::Opencode,
+            AgentSystem::Codex,
         ] {
             report.metadata.system = system;
             for status in ["running", "aborted", "completed"] {
@@ -602,18 +589,20 @@ mod tests {
         contender.try_lock().unwrap();
         contender.unlock().unwrap();
 
-        let error = crate::agent::run::run_agent(
+        let error = super::super::prompt::decide_and_claim(
             dir.path(),
-            dir.path(),
-            Err(io::Error::other("backend must not start")),
-            &crate::cli::OutputFormat::Json,
-            "aa-test",
-            &crate::agent::AgentSystem::Codex,
-            &crate::agent::AgentRunOptions::default(),
+            &super::super::prompt::PromptRequest {
+                agent_id: "aa-test".into(),
+                delivery: crate::cli::Delivery::Start,
+                text: "not submitted".into(),
+                options: Default::default(),
+            },
+            |_, _| -> io::Result<()> { panic!("backend must not start") },
         )
-        .unwrap_err();
+        .err()
+        .unwrap();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert!(error.to_string().contains("aborted"), "{error}");
+        assert!(error.to_string().contains("no saved session"), "{error}");
     }
 
     #[test]
@@ -766,7 +755,7 @@ mod tests {
                 creation_date: "2026-06-18T15:00:34Z".to_string(),
                 status: "aborted".to_string(),
                 session_id: Some("ses_123".to_string()),
-                system: None,
+                system: crate::agent::AgentSystem::Pi,
             },
             file_size: 456,
         }];
@@ -791,6 +780,7 @@ mod tests {
                             "creation_date": "2026-06-18T15:00:34Z",
                             "status": "aborted",
                             "session_id": "ses_123",
+                            "system": "pi",
                         },
                         "file_size": 456,
                     }

@@ -68,7 +68,7 @@ fn unrelated_commands_work_without_runtime_directory() {
     init_repo(dir.path());
     for (input, args) in [
         ("", vec!["init"]),
-        ("# Agent\n", vec!["agent", "new", "--name", "Test"]),
+        ("", vec!["agent", "new", "--name", "Test"]),
         ("# Ticket\n", vec!["ticket", "new", "--name", "Task"]),
         ("", vec!["check"]),
         ("", vec!["agent", "get", "--agent-id", "aa-test"]),
@@ -80,8 +80,8 @@ fn unrelated_commands_work_without_runtime_directory() {
                 "update",
                 "--agent-id",
                 "aa-test",
-                "--set-status",
-                "aborted",
+                "--set-name",
+                "Renamed",
             ],
         ),
         ("", vec!["agent", "stop"]),
@@ -197,12 +197,8 @@ fn agent_and_ticket_commands_do_not_initialize_missing_state() {
     let dir = tempdir().unwrap();
     init_repo(dir.path());
 
-    let agent = waap(dir.path(), "# Agent\n", &["agent", "new"]);
-    let ticket = waap(
-        dir.path(),
-        "# Ticket\n",
-        &["ticket", "new", "--name", "Task"],
-    );
+    let agent = waap(dir.path(), "", &["agent", "new"]);
+    let ticket = waap(dir.path(), "", &["ticket", "new", "--name", "Task"]);
 
     assert!(!agent.status.success());
     assert!(!ticket.status.success());
@@ -218,12 +214,8 @@ fn agent_and_ticket_commands_do_not_operate_on_invalid_state() {
     assert!(waap(dir.path(), "", &["init"]).status.success());
     std::fs::create_dir_all(state_root(dir.path()).join("agents/invalid-agent")).unwrap();
 
-    let agent = waap(dir.path(), "# Agent\n", &["agent", "new"]);
-    let ticket = waap(
-        dir.path(),
-        "# Ticket\n",
-        &["ticket", "new", "--name", "Task"],
-    );
+    let agent = waap(dir.path(), "", &["agent", "new"]);
+    let ticket = waap(dir.path(), "", &["ticket", "new", "--name", "Task"]);
 
     assert!(!agent.status.success());
     assert!(!ticket.status.success());
