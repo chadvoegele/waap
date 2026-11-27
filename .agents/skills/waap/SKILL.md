@@ -105,7 +105,7 @@ It is helpful to ensure continuity across agents, to also instruct the agent to 
 
 ## Agent Parallelization
 
-`waap agent run` starts the backend at the root of the application checkout containing the invocation directory. It does not create or remove Git worktrees. The [Developer instructions](./roles/developer/agent.md) tell agents how to create and clean up isolated worktrees; roles that only change shared state do not need a worktree.
+`waap agent run` starts the agent at the root of the launch checkout. The [Developer role](./roles/developer/agent.md) creates and removes its own worktree.
 
 ## Agent Frontmatter
 
